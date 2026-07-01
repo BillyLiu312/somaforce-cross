@@ -72,6 +72,7 @@ somaforce_cross/
 scripts/
   diagnose_scaffold_rollouts.py
   export_scaffold_sonic_motion.py
+  novnc_desktop.sh
   print_sonic_scaffold_overrides.py
   record_scaffold_rollout.py
   verify_scaffold_trajectories.py
@@ -142,6 +143,47 @@ PYTHONUNBUFFERED=1 python scripts/verify_sonic_scaffold_env.py \
 Box uses Sonic's existing rigid-object USD hook. Door remains scaffold-motion
 ready and uses a hinged Isaac articulation scene hook rather than Sonic's rigid
 object path.
+
+Browser-visible noVNC desktop:
+
+```text
+scripts/novnc_desktop.sh start --web-port 6080
+```
+
+Forward port `6080` from the server, then open:
+
+```text
+http://localhost:6080/vnc.html?host=localhost&port=6080&autoconnect=true&resize=scale
+```
+
+The script prints `vnc_password=...`; use that password if noVNC prompts for
+VNC authentication.
+
+Run a headed Isaac/record command on the same desktop:
+
+```text
+scripts/novnc_desktop.sh run --web-port 6080 -- \
+  conda run -n isaaclab python scripts/record_scaffold_rollout.py \
+    --task push_pull_box \
+    --interaction-mode push \
+    --generate-default-box-usd \
+    --record-video \
+    --no-headless
+```
+
+For Isaac/Omniverse interactive GUI, prefer attaching noVNC to an existing
+GPU-backed Xorg display:
+
+```text
+scripts/novnc_desktop.sh start \
+  --backend attach \
+  --attach-display :0 \
+  --web-port 6080
+```
+
+The default `desktop` backend is useful for a browser-visible Linux desktop and
+ordinary X11 tools. Isaac's Vulkan GUI may fail on Xvnc because it needs a
+display surface backed by the NVIDIA driver.
 
 ## Next Step
 
