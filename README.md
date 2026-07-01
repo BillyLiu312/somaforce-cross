@@ -69,6 +69,7 @@ configs/
 somaforce_cross/
   scaffold/
 scripts/
+  diagnose_scaffold_rollouts.py
   export_scaffold_sonic_motion.py
   print_sonic_scaffold_overrides.py
   verify_scaffold_trajectories.py

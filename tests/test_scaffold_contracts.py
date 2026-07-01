@@ -11,6 +11,7 @@ from somaforce_cross.scaffold import (
     MotionTrajectoryScaffold,
     ScaffoldTask,
     SonicScaffoldAdapter,
+    summarize_first_scaffold_rollouts,
     make_g1_box_sonic_binding,
     make_g1_door_sonic_binding,
     make_sonic_motion_library,
@@ -172,6 +173,26 @@ def test_g1_task_trajectory_dispatches_first_scaffold_tasks() -> None:
     assert box.time_s is not None
     assert door.joint_pos.shape == (5, len(G1_FULL_JOINT_NAMES))
     assert box.joint_pos.shape == (6, len(G1_FULL_JOINT_NAMES))
+
+
+def test_scaffold_rollout_diagnostics_cover_first_task_variants() -> None:
+    summaries = summarize_first_scaffold_rollouts(num_frames=8, duration_s=0.2)
+
+    assert [summary.label for summary in summaries] == [
+        "push_pull_door_push",
+        "push_pull_door_pull",
+        "push_pull_box_push",
+        "push_pull_box_pull",
+    ]
+    for summary in summaries:
+        assert summary.a_nom_shape == (8, len(G1_FULL_JOINT_NAMES))
+        assert summary.joint_delta_norm > 0.0
+        assert summary.max_abs_a_nom > 0.0
+        assert summary.direction_ok
+    assert summaries[0].right_hand_x_delta > 0.0
+    assert summaries[1].right_hand_x_delta < 0.0
+    assert summaries[2].left_hand_x_delta > 0.0
+    assert summaries[3].left_hand_x_delta < 0.0
 
 
 def test_sonic_motion_entry_contains_motion_lib_fields() -> None:

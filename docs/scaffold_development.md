@@ -165,6 +165,18 @@ box_push: a_nom=(29,) hand_ref=(2, 3) body_ref=(1, 6) cmd_6d=(6,)
 box_pull: a_nom=(29,) hand_ref=(2, 3) body_ref=(1, 6) cmd_6d=(6,)
 ```
 
+Scaffold-only rollout diagnostics:
+
+```text
+python scripts/diagnose_scaffold_rollouts.py
+```
+
+Expected output includes all four selected variants with `direction_ok=1` and:
+
+```text
+scaffold_rollout_diagnostics_ok=1
+```
+
 Sonic motion export verification:
 
 ```text

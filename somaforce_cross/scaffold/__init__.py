@@ -7,6 +7,11 @@ from somaforce_cross.scaffold.contracts import (
     ScaffoldOutput,
     ScaffoldTask,
 )
+from somaforce_cross.scaffold.diagnostics import (
+    ScaffoldRolloutSummary,
+    summarize_first_scaffold_rollouts,
+    summarize_scaffold_rollout,
+)
 from somaforce_cross.scaffold.scenes import (
     G1_PUSH_PULL_BOX_SCENE,
     G1_PUSH_PULL_DOOR_SCENE,
@@ -48,6 +53,7 @@ __all__ = [
     "MotionTrajectory",
     "MotionTrajectoryScaffold",
     "ScaffoldOutput",
+    "ScaffoldRolloutSummary",
     "ScaffoldSceneSpec",
     "ScaffoldTask",
     "SonicManagerEnvBinding",
@@ -65,6 +71,8 @@ __all__ = [
     "make_g1_push_pull_door_trajectory",
     "make_g1_task_trajectory",
     "motion_trajectory_to_sonic_entry",
+    "summarize_first_scaffold_rollouts",
+    "summarize_scaffold_rollout",
     "write_single_task_sonic_object_motion_file",
     "write_single_task_sonic_motion_file",
     "write_sonic_motion_file",
