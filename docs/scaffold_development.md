@@ -119,6 +119,22 @@ Verified:
   `SonicScaffoldAdapter(...).get_output().a_nom` are readable;
 - local scaffold tests pass with `python -m pytest -q`.
 
+For a compact gate-by-gate checklist, see `docs/scaffold_verification_matrix.md`.
+
+Sonic import verification:
+
+```text
+python scripts/verify_sonic_imports.py
+```
+
+Expected output includes:
+
+```text
+gear_sonic_import_ok=gear_sonic
+tracking_command_import_ok=TrackingCommand
+residual_joint_pos_action_import_ok=residual_joint_pos_action
+```
+
 Verification command:
 
 ```text

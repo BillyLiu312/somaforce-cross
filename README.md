@@ -61,6 +61,7 @@ docs/
   implementation_plan.md
   module_contracts.md
   scaffold_development.md
+  scaffold_verification_matrix.md
 figures/
   somaforce_cross_pipeline.png
 configs/
@@ -71,6 +72,7 @@ scripts/
   export_scaffold_sonic_motion.py
   print_sonic_scaffold_overrides.py
   verify_scaffold_trajectories.py
+  verify_sonic_imports.py
   verify_sonic_scaffold_env.py
 tests/
 ```
