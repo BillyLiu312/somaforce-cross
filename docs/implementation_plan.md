@@ -12,6 +12,12 @@ SomaForce-Cross follows the architecture in the research repository:
 ../somaforce/docs/figures/06_somaforce_rld_s_architecture_overview_ft_cross.png
 ```
 
+A copy is included in this repository:
+
+```text
+figures/somaforce_cross_pipeline.png
+```
+
 The selected route is:
 
 ```text

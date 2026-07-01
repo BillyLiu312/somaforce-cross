@@ -20,6 +20,10 @@ Primary references:
 - `../somaforce/method/logging_and_metrics_spec.md`
 - `../somaforce/method/experiment_protocol.md`
 
+Current pipeline figure:
+
+![SomaForce-Cross Pipeline](figures/somaforce_cross_pipeline.png)
+
 ## Current Purpose
 
 This repository should now contain:
@@ -74,7 +78,7 @@ docs/
   implementation_plan.md
   module_contracts.md
 figures/
-  .gitkeep
+  somaforce_cross_pipeline.png
 configs/
   .gitkeep
 ```
