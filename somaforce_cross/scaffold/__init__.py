@@ -15,6 +15,12 @@ from somaforce_cross.scaffold.scenes import (
     make_g1_push_pull_door_scaffold,
 )
 from somaforce_cross.scaffold.sonic_adapter import SonicScaffoldAdapter
+from somaforce_cross.scaffold.sonic_motion import (
+    make_sonic_motion_library,
+    motion_trajectory_to_sonic_entry,
+    write_single_task_sonic_motion_file,
+    write_sonic_motion_file,
+)
 from somaforce_cross.scaffold.task_trajectories import (
     InteractionMode,
     make_g1_push_pull_box_trajectory,
@@ -35,9 +41,13 @@ __all__ = [
     "ScaffoldSceneSpec",
     "ScaffoldTask",
     "SonicScaffoldAdapter",
+    "make_sonic_motion_library",
     "make_g1_push_pull_box_scaffold",
     "make_g1_push_pull_box_trajectory",
     "make_g1_push_pull_door_scaffold",
     "make_g1_push_pull_door_trajectory",
     "make_g1_task_trajectory",
+    "motion_trajectory_to_sonic_entry",
+    "write_single_task_sonic_motion_file",
+    "write_sonic_motion_file",
 ]

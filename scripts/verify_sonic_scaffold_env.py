@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--num-envs", type=int, default=1)
+    parser.add_argument("--motion-source", choices=("static", "scaffold-task"), default="static")
+    parser.add_argument("--task", choices=("push_pull_door", "push_pull_box"), default="push_pull_door")
+    parser.add_argument("--interaction-mode", choices=("push", "pull"), default="push")
+    parser.add_argument("--motion-frames", type=int, default=101)
+    parser.add_argument("--motion-duration-s", type=float, default=2.0)
+    parser.add_argument("--motion-fps", type=int, default=50)
     parser.add_argument("--instantiate-only", action="store_true")
     return parser.parse_args()
 
@@ -73,8 +79,25 @@ def main() -> None:
     # Isaac AppLauncher also parses sys.argv. Keep our script-specific flags from
     # being interpreted by Isaac/Kit after argparse has consumed them.
     sys.argv = [sys.argv[0]]
-    write_synthetic_motion(args.motion_file)
-    print(f"synthetic_motion={args.motion_file}", flush=True)
+    if args.motion_source == "static":
+        write_synthetic_motion(args.motion_file)
+        task_name = "static"
+    else:
+        from somaforce_cross.scaffold import ScaffoldTask, write_single_task_sonic_motion_file
+
+        task = ScaffoldTask(args.task)
+        write_single_task_sonic_motion_file(
+            args.motion_file,
+            task=task,
+            mode=args.interaction_mode,
+            num_frames=args.motion_frames,
+            duration_s=args.motion_duration_s,
+            fps=args.motion_fps,
+        )
+        task_name = f"{task.value}:{args.interaction_mode}"
+    print(f"motion_file={args.motion_file}", flush=True)
+    print(f"motion_source={args.motion_source}", flush=True)
+    print(f"motion_task={task_name}", flush=True)
     verify_dir = Path("/tmp/somaforce_sonic_verify")
 
     from isaaclab.app import AppLauncher
@@ -132,9 +155,14 @@ def main() -> None:
         wrapper.reset(flatten_dict_obs=False)
         motion_cmd = env.command_manager.get_term("motion")
         a_nom = residual_joint_pos_action(env, command_name="motion")
+        task = (
+            ScaffoldTask(args.task)
+            if args.motion_source == "scaffold-task"
+            else ScaffoldTask.PUSH_PULL_DOOR
+        )
         scaffold = SonicScaffoldAdapter(
             env,
-            task=ScaffoldTask.PUSH_PULL_DOOR,
+            task=task,
         ).get_output()
 
         print(f"env_ok={env.num_envs}", flush=True)

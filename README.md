@@ -68,6 +68,7 @@ configs/
 somaforce_cross/
   scaffold/
 scripts/
+  export_scaffold_sonic_motion.py
   verify_scaffold_trajectories.py
   verify_sonic_scaffold_env.py
 tests/
@@ -85,8 +86,23 @@ motion trajectory
 SomaForce-Cross force semantics and bounded residual control are added after
 `a_nom`; the scaffold code must not consume privileged force labels.
 
+Current scaffold motion export:
+
+```text
+python scripts/export_scaffold_sonic_motion.py --output /tmp/somaforce_g1_scaffold_motions.pkl
+```
+
+This writes Sonic motion-lib entries for:
+
+```text
+somaforce_g1_door_push
+somaforce_g1_door_pull
+somaforce_g1_box_push
+somaforce_g1_box_pull
+```
+
 ## Next Step
 
-Next engineering step: export the G1 door/box scaffold trajectories into
-Sonic-compatible motion files and bind them into Isaac Lab manager-env variants
-for scaffold-only rollout tests.
+Next engineering step: bind the exported G1 door/box task motions into Isaac Lab
+manager-env variants for scaffold-only rollout tests with actual door and box
+assets.

@@ -30,6 +30,7 @@ somaforce_cross/scaffold/contracts.py
 somaforce_cross/scaffold/trajectory.py
 somaforce_cross/scaffold/sonic_adapter.py
 somaforce_cross/scaffold/task_trajectories.py
+somaforce_cross/scaffold/sonic_motion.py
 ```
 
 `MotionTrajectoryScaffold` is a pure-Python scaffold used for early tests. It
@@ -55,6 +56,18 @@ the first scene variants:
 These trajectories provide joint positions, hand references, body references,
 timestamps, and `cmd_6d`. They do not model force, contact truth, hinge state, or
 box state.
+
+`sonic_motion.py` exports these trajectories into Sonic motion-lib joblib files
+with the fields Sonic expects:
+
+```text
+root_trans_offset
+pose_aa
+dof
+root_rot
+smpl_joints
+fps
+```
 
 ## Scene Config Seeds
 
@@ -126,6 +139,51 @@ box_push: a_nom=(29,) hand_ref=(2, 3) body_ref=(1, 6) cmd_6d=(6,)
 box_pull: a_nom=(29,) hand_ref=(2, 3) body_ref=(1, 6) cmd_6d=(6,)
 ```
 
+Sonic motion export verification:
+
+```text
+python scripts/export_scaffold_sonic_motion.py \
+  --output /tmp/somaforce_g1_scaffold_motions.pkl \
+  --num-frames 101 \
+  --duration-s 2.0 \
+  --fps 50
+```
+
+Expected motion keys:
+
+```text
+somaforce_g1_door_push
+somaforce_g1_door_pull
+somaforce_g1_box_push
+somaforce_g1_box_pull
+```
+
+Task-motion Sonic manager-env checks:
+
+```text
+PYTHONUNBUFFERED=1 python scripts/verify_sonic_scaffold_env.py \
+  --motion-source scaffold-task \
+  --task push_pull_door \
+  --interaction-mode push \
+  --motion-file /tmp/somaforce_g1_door_push_motion.pkl
+
+PYTHONUNBUFFERED=1 python scripts/verify_sonic_scaffold_env.py \
+  --motion-source scaffold-task \
+  --task push_pull_box \
+  --interaction-mode pull \
+  --motion-file /tmp/somaforce_g1_box_pull_motion.pkl
+```
+
+Both checks loaded the generated task motion into Sonic's no-door manager env
+and produced:
+
+```text
+env_ok=1
+motion_joint_pos_shape=(1, 29)
+residual_action_shape=(1, 29)
+scaffold_a_nom_shape=(1, 29)
+```
+
 Known environment notes:
 
 - The current Sonic checkout does not include the release motion dataset paths
@@ -153,6 +211,6 @@ rollout path:
 
 ## Next Engineering Target
 
-Export the procedural task trajectories into Sonic-compatible motion files and
-bind them into door and box manager-env variants. The scaffold boundary should
-remain unchanged: the output is only the nominal scaffold action `a_nom`.
+Bind the exported task motion files into actual door and box manager-env
+variants with scaffold-only rollouts. The scaffold boundary should remain
+unchanged: the output is only the nominal scaffold action `a_nom`.

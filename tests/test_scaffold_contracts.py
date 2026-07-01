@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import joblib
 import torch
 
 from somaforce_cross.scaffold import (
@@ -10,11 +11,14 @@ from somaforce_cross.scaffold import (
     MotionTrajectoryScaffold,
     ScaffoldTask,
     SonicScaffoldAdapter,
+    make_sonic_motion_library,
     make_g1_push_pull_box_trajectory,
     make_g1_push_pull_door_trajectory,
     make_g1_task_trajectory,
     make_g1_push_pull_box_scaffold,
     make_g1_push_pull_door_scaffold,
+    motion_trajectory_to_sonic_entry,
+    write_single_task_sonic_motion_file,
 )
 
 
@@ -162,3 +166,43 @@ def test_g1_task_trajectory_dispatches_first_scaffold_tasks() -> None:
     assert box.time_s is not None
     assert door.joint_pos.shape == (5, len(G1_FULL_JOINT_NAMES))
     assert box.joint_pos.shape == (6, len(G1_FULL_JOINT_NAMES))
+
+
+def test_sonic_motion_entry_contains_motion_lib_fields() -> None:
+    trajectory = make_g1_push_pull_door_trajectory("push", num_frames=5, duration_s=0.1)
+
+    entry = motion_trajectory_to_sonic_entry(trajectory, fps=50)
+
+    assert entry["root_trans_offset"].shape == (5, 3)
+    assert entry["pose_aa"].shape == (5, 30, 3)
+    assert entry["dof"].shape == (5, len(G1_FULL_JOINT_NAMES))
+    assert entry["root_rot"].shape == (5, 4)
+    assert entry["smpl_joints"].shape == (5, 24, 3)
+    assert entry["fps"] == 50
+    assert torch.allclose(torch.from_numpy(entry["dof"]), trajectory.joint_pos)
+    assert torch.allclose(torch.from_numpy(entry["root_trans_offset"][:, 2]), torch.full((5,), 0.76))
+
+
+def test_sonic_motion_library_writes_first_task_variants(tmp_path) -> None:
+    path = tmp_path / "motions.pkl"
+
+    library = write_single_task_sonic_motion_file(
+        path,
+        task=ScaffoldTask.PUSH_PULL_BOX,
+        mode="pull",
+        num_frames=7,
+        duration_s=0.12,
+        fps=50,
+    )
+    loaded = joblib.load(path)
+    all_motions = make_sonic_motion_library(num_frames=7, duration_s=0.12, fps=50)
+
+    assert list(library.keys()) == ["somaforce_g1_box_pull"]
+    assert list(loaded.keys()) == ["somaforce_g1_box_pull"]
+    assert loaded["somaforce_g1_box_pull"]["dof"].shape == (7, len(G1_FULL_JOINT_NAMES))
+    assert set(all_motions) == {
+        "somaforce_g1_door_push",
+        "somaforce_g1_door_pull",
+        "somaforce_g1_box_push",
+        "somaforce_g1_box_pull",
+    }
