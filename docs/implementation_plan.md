@@ -6,13 +6,7 @@ This document stages the future engineering work for SomaForce-Cross. It intenti
 
 ## 1. Method Route
 
-SomaForce-Cross follows the architecture in the research repository:
-
-```text
-../somaforce/docs/figures/06_somaforce_rld_s_architecture_overview_ft_cross.png
-```
-
-A copy is included in this repository:
+SomaForce-Cross uses the baseline architecture included in this repository:
 
 ```text
 figures/somaforce_cross_pipeline.png
@@ -58,7 +52,7 @@ Deliverables:
 - cross interaction interface;
 - teacher/student interface;
 - safety gate interface;
-- logging schema alignment with the research repository.
+- logging schema for diagnosis, ablation, and paper-ready plots.
 
 Exit criteria:
 

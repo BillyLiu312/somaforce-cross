@@ -1,26 +1,10 @@
 # SomaForce-Cross
 
-Pipeline staging repository for **SomaForce-Cross**.
-
 > SomaForce-Cross is the implementation route for scaffolded humanoid force adaptation via cross semantic force distillation.
 
-This repository intentionally starts as a **pipeline and engineering handoff repository**, not a code implementation repository. It should first stabilize the development plan, module boundaries, data contracts, and experiment sequence before executable Isaac Lab / RL code is added.
+This repository is the standalone engineering baseline for developing SomaForce-Cross from the current selected pipeline. It includes the baseline architecture figure, module contracts, and implementation plan needed to start development from scratch.
 
-The research repository remains:
-
-```text
-../somaforce
-```
-
-Primary references:
-
-- `../somaforce/docs/08_discussion.md`
-- `../somaforce/docs/09_implementation_handoff.md`
-- `../somaforce/docs/figures/06_somaforce_rld_s_architecture_overview_ft_cross.png`
-- `../somaforce/method/logging_and_metrics_spec.md`
-- `../somaforce/method/experiment_protocol.md`
-
-Current pipeline figure:
+Baseline pipeline:
 
 ![SomaForce-Cross Pipeline](figures/somaforce_cross_pipeline.png)
 
@@ -28,12 +12,12 @@ Current pipeline figure:
 
 This repository should now contain:
 
-- the selected SomaForce-Cross pipeline;
+- the baseline SomaForce-Cross pipeline;
 - module boundary definitions;
 - expected input/output contracts;
 - implementation milestones;
 - notes for future Isaac Lab and real F/T integration;
-- links back to the research repository.
+- enough context to begin engineering from a self-contained baseline.
 
 It should not yet contain:
 
