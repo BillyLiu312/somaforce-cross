@@ -19,6 +19,11 @@ trajectory:
     pull: somaforce_g1_door_pull
   num_frames: 80
   duration_s: 2.0
+sonic_manager_env:
+  binding: scaffold_motion_plus_articulated_door
+  add_object: false
+  requires_articulation_scene: true
+  door_asset_path: null
 scene:
   object_type: articulated_door
   interaction_modes:

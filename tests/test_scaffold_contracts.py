@@ -11,7 +11,11 @@ from somaforce_cross.scaffold import (
     MotionTrajectoryScaffold,
     ScaffoldTask,
     SonicScaffoldAdapter,
+    make_g1_box_sonic_binding,
+    make_g1_door_sonic_binding,
     make_sonic_motion_library,
+    make_sonic_manager_overrides,
+    make_sonic_verify_command,
     make_g1_push_pull_box_trajectory,
     make_g1_push_pull_door_trajectory,
     make_g1_task_trajectory,
@@ -206,3 +210,45 @@ def test_sonic_motion_library_writes_first_task_variants(tmp_path) -> None:
         "somaforce_g1_box_push",
         "somaforce_g1_box_pull",
     }
+
+
+def test_sonic_manager_overrides_keep_door_out_of_rigid_object_path(tmp_path) -> None:
+    motion_file = tmp_path / "door.pkl"
+    binding = make_g1_door_sonic_binding(
+        motion_file,
+        interaction_mode="pull",
+        door_asset_path="/assets/door.usd",
+    )
+
+    overrides = make_sonic_manager_overrides(binding, experiment_dir=tmp_path / "exp")
+
+    assert binding.requires_articulation_scene
+    assert binding.motion_key == "somaforce_g1_door_pull"
+    assert "+manager_env.config.add_object=false" in overrides
+    assert all("object_usd_path" not in item for item in overrides)
+    assert f"manager_env.commands.motion.motion_lib_cfg.motion_file={motion_file}" in overrides
+
+
+def test_sonic_manager_overrides_route_box_as_rigid_object(tmp_path) -> None:
+    motion_file = tmp_path / "box.pkl"
+    binding = make_g1_box_sonic_binding(
+        motion_file,
+        interaction_mode="push",
+        box_usd_path="/assets/box.usd",
+        object_mass=3.5,
+    )
+
+    overrides = make_sonic_manager_overrides(binding, num_envs=2, experiment_dir=tmp_path / "exp")
+    command = make_sonic_verify_command(
+        ScaffoldTask.PUSH_PULL_BOX,
+        "push",
+        motion_file,
+    )
+
+    assert not binding.requires_articulation_scene
+    assert binding.motion_key == "somaforce_g1_box_push"
+    assert "num_envs=2" in overrides
+    assert "+manager_env.config.add_object=true" in overrides
+    assert "+manager_env.config.object_usd_path=/assets/box.usd" in overrides
+    assert "manager_env.config.object_mass=3.5" in overrides
+    assert command[-1] == str(motion_file)

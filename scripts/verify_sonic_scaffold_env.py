@@ -79,13 +79,20 @@ def main() -> None:
     # Isaac AppLauncher also parses sys.argv. Keep our script-specific flags from
     # being interpreted by Isaac/Kit after argparse has consumed them.
     sys.argv = [sys.argv[0]]
+    from somaforce_cross.scaffold import (
+        ScaffoldTask,
+        make_g1_box_sonic_binding,
+        make_g1_door_sonic_binding,
+        make_sonic_manager_overrides,
+    )
+
+    task = ScaffoldTask(args.task)
     if args.motion_source == "static":
         write_synthetic_motion(args.motion_file)
         task_name = "static"
     else:
-        from somaforce_cross.scaffold import ScaffoldTask, write_single_task_sonic_motion_file
+        from somaforce_cross.scaffold import write_single_task_sonic_motion_file
 
-        task = ScaffoldTask(args.task)
         write_single_task_sonic_motion_file(
             args.motion_file,
             task=task,
@@ -95,6 +102,10 @@ def main() -> None:
             fps=args.motion_fps,
         )
         task_name = f"{task.value}:{args.interaction_mode}"
+    if task == ScaffoldTask.PUSH_PULL_BOX:
+        binding = make_g1_box_sonic_binding(args.motion_file, args.interaction_mode)
+    else:
+        binding = make_g1_door_sonic_binding(args.motion_file, args.interaction_mode)
     print(f"motion_file={args.motion_file}", flush=True)
     print(f"motion_source={args.motion_source}", flush=True)
     print(f"motion_task={task_name}", flush=True)
@@ -113,24 +124,11 @@ def main() -> None:
         print("importing_sonic_common", flush=True)
         from gear_sonic.trl.utils.common import custom_instantiate
 
-        overrides = [
-            "+exp=manager/universal_token/all_modes/sonic_release",
-            f"num_envs={args.num_envs}",
-            f"manager_env.config.num_envs={args.num_envs}",
-            "manager_env.config.terrain_type=plane",
-            f"experiment_dir={verify_dir}",
-            f"save_dir={verify_dir / '.hydra'}",
-            f"output_dir={verify_dir / 'output'}",
-            f"manager_env.config.experiment_dir={verify_dir}",
-            f"manager_env.config.save_rendering_dir={verify_dir / 'renderings'}",
-            "+manager_env.config.add_object=false",
-            "+manager_env.config.add_table=false",
-            f"manager_env.commands.motion.motion_lib_cfg.motion_file={args.motion_file}",
-            "manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=dummy",
-            "manager_env.commands.motion.motion_lib_cfg.multi_thread=false",
-            "manager_env.commands.motion.num_future_frames=2",
-            "manager_env.commands.motion.smpl_num_future_frames=2",
-        ]
+        overrides = make_sonic_manager_overrides(
+            binding,
+            num_envs=args.num_envs,
+            experiment_dir=verify_dir,
+        )
         with initialize_config_dir(version_base="1.1", config_dir=str(sonic_config_dir)):
             cfg = compose(config_name="base", overrides=overrides)
         print("compose_ok", flush=True)
@@ -148,18 +146,13 @@ def main() -> None:
 
         from gear_sonic.envs.manager_env.mdp.observations import residual_joint_pos_action
         from gear_sonic.envs.wrapper.manager_env_wrapper import ManagerEnvWrapper
-        from somaforce_cross.scaffold import ScaffoldTask, SonicScaffoldAdapter
+        from somaforce_cross.scaffold import SonicScaffoldAdapter
 
         env = ManagerBasedRLEnv(cfg=env_cfg, render_mode=None)
         wrapper = ManagerEnvWrapper(env, env_cfg.config)
         wrapper.reset(flatten_dict_obs=False)
         motion_cmd = env.command_manager.get_term("motion")
         a_nom = residual_joint_pos_action(env, command_name="motion")
-        task = (
-            ScaffoldTask(args.task)
-            if args.motion_source == "scaffold-task"
-            else ScaffoldTask.PUSH_PULL_DOOR
-        )
         scaffold = SonicScaffoldAdapter(
             env,
             task=task,

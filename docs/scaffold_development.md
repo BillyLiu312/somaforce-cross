@@ -69,6 +69,16 @@ smpl_joints
 fps
 ```
 
+`sonic_env.py` defines the Sonic manager-env binding layer. It generates Hydra
+overrides for:
+
+- no-object scaffold task-motion checks;
+- rigid-object box rollouts through Sonic's existing `add_object` USD hook;
+- door scaffold motion plus an explicit articulation-scene requirement.
+
+This separation is intentional: Sonic's current `add_object` path uses
+`RigidObjectCfg`, while the door task needs a hinged articulation scene.
+
 ## Scene Config Seeds
 
 ```text
@@ -184,6 +194,21 @@ residual_action_shape=(1, 29)
 scaffold_a_nom_shape=(1, 29)
 ```
 
+Sonic override inspection:
+
+```text
+python scripts/print_sonic_scaffold_overrides.py \
+  --task push_pull_box \
+  --interaction-mode push \
+  --motion-file /tmp/somaforce_g1_box_push_motion.pkl \
+  --object-usd-path /path/to/box.usd
+```
+
+For box tasks this emits `+manager_env.config.add_object=true` and routes the
+USD path through Sonic's rigid-object hook. For door tasks it keeps
+`add_object=false` and marks `requires_articulation_scene=true`, because a
+hinged door cannot be represented correctly as a rigid object.
+
 Known environment notes:
 
 - The current Sonic checkout does not include the release motion dataset paths
@@ -212,5 +237,7 @@ rollout path:
 ## Next Engineering Target
 
 Bind the exported task motion files into actual door and box manager-env
-variants with scaffold-only rollouts. The scaffold boundary should remain
-unchanged: the output is only the nominal scaffold action `a_nom`.
+variants with scaffold-only rollouts. Box can use Sonic's existing rigid-object
+USD hook once a box USD is selected. Door needs an Isaac articulation scene hook
+for hinge/handle assets. The scaffold boundary should remain unchanged: the
+output is only the nominal scaffold action `a_nom`.

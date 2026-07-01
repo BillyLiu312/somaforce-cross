@@ -69,6 +69,7 @@ somaforce_cross/
   scaffold/
 scripts/
   export_scaffold_sonic_motion.py
+  print_sonic_scaffold_overrides.py
   verify_scaffold_trajectories.py
   verify_sonic_scaffold_env.py
 tests/
@@ -100,6 +101,20 @@ somaforce_g1_door_pull
 somaforce_g1_box_push
 somaforce_g1_box_pull
 ```
+
+Current Sonic manager-env binding:
+
+```text
+python scripts/print_sonic_scaffold_overrides.py \
+  --task push_pull_box \
+  --interaction-mode push \
+  --motion-file /tmp/somaforce_g1_box_push_motion.pkl \
+  --object-usd-path /path/to/box.usd
+```
+
+Box uses Sonic's existing rigid-object USD hook. Door remains scaffold-motion
+ready but needs a hinged Isaac articulation scene hook rather than Sonic's rigid
+object path.
 
 ## Next Step
 

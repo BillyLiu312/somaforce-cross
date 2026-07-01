@@ -19,6 +19,13 @@ trajectory:
     pull: somaforce_g1_box_pull
   num_frames: 80
   duration_s: 2.0
+sonic_manager_env:
+  binding: scaffold_motion_plus_rigid_object
+  add_object: true
+  requires_articulation_scene: false
+  box_usd_path: null
+  object_position: [0.72, 0.0, 0.75]
+  object_mass: 2.0
 scene:
   object_type: rigid_box
   interaction_modes:
