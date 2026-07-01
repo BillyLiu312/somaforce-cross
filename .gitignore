@@ -16,7 +16,6 @@ videos/
 wandb/
 tensorboard/
 logs/
-.runtime/
 
 # Simulator/cache artifacts
 isaac-sim/

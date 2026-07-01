@@ -193,64 +193,6 @@ This applies `a_nom` directly in the Sonic manager env and writes
 `rollout_traces.npz` plus `summary.json`. Add `--record-video` to also request
 RGB PNG frames and an mp4 from Isaac's camera path.
 
-Browser-visible noVNC desktop:
-
-```text
-scripts/novnc_desktop.sh start --web-port 6080
-```
-
-The script starts a TigerVNC desktop on `DISPLAY=:91` by default and exposes it
-through noVNC on the selected web port. The default bind address is
-`127.0.0.1`, so use SSH or the platform's port forwarding and open:
-
-```text
-http://localhost:6080/vnc.html?host=localhost&port=6080&autoconnect=true&resize=scale
-```
-
-The script prints `vnc_password=...`; use that password if noVNC prompts for
-VNC authentication. The password is stored under `.runtime/novnc`, which is
-ignored by git.
-
-To run a headed Isaac command in that desktop:
-
-```text
-scripts/novnc_desktop.sh run --web-port 6080 -- \
-  conda run -n isaaclab python scripts/record_scaffold_rollout.py \
-    --task push_pull_box \
-    --interaction-mode push \
-    --generate-default-box-usd \
-    --record-video \
-    --no-headless
-```
-
-For Isaac/Omniverse interactive GUI, prefer attaching noVNC to an existing
-GPU-backed Xorg display:
-
-```text
-scripts/start_gpu_xorg.sh start --display-num 0
-
-scripts/novnc_desktop.sh start \
-  --backend attach \
-  --attach-display :0 \
-  --bind 0.0.0.0 \
-  --web-port 6080
-```
-
-The default `desktop` backend creates a TigerVNC/Xvnc desktop. That is enough
-for ordinary X11 programs and for viewing terminals, but Isaac's Vulkan GUI may
-fail on Xvnc because it needs a display surface backed by the NVIDIA driver.
-On some headless server allocations, even GPU-backed Xorg remains unsuitable
-for Isaac headed GUI because the NVIDIA driver reports `Display Active:
-Disabled` and Vulkan WSI cannot return present modes. Check with:
-
-```text
-DISPLAY=:0 XDG_RUNTIME_DIR=/tmp/runtime-root vulkaninfo --summary
-```
-
-If this reports `vkGetPhysicalDeviceSurfacePresentModesKHR failed`, noVNC can
-still show ordinary X11 windows on the attached display, but Isaac should be run
-through the headless camera/record path.
-
 Sonic motion export verification:
 
 ```text
