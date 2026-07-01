@@ -73,6 +73,7 @@ scripts/
   diagnose_scaffold_rollouts.py
   export_scaffold_sonic_motion.py
   print_sonic_scaffold_overrides.py
+  record_scaffold_rollout.py
   verify_scaffold_trajectories.py
   verify_sonic_imports.py
   verify_sonic_scaffold_env.py

@@ -178,6 +178,21 @@ Expected output includes all four selected variants with `direction_ok=1` and:
 scaffold_rollout_diagnostics_ok=1
 ```
 
+Scaffold rollout recording:
+
+```text
+python scripts/record_scaffold_rollout.py \
+  --task push_pull_door \
+  --interaction-mode push \
+  --generate-default-door-urdf \
+  --steps 64 \
+  --output-dir /tmp/somaforce_scaffold_record/door_push
+```
+
+This applies `a_nom` directly in the Sonic manager env and writes
+`rollout_traces.npz` plus `summary.json`. Add `--record-video` to also request
+RGB PNG frames and an mp4 from Isaac's camera path.
+
 Sonic motion export verification:
 
 ```text
