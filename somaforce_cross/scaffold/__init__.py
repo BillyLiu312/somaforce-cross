@@ -1,0 +1,33 @@
+"""Sonic-based scaffold interfaces for SomaForce-Cross."""
+
+from somaforce_cross.scaffold.contracts import (
+    G1_BODY_JOINT_NAMES,
+    G1_FULL_JOINT_NAMES,
+    MotionTrajectory,
+    ScaffoldOutput,
+    ScaffoldTask,
+)
+from somaforce_cross.scaffold.scenes import (
+    G1_PUSH_PULL_BOX_SCENE,
+    G1_PUSH_PULL_DOOR_SCENE,
+    ScaffoldSceneSpec,
+    make_g1_push_pull_box_scaffold,
+    make_g1_push_pull_door_scaffold,
+)
+from somaforce_cross.scaffold.sonic_adapter import SonicScaffoldAdapter
+from somaforce_cross.scaffold.trajectory import MotionTrajectoryScaffold
+
+__all__ = [
+    "G1_BODY_JOINT_NAMES",
+    "G1_FULL_JOINT_NAMES",
+    "G1_PUSH_PULL_BOX_SCENE",
+    "G1_PUSH_PULL_DOOR_SCENE",
+    "MotionTrajectory",
+    "MotionTrajectoryScaffold",
+    "ScaffoldOutput",
+    "ScaffoldSceneSpec",
+    "ScaffoldTask",
+    "SonicScaffoldAdapter",
+    "make_g1_push_pull_box_scaffold",
+    "make_g1_push_pull_door_scaffold",
+]

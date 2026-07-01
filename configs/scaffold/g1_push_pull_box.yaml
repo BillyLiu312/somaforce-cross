@@ -1,0 +1,24 @@
+task: push_pull_box
+robot:
+  type: unitree_g1
+  joint_order: g1_29dof_sonic_mujoco_order
+scaffold:
+  provider: sonic
+  command_name: motion
+  input: motion_trajectory
+  output: a_nom
+  action_clip: 20.0
+scene:
+  object_type: rigid_box
+  interaction_modes:
+    - push
+    - pull
+  mismatch_sources:
+    - box_pose_error
+    - friction_variation
+    - initial_stance_reach_stress
+references:
+  nominal_refs:
+    - nominal_joint_pos
+    - nominal_hand_ref
+    - nominal_body_ref
