@@ -29,6 +29,7 @@ The scaffold code must not consume privileged force labels, `p_dir`, `p_mag`,
 somaforce_cross/scaffold/contracts.py
 somaforce_cross/scaffold/trajectory.py
 somaforce_cross/scaffold/sonic_adapter.py
+somaforce_cross/scaffold/task_trajectories.py
 ```
 
 `MotionTrajectoryScaffold` is a pure-Python scaffold used for early tests. It
@@ -43,6 +44,18 @@ gear_sonic.envs.manager_env.mdp.observations.residual_joint_pos_action
 
 to produce `a_nom`.
 
+`task_trajectories.py` provides scaffold-only G1 nominal motion trajectories for
+the first scene variants:
+
+- door push;
+- door pull;
+- box push;
+- box pull.
+
+These trajectories provide joint positions, hand references, body references,
+timestamps, and `cmd_6d`. They do not model force, contact truth, hinge state, or
+box state.
+
 ## Scene Config Seeds
 
 ```text
@@ -56,6 +69,16 @@ These define the first two scaffold tasks:
 - Unitree G1 push/pull box scaffold.
 
 Both use motion trajectory input and output `a_nom`.
+
+Current scene factories:
+
+```text
+make_g1_push_pull_door_scaffold(trajectory=..., interaction_mode="push"|"pull")
+make_g1_push_pull_box_scaffold(trajectory=..., interaction_mode="push"|"pull")
+```
+
+If `trajectory` is omitted, the factory uses the procedural G1 nominal
+trajectory template for the selected interaction mode.
 
 ## Environment Status
 
@@ -88,6 +111,21 @@ residual_action_shape=(1, 29)
 scaffold_a_nom_shape=(1, 29)
 ```
 
+Scaffold-only trajectory verification:
+
+```text
+python scripts/verify_scaffold_trajectories.py
+```
+
+Expected output:
+
+```text
+door_push: a_nom=(29,) hand_ref=(2, 3) body_ref=(1, 6) cmd_6d=(6,)
+door_pull: a_nom=(29,) hand_ref=(2, 3) body_ref=(1, 6) cmd_6d=(6,)
+box_push: a_nom=(29,) hand_ref=(2, 3) body_ref=(1, 6) cmd_6d=(6,)
+box_pull: a_nom=(29,) hand_ref=(2, 3) body_ref=(1, 6) cmd_6d=(6,)
+```
+
 Known environment notes:
 
 - The current Sonic checkout does not include the release motion dataset paths
@@ -115,6 +153,6 @@ rollout path:
 
 ## Next Engineering Target
 
-Replace the synthetic static motion with task motion trajectories for the first
-two scaffold scenes, then bind those trajectories into door and box manager-env
-variants that still output only the nominal scaffold action `a_nom`.
+Export the procedural task trajectories into Sonic-compatible motion files and
+bind them into door and box manager-env variants. The scaffold boundary should
+remain unchanged: the output is only the nominal scaffold action `a_nom`.

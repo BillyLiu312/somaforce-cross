@@ -8,6 +8,14 @@ scaffold:
   input: motion_trajectory
   output: a_nom
   action_clip: 20.0
+trajectory:
+  source: procedural_g1_door
+  default_mode: push
+  supported_modes:
+    - push
+    - pull
+  num_frames: 80
+  duration_s: 2.0
 scene:
   object_type: articulated_door
   interaction_modes:

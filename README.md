@@ -2,7 +2,7 @@
 
 > SomaForce-Cross is the implementation route for scaffolded humanoid force adaptation via cross semantic force distillation.
 
-This repository is the standalone engineering baseline for developing SomaForce-Cross from the current selected pipeline. It includes the baseline architecture figure, module contracts, and implementation plan needed to start development from scratch.
+This repository is the standalone engineering baseline for developing SomaForce-Cross from the current selected pipeline. It includes the baseline architecture figure, module contracts, implementation plan, and the first Sonic-based scaffold engineering slice.
 
 Baseline pipeline:
 
@@ -16,16 +16,15 @@ This repository should now contain:
 - module boundary definitions;
 - expected input/output contracts;
 - implementation milestones;
-- notes for future Isaac Lab and real F/T integration;
-- enough context to begin engineering from a self-contained baseline.
+- Sonic-based scaffold adapters and task trajectory templates;
+- notes for Isaac Lab and real F/T integration;
+- enough context to continue engineering from a self-contained baseline.
 
 It should not yet contain:
 
-- Isaac Lab task code;
 - RL training code;
 - policy/model implementations;
 - sensor simulation code;
-- tests for code that has not been approved for implementation;
 - checkpoints, logs, videos, or generated experiment artifacts.
 
 ## Selected Pipeline
@@ -61,19 +60,33 @@ Current key decisions:
 docs/
   implementation_plan.md
   module_contracts.md
+  scaffold_development.md
 figures/
   somaforce_cross_pipeline.png
 configs/
-  .gitkeep
+  scaffold/
+somaforce_cross/
+  scaffold/
+scripts/
+  verify_scaffold_trajectories.py
+  verify_sonic_scaffold_env.py
+tests/
 ```
 
-Future code directories should be added only after the pipeline contracts are stable.
+The current scaffold boundary is:
+
+```text
+motion trajectory
+  -> Sonic-style scaffold / TrackingCommand
+  -> residual_joint_pos_action(...)
+  -> a_nom
+```
+
+SomaForce-Cross force semantics and bounded residual control are added after
+`a_nom`; the scaffold code must not consume privileged force labels.
 
 ## Next Step
 
-Before adding implementation code, complete:
-
-1. module contracts for scaffold, virtual F/T sensor, force semantics, cross interaction, teacher, student, safety, and logging;
-2. minimum diagnostic task definition;
-3. first milestone acceptance criteria;
-4. decision on the first actual environment backend.
+Next engineering step: export the G1 door/box scaffold trajectories into
+Sonic-compatible motion files and bind them into Isaac Lab manager-env variants
+for scaffold-only rollout tests.

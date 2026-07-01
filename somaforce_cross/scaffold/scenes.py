@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from somaforce_cross.scaffold.contracts import MotionTrajectory, ScaffoldTask
+from somaforce_cross.scaffold.task_trajectories import (
+    InteractionMode,
+    make_g1_push_pull_box_trajectory,
+    make_g1_push_pull_door_trajectory,
+)
 from somaforce_cross.scaffold.trajectory import MotionTrajectoryScaffold
 
 
@@ -37,11 +42,20 @@ G1_PUSH_PULL_BOX_SCENE = ScaffoldSceneSpec(
 
 
 def make_g1_push_pull_door_scaffold(
-    trajectory: MotionTrajectory,
+    trajectory: MotionTrajectory | None = None,
+    interaction_mode: InteractionMode = "push",
+    num_frames: int = 80,
+    duration_s: float = 2.0,
     action_clip: float | None = 20.0,
 ) -> MotionTrajectoryScaffold:
     """Create the Unitree G1 door nominal-action scaffold."""
 
+    if trajectory is None:
+        trajectory = make_g1_push_pull_door_trajectory(
+            mode=interaction_mode,
+            num_frames=num_frames,
+            duration_s=duration_s,
+        )
     return MotionTrajectoryScaffold(
         trajectory=trajectory,
         task=ScaffoldTask.PUSH_PULL_DOOR,
@@ -50,11 +64,20 @@ def make_g1_push_pull_door_scaffold(
 
 
 def make_g1_push_pull_box_scaffold(
-    trajectory: MotionTrajectory,
+    trajectory: MotionTrajectory | None = None,
+    interaction_mode: InteractionMode = "push",
+    num_frames: int = 80,
+    duration_s: float = 2.0,
     action_clip: float | None = 20.0,
 ) -> MotionTrajectoryScaffold:
     """Create the Unitree G1 box nominal-action scaffold."""
 
+    if trajectory is None:
+        trajectory = make_g1_push_pull_box_trajectory(
+            mode=interaction_mode,
+            num_frames=num_frames,
+            duration_s=duration_s,
+        )
     return MotionTrajectoryScaffold(
         trajectory=trajectory,
         task=ScaffoldTask.PUSH_PULL_BOX,

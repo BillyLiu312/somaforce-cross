@@ -10,6 +10,9 @@ from somaforce_cross.scaffold import (
     MotionTrajectoryScaffold,
     ScaffoldTask,
     SonicScaffoldAdapter,
+    make_g1_push_pull_box_trajectory,
+    make_g1_push_pull_door_trajectory,
+    make_g1_task_trajectory,
     make_g1_push_pull_box_scaffold,
     make_g1_push_pull_door_scaffold,
 )
@@ -112,3 +115,50 @@ def test_g1_scene_factories_bind_expected_tasks() -> None:
     assert G1_PUSH_PULL_BOX_SCENE.robot == "unitree_g1"
     assert G1_PUSH_PULL_BOX_SCENE.object_type == "rigid_box"
     assert box.task == ScaffoldTask.PUSH_PULL_BOX
+
+
+def test_default_g1_door_scaffold_generates_push_and_pull_nominal_actions() -> None:
+    push = make_g1_push_pull_door_scaffold(interaction_mode="push", num_frames=8, action_clip=None)
+    pull = make_g1_push_pull_door_scaffold(interaction_mode="pull", num_frames=8, action_clip=None)
+
+    push_start = push.at_frame(0)
+    push_end = push.at_frame(7)
+    pull_end = pull.at_frame(7)
+
+    assert push_start.a_nom.shape == (len(G1_FULL_JOINT_NAMES),)
+    assert push_end.task == ScaffoldTask.PUSH_PULL_DOOR
+    assert push_end.nominal_hand_ref is not None
+    assert push_end.nominal_body_ref is not None
+    assert push_end.cmd_6d is not None
+    assert push_end.cmd_6d[0] > 0
+    assert pull_end.cmd_6d is not None
+    assert pull_end.cmd_6d[0] < 0
+    assert not torch.equal(push_start.a_nom, push_end.a_nom)
+    assert not torch.equal(push_end.a_nom, pull_end.a_nom)
+
+
+def test_default_g1_box_scaffold_generates_two_hand_push_and_pull_actions() -> None:
+    push = make_g1_push_pull_box_scaffold(interaction_mode="push", num_frames=8, action_clip=None).at_frame(7)
+    pull = make_g1_push_pull_box_scaffold(interaction_mode="pull", num_frames=8, action_clip=None).at_frame(7)
+
+    assert push.a_nom.shape == (len(G1_FULL_JOINT_NAMES),)
+    assert push.task == ScaffoldTask.PUSH_PULL_BOX
+    assert push.nominal_hand_ref is not None
+    assert push.nominal_hand_ref.shape == (2, 3)
+    assert push.cmd_6d is not None
+    assert pull.cmd_6d is not None
+    assert push.cmd_6d[0] > 0
+    assert pull.cmd_6d[0] < 0
+    assert not torch.equal(push.a_nom, pull.a_nom)
+
+
+def test_g1_task_trajectory_dispatches_first_scaffold_tasks() -> None:
+    door = make_g1_task_trajectory(ScaffoldTask.PUSH_PULL_DOOR, mode="push", num_frames=5)
+    box = make_g1_task_trajectory(ScaffoldTask.PUSH_PULL_BOX, mode="pull", num_frames=6)
+
+    assert torch.equal(door.joint_pos, make_g1_push_pull_door_trajectory("push", num_frames=5).joint_pos)
+    assert torch.equal(box.joint_pos, make_g1_push_pull_box_trajectory("pull", num_frames=6).joint_pos)
+    assert door.time_s is not None
+    assert box.time_s is not None
+    assert door.joint_pos.shape == (5, len(G1_FULL_JOINT_NAMES))
+    assert box.joint_pos.shape == (6, len(G1_FULL_JOINT_NAMES))
