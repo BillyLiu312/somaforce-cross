@@ -58,6 +58,7 @@ Current key decisions:
 
 ```text
 docs/
+  scaffold_completion_audit.md
   implementation_plan.md
   module_contracts.md
   scaffold_development.md

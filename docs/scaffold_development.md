@@ -120,6 +120,7 @@ Verified:
 - local scaffold tests pass with `python -m pytest -q`.
 
 For a compact gate-by-gate checklist, see `docs/scaffold_verification_matrix.md`.
+For the original requirement audit, see `docs/scaffold_completion_audit.md`.
 
 Sonic import verification:
 

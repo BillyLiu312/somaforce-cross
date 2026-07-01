@@ -3,6 +3,9 @@
 This matrix maps the current SomaForce-Cross scaffold engineering slice to the
 requested development gates on the `dev` branch.
 
+For the requirement-by-requirement scaffold audit, see
+`docs/scaffold_completion_audit.md`.
+
 ## Gates
 
 | Gate | Evidence entry point | Passing signal |
