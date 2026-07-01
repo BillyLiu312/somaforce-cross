@@ -16,6 +16,7 @@ VNC_PASSWORD="${SOMAFORCE_NOVNC_PASSWORD:-}"
 VNC_AUTH="${SOMAFORCE_NOVNC_AUTH:-1}"
 BACKEND="${SOMAFORCE_NOVNC_BACKEND:-desktop}"
 ATTACH_DISPLAY="${SOMAFORCE_NOVNC_ATTACH_DISPLAY:-${DISPLAY:-:0}}"
+ATTACH_AUTH="${SOMAFORCE_NOVNC_ATTACH_AUTH:-/dev/null}"
 RUN_COMMAND=()
 
 usage() {
@@ -39,6 +40,7 @@ Options:
   --no-password        Disable VNC password auth; only use behind trusted access
   --backend MODE       desktop or attach, default: desktop
   --attach-display D   Existing GPU-backed X display for attach mode, default: $DISPLAY or :0
+  --attach-auth PATH   Xauthority for attach mode, default: /dev/null
   -h, --help           Show this help.
 
 Examples:
@@ -122,6 +124,10 @@ parse_args() {
         ;;
       --attach-display)
         ATTACH_DISPLAY="$2"
+        shift 2
+        ;;
+      --attach-auth)
+        ATTACH_AUTH="$2"
         shift 2
         ;;
       -h|--help)
@@ -223,11 +229,13 @@ print_urls() {
   echo "display=:${DISPLAY_NUM}"
   if [[ "$BACKEND" == "attach" ]]; then
     echo "attach_display=${ATTACH_DISPLAY}"
+    echo "attach_auth=${ATTACH_AUTH}"
   fi
   echo "vnc_target=127.0.0.1:$(vnc_port)"
   echo "novnc_bind=${BIND_ADDR}:${port}"
   echo "novnc_url_local=http://127.0.0.1:${port}/vnc.html?host=127.0.0.1&port=${port}&autoconnect=true&resize=scale"
   echo "novnc_url_forwarded=http://localhost:${port}/vnc.html?host=localhost&port=${port}&autoconnect=true&resize=scale"
+  echo "novnc_url_direct=http://$(hostname):${port}/vnc.html?host=$(hostname)&port=${port}&autoconnect=true&resize=scale"
   echo "websockify_log=$(websockify_log)"
 }
 
@@ -325,8 +333,9 @@ start_x11vnc_attach() {
 
   setsid x11vnc \
     -display "$ATTACH_DISPLAY" \
-    -auth guess \
+    -auth "$ATTACH_AUTH" \
     -localhost \
+    -no6 \
     -rfbport "$rfb_port" \
     -forever \
     -shared \

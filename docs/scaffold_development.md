@@ -227,15 +227,29 @@ For Isaac/Omniverse interactive GUI, prefer attaching noVNC to an existing
 GPU-backed Xorg display:
 
 ```text
+scripts/start_gpu_xorg.sh start --display-num 0
+
 scripts/novnc_desktop.sh start \
   --backend attach \
   --attach-display :0 \
+  --bind 0.0.0.0 \
   --web-port 6080
 ```
 
 The default `desktop` backend creates a TigerVNC/Xvnc desktop. That is enough
 for ordinary X11 programs and for viewing terminals, but Isaac's Vulkan GUI may
 fail on Xvnc because it needs a display surface backed by the NVIDIA driver.
+On some headless server allocations, even GPU-backed Xorg remains unsuitable
+for Isaac headed GUI because the NVIDIA driver reports `Display Active:
+Disabled` and Vulkan WSI cannot return present modes. Check with:
+
+```text
+DISPLAY=:0 XDG_RUNTIME_DIR=/tmp/runtime-root vulkaninfo --summary
+```
+
+If this reports `vkGetPhysicalDeviceSurfacePresentModesKHR failed`, noVNC can
+still show ordinary X11 windows on the attached display, but Isaac should be run
+through the headless camera/record path.
 
 Sonic motion export verification:
 

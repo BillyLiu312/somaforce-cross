@@ -75,6 +75,7 @@ scripts/
   novnc_desktop.sh
   print_sonic_scaffold_overrides.py
   record_scaffold_rollout.py
+  start_gpu_xorg.sh
   verify_scaffold_trajectories.py
   verify_sonic_imports.py
   verify_sonic_scaffold_env.py
@@ -175,15 +176,27 @@ For Isaac/Omniverse interactive GUI, prefer attaching noVNC to an existing
 GPU-backed Xorg display:
 
 ```text
+scripts/start_gpu_xorg.sh start --display-num 0
+
 scripts/novnc_desktop.sh start \
   --backend attach \
   --attach-display :0 \
+  --bind 0.0.0.0 \
   --web-port 6080
 ```
 
 The default `desktop` backend is useful for a browser-visible Linux desktop and
 ordinary X11 tools. Isaac's Vulkan GUI may fail on Xvnc because it needs a
-display surface backed by the NVIDIA driver.
+display surface backed by the NVIDIA driver. On some headless servers, even a
+GPU-backed Xorg can still report no Vulkan WSI surface; check with:
+
+```text
+DISPLAY=:0 XDG_RUNTIME_DIR=/tmp/runtime-root vulkaninfo --summary
+```
+
+If this reports `vkGetPhysicalDeviceSurfacePresentModesKHR failed` or Isaac
+reports `Failed to create a swapchain`, use Isaac Lab's headless camera/record
+path instead of headed GUI on that server allocation.
 
 ## Next Step
 
