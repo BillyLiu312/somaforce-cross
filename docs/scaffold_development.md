@@ -209,6 +209,28 @@ USD path through Sonic's rigid-object hook. For door tasks it keeps
 `add_object=false` and marks `requires_articulation_scene=true`, because a
 hinged door cannot be represented correctly as a rigid object.
 
+Box object smoke verification:
+
+```text
+PYTHONUNBUFFERED=1 python scripts/verify_sonic_scaffold_env.py \
+  --motion-source scaffold-task \
+  --task push_pull_box \
+  --interaction-mode push \
+  --motion-file /tmp/somaforce_g1_box_push_motion.pkl \
+  --generate-default-box-usd
+```
+
+Expected object-related output:
+
+```text
+object_motion_file=/tmp/somaforce_g1_box_push_motion_object.pkl
+rigid_object_names=['object']
+object_enabled=True
+motion_joint_pos_shape=(1, 29)
+residual_action_shape=(1, 29)
+scaffold_a_nom_shape=(1, 29)
+```
+
 Known environment notes:
 
 - The current Sonic checkout does not include the release motion dataset paths
@@ -236,8 +258,7 @@ rollout path:
 
 ## Next Engineering Target
 
-Bind the exported task motion files into actual door and box manager-env
-variants with scaffold-only rollouts. Box can use Sonic's existing rigid-object
-USD hook once a box USD is selected. Door needs an Isaac articulation scene hook
-for hinge/handle assets. The scaffold boundary should remain unchanged: the
-output is only the nominal scaffold action `a_nom`.
+Add the hinged Isaac articulation scene hook for the G1 door scaffold. The box
+path now supports Sonic's existing rigid-object USD hook with a generated
+rigid-body USD and companion object-motion pkl. The scaffold boundary should
+remain unchanged: the output is only the nominal scaffold action `a_nom`.

@@ -35,6 +35,7 @@ class SonicManagerEnvBinding:
     interaction_mode: InteractionMode
     motion_file: Path
     motion_key: str
+    object_motion_file: Path | None = None
     object_binding: SonicObjectBinding = SonicObjectBinding()
     terrain_type: str = "plane"
     requires_articulation_scene: bool = False
@@ -76,6 +77,9 @@ def make_g1_box_sonic_binding(
         interaction_mode=interaction_mode,
         motion_file=motion_file,
         motion_key=f"somaforce_g1_box_{interaction_mode}",
+        object_motion_file=(
+            motion_file.with_name(f"{motion_file.stem}_object.pkl") if box_usd_path is not None else None
+        ),
         object_binding=SonicObjectBinding(
             object_usd_path=box_usd_path,
             object_position=object_position,
@@ -128,6 +132,16 @@ def make_sonic_manager_overrides(
         )
         if object_cfg.object_mass is not None:
             overrides.append(f"manager_env.config.object_mass={object_cfg.object_mass}")
+        if binding.object_motion_file is not None:
+            overrides.extend(
+                [
+                    (
+                        "+manager_env.commands.motion.motion_lib_cfg.object_motion_file="
+                        f"{binding.object_motion_file}"
+                    ),
+                    "+manager_env.commands.motion.motion_lib_cfg.max_num_objects=1",
+                ]
+            )
     if object_cfg.add_table:
         if object_cfg.table_position is not None:
             overrides.append(f"+manager_env.config.table_position={list(object_cfg.table_position)}")
@@ -140,10 +154,11 @@ def make_sonic_verify_command(
     task: ScaffoldTask,
     interaction_mode: InteractionMode,
     motion_file: Path,
+    object_usd_path: str | None = None,
 ) -> list[str]:
     """Return the local verification command for a generated task motion."""
 
-    return [
+    command = [
         "PYTHONUNBUFFERED=1",
         "python",
         "scripts/verify_sonic_scaffold_env.py",
@@ -156,6 +171,9 @@ def make_sonic_verify_command(
         "--motion-file",
         str(motion_file),
     ]
+    if object_usd_path is not None:
+        command.extend(["--object-usd-path", object_usd_path])
+    return command
 
 
 def _bool(value: bool) -> str:

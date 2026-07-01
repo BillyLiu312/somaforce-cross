@@ -70,6 +70,7 @@ def motion_trajectory_to_sonic_entry(
     num_frames = joint_pos.shape[0]
     root_trans_offset, yaw = _root_from_body_ref(trajectory, num_frames)
     root_rot = _yaw_to_xyzw_quat(yaw)
+    object_root_pos, object_root_quat = _default_object_root(num_frames)
 
     pose_aa = np.zeros((num_frames, NUM_G1_MOTION_BODIES, 3), dtype=np.float32)
     pose_aa[:, 0, 2] = yaw
@@ -81,6 +82,8 @@ def motion_trajectory_to_sonic_entry(
         "dof": joint_pos.astype(np.float32),
         "root_rot": root_rot.astype(np.float32),
         "smpl_joints": np.zeros((num_frames, 24, 3), dtype=np.float32),
+        "object_root_pos": object_root_pos,
+        "object_root_quat": object_root_quat,
         "fps": int(fps if fps is not None else _infer_fps(trajectory, num_frames)),
     }
 
@@ -149,6 +152,40 @@ def write_single_task_sonic_motion_file(
     return write_sonic_motion_file(path, motions={key: trajectory}, fps=fps)
 
 
+def make_sonic_object_motion_library(
+    motion_keys: tuple[str, ...],
+    num_frames: int = 101,
+    fps: int = 50,
+) -> dict[str, dict[str, np.ndarray | int]]:
+    """Create Sonic object-motion entries matching scaffold motion keys."""
+
+    root_pos, root_quat = _default_object_root(num_frames)
+    return {
+        key: {
+            "root_pos": root_pos.copy(),
+            "root_quat": root_quat.copy(),
+            "fps": int(fps),
+        }
+        for key in motion_keys
+    }
+
+
+def write_single_task_sonic_object_motion_file(
+    path: Path,
+    task: ScaffoldTask,
+    mode: InteractionMode,
+    num_frames: int = 101,
+    fps: int = 50,
+) -> dict[str, dict[str, np.ndarray | int]]:
+    """Write one Sonic-compatible object motion file for object-enabled checks."""
+
+    key = f"somaforce_g1_{_task_slug(task)}_{mode}"
+    library = make_sonic_object_motion_library((key,), num_frames=num_frames, fps=fps)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(library, path)
+    return library
+
+
 def _root_from_body_ref(
     trajectory: MotionTrajectory,
     num_frames: int,
@@ -173,6 +210,16 @@ def _yaw_to_xyzw_quat(yaw: np.ndarray) -> np.ndarray:
     quat[:, 2] = np.sin(half)
     quat[:, 3] = np.cos(half)
     return quat
+
+
+def _default_object_root(num_frames: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return a nominal one-object pose sequence for Sonic object-enabled envs."""
+
+    root_pos = np.zeros((num_frames, 1, 3), dtype=np.float32)
+    root_pos[:, 0, :] = np.array([0.72, 0.0, 0.75], dtype=np.float32)
+    root_quat = np.zeros((num_frames, 1, 4), dtype=np.float32)
+    root_quat[:, 0, 0] = 1.0
+    return root_pos, root_quat
 
 
 def _infer_fps(trajectory: MotionTrajectory, num_frames: int) -> int:

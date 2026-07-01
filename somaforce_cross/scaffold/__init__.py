@@ -25,7 +25,9 @@ from somaforce_cross.scaffold.sonic_env import (
 )
 from somaforce_cross.scaffold.sonic_motion import (
     make_sonic_motion_library,
+    make_sonic_object_motion_library,
     motion_trajectory_to_sonic_entry,
+    write_single_task_sonic_object_motion_file,
     write_single_task_sonic_motion_file,
     write_sonic_motion_file,
 )
@@ -54,6 +56,7 @@ __all__ = [
     "make_g1_box_sonic_binding",
     "make_g1_door_sonic_binding",
     "make_sonic_motion_library",
+    "make_sonic_object_motion_library",
     "make_sonic_manager_overrides",
     "make_sonic_verify_command",
     "make_g1_push_pull_box_scaffold",
@@ -62,6 +65,7 @@ __all__ = [
     "make_g1_push_pull_door_trajectory",
     "make_g1_task_trajectory",
     "motion_trajectory_to_sonic_entry",
+    "write_single_task_sonic_object_motion_file",
     "write_single_task_sonic_motion_file",
     "write_sonic_motion_file",
 ]

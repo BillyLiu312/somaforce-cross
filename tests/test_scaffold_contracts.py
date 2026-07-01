@@ -14,6 +14,7 @@ from somaforce_cross.scaffold import (
     make_g1_box_sonic_binding,
     make_g1_door_sonic_binding,
     make_sonic_motion_library,
+    make_sonic_object_motion_library,
     make_sonic_manager_overrides,
     make_sonic_verify_command,
     make_g1_push_pull_box_trajectory,
@@ -23,6 +24,7 @@ from somaforce_cross.scaffold import (
     make_g1_push_pull_door_scaffold,
     motion_trajectory_to_sonic_entry,
     write_single_task_sonic_motion_file,
+    write_single_task_sonic_object_motion_file,
 )
 
 
@@ -182,9 +184,13 @@ def test_sonic_motion_entry_contains_motion_lib_fields() -> None:
     assert entry["dof"].shape == (5, len(G1_FULL_JOINT_NAMES))
     assert entry["root_rot"].shape == (5, 4)
     assert entry["smpl_joints"].shape == (5, 24, 3)
+    assert entry["object_root_pos"].shape == (5, 1, 3)
+    assert entry["object_root_quat"].shape == (5, 1, 4)
     assert entry["fps"] == 50
     assert torch.allclose(torch.from_numpy(entry["dof"]), trajectory.joint_pos)
     assert torch.allclose(torch.from_numpy(entry["root_trans_offset"][:, 2]), torch.full((5,), 0.76))
+    assert torch.allclose(torch.from_numpy(entry["object_root_pos"][0, 0]), torch.tensor([0.72, 0.0, 0.75]))
+    assert torch.allclose(torch.from_numpy(entry["object_root_quat"][0, 0]), torch.tensor([1.0, 0.0, 0.0, 0.0]))
 
 
 def test_sonic_motion_library_writes_first_task_variants(tmp_path) -> None:
@@ -199,11 +205,25 @@ def test_sonic_motion_library_writes_first_task_variants(tmp_path) -> None:
         fps=50,
     )
     loaded = joblib.load(path)
+    object_path = tmp_path / "objects.pkl"
+    object_library = write_single_task_sonic_object_motion_file(
+        object_path,
+        task=ScaffoldTask.PUSH_PULL_BOX,
+        mode="pull",
+        num_frames=7,
+        fps=50,
+    )
+    loaded_objects = joblib.load(object_path)
     all_motions = make_sonic_motion_library(num_frames=7, duration_s=0.12, fps=50)
+    all_objects = make_sonic_object_motion_library(("somaforce_g1_box_pull",), num_frames=7, fps=50)
 
     assert list(library.keys()) == ["somaforce_g1_box_pull"]
     assert list(loaded.keys()) == ["somaforce_g1_box_pull"]
+    assert list(object_library.keys()) == ["somaforce_g1_box_pull"]
+    assert loaded_objects["somaforce_g1_box_pull"]["root_pos"].shape == (7, 1, 3)
+    assert loaded_objects["somaforce_g1_box_pull"]["root_quat"].shape == (7, 1, 4)
     assert loaded["somaforce_g1_box_pull"]["dof"].shape == (7, len(G1_FULL_JOINT_NAMES))
+    assert all_objects["somaforce_g1_box_pull"]["root_quat"][0, 0, 0] == 1.0
     assert set(all_motions) == {
         "somaforce_g1_door_push",
         "somaforce_g1_door_pull",
@@ -243,6 +263,7 @@ def test_sonic_manager_overrides_route_box_as_rigid_object(tmp_path) -> None:
         ScaffoldTask.PUSH_PULL_BOX,
         "push",
         motion_file,
+        object_usd_path="/assets/box.usd",
     )
 
     assert not binding.requires_articulation_scene
@@ -251,4 +272,6 @@ def test_sonic_manager_overrides_route_box_as_rigid_object(tmp_path) -> None:
     assert "+manager_env.config.add_object=true" in overrides
     assert "+manager_env.config.object_usd_path=/assets/box.usd" in overrides
     assert "manager_env.config.object_mass=3.5" in overrides
-    assert command[-1] == str(motion_file)
+    assert f"+manager_env.commands.motion.motion_lib_cfg.object_motion_file={motion_file.with_name('box_object.pkl')}" in overrides
+    assert "+manager_env.commands.motion.motion_lib_cfg.max_num_objects=1" in overrides
+    assert command[-3:] == [str(motion_file), "--object-usd-path", "/assets/box.usd"]
