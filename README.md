@@ -123,11 +123,22 @@ PYTHONUNBUFFERED=1 python scripts/verify_sonic_scaffold_env.py \
   --generate-default-box-usd
 ```
 
+Door articulation smoke verification:
+
+```text
+PYTHONUNBUFFERED=1 python scripts/verify_sonic_scaffold_env.py \
+  --motion-source scaffold-task \
+  --task push_pull_door \
+  --interaction-mode push \
+  --motion-file /tmp/somaforce_g1_door_push_motion.pkl \
+  --generate-default-door-urdf
+```
+
 Box uses Sonic's existing rigid-object USD hook. Door remains scaffold-motion
-ready but needs a hinged Isaac articulation scene hook rather than Sonic's rigid
+ready and uses a hinged Isaac articulation scene hook rather than Sonic's rigid
 object path.
 
 ## Next Step
 
-Next engineering step: add the hinged Isaac articulation scene hook for the G1
-door scaffold. The G1 box scaffold now has an object-enabled Sonic smoke path.
+Next engineering step: replace the generated smoke assets with task-specific
+door/box assets and start collecting scaffold-only rollout diagnostics.

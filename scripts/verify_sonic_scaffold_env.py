@@ -9,7 +9,9 @@ and reads:
 - SomaForce-Cross ``SonicScaffoldAdapter(...).get_output().a_nom``.
 
 For box tasks, pass ``--object-usd-path`` to route a USD through Sonic's
-rigid-object hook and verify that the object is registered in the scene.
+rigid-object hook and verify that the object is registered in the scene. For
+door tasks, pass ``--generate-default-door-urdf`` to add a hinged articulation
+scene entity without routing the door through Sonic's rigid-object hook.
 
 Run from the repository root inside the ``isaaclab`` conda environment.
 """
@@ -71,6 +73,104 @@ def write_default_box_usd(path: Path, size_m: float = 0.25, mass_kg: float = 2.0
     stage.GetRootLayer().Save()
 
 
+def write_default_door_urdf(path: Path) -> None:
+    """Write a minimal fixed-frame hinged door URDF for articulation smoke checks."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        """<?xml version="1.0"?>
+<robot name="somaforce_default_hinged_door">
+  <link name="frame">
+    <inertial>
+      <origin xyz="0 0 1.0" rpy="0 0 0"/>
+      <mass value="10.0"/>
+      <inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 1.0" rpy="0 0 0"/>
+      <geometry><box size="0.04 0.04 2.0"/></geometry>
+      <material name="frame_gray"><color rgba="0.25 0.25 0.25 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 1.0" rpy="0 0 0"/>
+      <geometry><box size="0.04 0.04 2.0"/></geometry>
+    </collision>
+  </link>
+  <link name="panel">
+    <inertial>
+      <origin xyz="0.45 0 1.0" rpy="0 0 0"/>
+      <mass value="12.0"/>
+      <inertia ixx="4.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="4.0"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.45 0 1.0" rpy="0 0 0"/>
+      <geometry><box size="0.9 0.05 2.0"/></geometry>
+      <material name="door_blue"><color rgba="0.22 0.38 0.58 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0.45 0 1.0" rpy="0 0 0"/>
+      <geometry><box size="0.9 0.05 2.0"/></geometry>
+    </collision>
+  </link>
+  <joint name="hinge_joint" type="revolute">
+    <parent link="frame"/>
+    <child link="panel"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.57" upper="1.57" effort="40.0" velocity="2.0"/>
+    <dynamics damping="1.0" friction="0.2"/>
+  </joint>
+</robot>
+""",
+        encoding="utf-8",
+    )
+
+
+def attach_default_door_articulation(env_cfg: object, door_urdf_path: Path) -> None:
+    """Attach a minimal hinged door articulation to a Sonic manager env cfg."""
+
+    import isaaclab.sim as sim_utils
+    from isaaclab.actuators import ImplicitActuatorCfg
+    from isaaclab.assets import ArticulationCfg
+
+    env_cfg.scene.door = ArticulationCfg(
+        prim_path="{ENV_REGEX_NS}/Door",
+        spawn=sim_utils.UrdfFileCfg(
+            asset_path=str(door_urdf_path),
+            fix_base=True,
+            force_usd_conversion=True,
+            collision_from_visuals=False,
+            make_instanceable=True,
+            joint_drive=None,
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                enabled_self_collisions=False,
+                fix_root_link=True,
+                solver_position_iteration_count=8,
+                solver_velocity_iteration_count=4,
+            ),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,
+                max_depenetration_velocity=1.0,
+            ),
+        ),
+        init_state=ArticulationCfg.InitialStateCfg(
+            pos=(0.85, -0.45, 0.0),
+            rot=(1.0, 0.0, 0.0, 0.0),
+            joint_pos={"hinge_joint": 0.0},
+            joint_vel={"hinge_joint": 0.0},
+        ),
+        actuators={
+            "hinge": ImplicitActuatorCfg(
+                joint_names_expr=["hinge_joint"],
+                effort_limit_sim=40.0,
+                velocity_limit_sim=2.0,
+                stiffness=0.0,
+                damping=1.0,
+            ),
+        },
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -95,6 +195,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--generate-default-box-usd", action="store_true")
     parser.add_argument("--default-box-usd-path", type=Path, default=Path("/tmp/somaforce_default_box.usd"))
     parser.add_argument("--default-box-size-m", type=float, default=0.25)
+    parser.add_argument("--generate-default-door-urdf", action="store_true")
+    parser.add_argument("--default-door-urdf-path", type=Path, default=Path("/tmp/somaforce_default_hinged_door.urdf"))
     parser.add_argument("--object-position", type=float, nargs=3, metavar=("X", "Y", "Z"))
     parser.add_argument("--object-mass", type=float, default=2.0)
     parser.add_argument("--instantiate-only", action="store_true")
@@ -124,6 +226,10 @@ def main() -> None:
         if task != ScaffoldTask.PUSH_PULL_BOX:
             raise ValueError("--generate-default-box-usd is only valid for push_pull_box")
         object_usd_path = str(args.default_box_usd_path)
+    if args.generate_default_door_urdf:
+        if task != ScaffoldTask.PUSH_PULL_DOOR:
+            raise ValueError("--generate-default-door-urdf is only valid for push_pull_door")
+        object_usd_path = str(args.default_door_urdf_path)
     if object_usd_path is not None and args.motion_source == "static":
         raise ValueError("Object-enabled Sonic checks require --motion-source scaffold-task")
     if args.motion_source == "static":
@@ -184,6 +290,9 @@ def main() -> None:
         if args.generate_default_box_usd:
             write_default_box_usd(args.default_box_usd_path, args.default_box_size_m, args.object_mass)
             print(f"default_box_usd_written={args.default_box_usd_path}", flush=True)
+        if args.generate_default_door_urdf:
+            write_default_door_urdf(args.default_door_urdf_path)
+            print(f"default_door_urdf_written={args.default_door_urdf_path}", flush=True)
 
         print("importing_hydra", flush=True)
         from hydra import compose, initialize_config_dir
@@ -204,6 +313,9 @@ def main() -> None:
         env_cfg.seed = 0
         env_cfg.sim.device = args.device
         env_cfg.config["headless"] = True
+        if args.generate_default_door_urdf:
+            attach_default_door_articulation(env_cfg, args.default_door_urdf_path)
+            print("door_articulation_attached=True", flush=True)
         print(f"env_cfg_ok={type(env_cfg).__name__}", flush=True)
 
         if args.instantiate_only:
@@ -227,8 +339,11 @@ def main() -> None:
 
         print(f"env_ok={env.num_envs}", flush=True)
         rigid_object_names = sorted(getattr(env.scene, "rigid_objects", {}).keys())
+        articulation_names = sorted(getattr(env.scene, "articulations", {}).keys())
         print(f"rigid_object_names={rigid_object_names}", flush=True)
+        print(f"articulation_names={articulation_names}", flush=True)
         print(f"object_enabled={'object' in rigid_object_names}", flush=True)
+        print(f"door_enabled={'door' in articulation_names}", flush=True)
         print(f"motion_joint_pos_shape={tuple(motion_cmd.joint_pos.shape)}", flush=True)
         print(f"residual_action_shape={tuple(a_nom.shape)}", flush=True)
         print(f"scaffold_a_nom_shape={tuple(scaffold.a_nom.shape)}", flush=True)

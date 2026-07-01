@@ -231,6 +231,31 @@ residual_action_shape=(1, 29)
 scaffold_a_nom_shape=(1, 29)
 ```
 
+Door articulation smoke verification:
+
+```text
+PYTHONUNBUFFERED=1 python scripts/verify_sonic_scaffold_env.py \
+  --motion-source scaffold-task \
+  --task push_pull_door \
+  --interaction-mode push \
+  --motion-file /tmp/somaforce_g1_door_push_motion.pkl \
+  --generate-default-door-urdf
+```
+
+Expected articulation-related output:
+
+```text
+requires_articulation_scene=True
+door_articulation_attached=True
+rigid_object_names=[]
+articulation_names=['door', 'robot']
+object_enabled=False
+door_enabled=True
+motion_joint_pos_shape=(1, 29)
+residual_action_shape=(1, 29)
+scaffold_a_nom_shape=(1, 29)
+```
+
 Known environment notes:
 
 - The current Sonic checkout does not include the release motion dataset paths
@@ -258,7 +283,10 @@ rollout path:
 
 ## Next Engineering Target
 
-Add the hinged Isaac articulation scene hook for the G1 door scaffold. The box
-path now supports Sonic's existing rigid-object USD hook with a generated
-rigid-body USD and companion object-motion pkl. The scaffold boundary should
-remain unchanged: the output is only the nominal scaffold action `a_nom`.
+Replace the generated smoke assets with task-specific door/box assets and start
+collecting scaffold-only rollout diagnostics. The box path supports Sonic's
+existing rigid-object USD hook with a generated rigid-body USD and companion
+object-motion pkl. The door path supports a generated hinged URDF articulation
+hook without routing the door through Sonic's rigid-object path. The scaffold
+boundary should remain unchanged: the output is only the nominal scaffold action
+`a_nom`.
