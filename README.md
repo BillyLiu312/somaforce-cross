@@ -1,149 +1,122 @@
 # SomaForce-Cross
 
-> SomaForce-Cross is the implementation route for scaffolded humanoid force adaptation via cross semantic force distillation.
+> Scaffolded humanoid force adaptation via cross semantic force distillation.
 
-This repository is the standalone engineering baseline for developing SomaForce-Cross from the current selected pipeline. It includes the baseline architecture figure, module contracts, implementation plan, and the first Sonic-based scaffold engineering slice.
-
-Baseline pipeline:
-
-![SomaForce-Cross Pipeline](figures/somaforce_cross_pipeline.png)
-
-## Current Purpose
-
-This repository should now contain:
-
-- the baseline SomaForce-Cross pipeline;
-- module boundary definitions;
-- expected input/output contracts;
-- implementation milestones;
-- Sonic-based scaffold adapters and task trajectory templates;
-- notes for Isaac Lab and real F/T integration;
-- enough context to continue engineering from a self-contained baseline.
-
-It should not yet contain:
-
-- RL training code;
-- policy/model implementations;
-- sensor simulation code;
-- checkpoints, logs, videos, or generated experiment artifacts.
+This repository is the executable engineering baseline for SomaForce-Cross. The selected Phase 0 scaffold uses HDMI-style robot-object co-tracking with HDMI door references and jointly retargeted OMOMO heavy-payload references.
 
 ## Selected Pipeline
 
 ```text
-Sonic-style task scaffold
+HDMI door references + retargeted OMOMO payload references
+  -> canonical G1/object/contact reference library
+  -> HDMI-style robot-object co-tracking scaffold
   -> nominal action a_nom
   -> virtual wrist F/T observation model
-  -> privileged direction/magnitude force semantics
+  -> privileged task-conditioned force semantics
   -> p_dir outer p_mag
-  -> P_cross
-  -> flatten(P_cross)
-  -> CrossEncoder
-  -> z_cross
+  -> P_cross -> CrossEncoder -> z_cross
   -> bounded residual actor
   -> a = a_nom + clip(Delta a_force)
   -> student distillation from real wrist F/T histories
 ```
 
-Current key decisions:
+Phase 0 decisions:
 
-- The scaffold should be Sonic-style or Sonic-based: it provides task base motion and `a_nom`.
-- The deployed sensor assumption is a real wrist/end-effector F/T sensor.
-- Simulation should model a virtual wrist F/T sensor, not expose perfect contact truth to the deployed actor.
-- Direction and magnitude are represented as soft semantic distributions.
-- Cross interaction is implemented conceptually as `P_cross = p_dir outer p_mag`, then flattening and encoding into `z_cross`.
-- The actor should receive only `z_cross` as the force-semantic latent.
-- `p_dir`, `p_mag`, and `P_cross` are retained for auxiliary supervision, student distillation, logging, and visualization.
+- HDMI supplies door task references, object-aware tracking structure, contact targets, and the training pattern.
+- OMOMO supplies full-body human-object motion for lift/carry/place after joint G1/object retargeting.
+- Both sources enter one strict `CanonicalReferenceEpisode` contract.
+- OMOMO does not provide door motion, physical payload labels, or wrist F/T; those are assigned or generated in Isaac Lab.
+- Door and payload specialists are trained separately first.
+- SONIC remains a legacy tracker baseline and compatibility path, not a default dependency.
+
+## Implemented Scaffold Slice
+
+The current code provides:
+
+- canonical 50 Hz G1/object/contact reference validation;
+- HDMI `motion.npz` conversion;
+- conversion of jointly retargeted OMOMO NPZ results;
+- object-frame contact-target reconstruction;
+- reference provenance, quality, confidence, and valid-frame masks;
+- deterministic `ReferenceLibrary` persistence;
+- `HDMIReferenceScaffold` outputting `a_nom` and nominal task references;
+- default door and heavy-payload scaffold configs;
+- legacy Sonic adapters and smoke tools for regression/baseline use.
+
+The current code does not yet provide:
+
+- raw SMPL-H OMOMO to G1 nonlinear retarget optimization;
+- HDMI PPO/co-tracking training code vendored into this repository;
+- force teacher/student policy implementations;
+- real F/T integration, checkpoints, or experiment logs.
 
 ## Repository Layout
 
 ```text
+configs/scaffold/
+  g1_push_pull_door.yaml
+  g1_heavy_payload.yaml
+  g1_push_pull_box.yaml          # legacy Sonic baseline
 docs/
-  scaffold_completion_audit.md
-  implementation_plan.md
-  module_contracts.md
-  scaffold_development.md
-  scaffold_verification_matrix.md
-figures/
-  somaforce_cross_pipeline.png
-configs/
-  scaffold/
-somaforce_cross/
-  scaffold/
+  hdmi_omomo_scaffold_pipeline.md
+somaforce_cross/scaffold/
+  reference_schema.py
+  hdmi_adapter.py
+  omomo_adapter.py
+  reference_library.py
+  hdmi_scaffold.py
+  contracts.py
+  scenes.py
+  sonic_*.py                     # legacy baseline
 scripts/
-  diagnose_scaffold_rollouts.py
-  export_scaffold_sonic_motion.py
-  print_sonic_scaffold_overrides.py
-  record_scaffold_rollout.py
-  verify_scaffold_trajectories.py
-  verify_sonic_imports.py
-  verify_sonic_scaffold_env.py
+  build_scaffold_reference.py
 tests/
+  test_hdmi_omomo_pipeline.py
+  test_scaffold_contracts.py
 ```
 
-The current scaffold boundary is:
+## Reference Conversion
+
+HDMI door reference:
 
 ```text
-motion trajectory
-  -> Sonic-style scaffold / TrackingCommand
-  -> residual_joint_pos_action(...)
-  -> a_nom
-```
-
-SomaForce-Cross force semantics and bounded residual control are added after
-`a_nom`; the scaffold code must not consume privileged force labels.
-
-Current scaffold motion export:
-
-```text
-python scripts/export_scaffold_sonic_motion.py --output /tmp/somaforce_g1_scaffold_motions.pkl
-```
-
-This writes Sonic motion-lib entries for:
-
-```text
-somaforce_g1_door_push
-somaforce_g1_door_pull
-somaforce_g1_box_push
-somaforce_g1_box_pull
-```
-
-Current Sonic manager-env binding:
-
-```text
-python scripts/print_sonic_scaffold_overrides.py \
-  --task push_pull_box \
-  --interaction-mode push \
-  --motion-file /tmp/somaforce_g1_box_push_motion.pkl \
-  --object-usd-path /path/to/box.usd
-```
-
-Box object smoke verification:
-
-```text
-PYTHONUNBUFFERED=1 python scripts/verify_sonic_scaffold_env.py \
-  --motion-source scaffold-task \
-  --task push_pull_box \
-  --interaction-mode push \
-  --motion-file /tmp/somaforce_g1_box_push_motion.pkl \
-  --generate-default-box-usd
-```
-
-Door articulation smoke verification:
-
-```text
-PYTHONUNBUFFERED=1 python scripts/verify_sonic_scaffold_env.py \
-  --motion-source scaffold-task \
+python scripts/build_scaffold_reference.py \
+  --source hdmi \
+  --input /path/to/motion.npz \
+  --output /path/to/door_references.pt \
+  --episode-id door-push-001 \
+  --source-clip-id push_door-hand \
   --task push_pull_door \
-  --interaction-mode push \
-  --motion-file /tmp/somaforce_g1_door_push_motion.pkl \
-  --generate-default-door-urdf
+  --left-hand-body-index <index> \
+  --right-hand-body-index <index> \
+  --object-body-index -1
 ```
 
-Box uses Sonic's existing rigid-object USD hook. Door remains scaffold-motion
-ready and uses a hinged Isaac articulation scene hook rather than Sonic's rigid
-object path.
+OMOMO joint-retarget result:
+
+```text
+python scripts/build_scaffold_reference.py \
+  --source omomo-retargeted \
+  --input /path/to/retargeted_clip.npz \
+  --output /path/to/payload_references.pt \
+  --episode-id payload-001 \
+  --source-clip-id omomo-source-clip \
+  --retarget-version g1-retarget-v1 \
+  --retarget-quality foot_slip_m=0.01 \
+  --retarget-quality grasp_error_m=0.02
+```
+
+The OMOMO command intentionally rejects raw/incomplete data. The input must already contain the jointly retargeted G1 body, object trajectory, wrist poses, and contact intent.
+
+## Verification
+
+```text
+python -m pytest -q
+python -m compileall -q scripts somaforce_cross
+```
+
+The Sonic-specific scripts remain available for compatibility regression. See [docs/hdmi_omomo_scaffold_pipeline.md](docs/hdmi_omomo_scaffold_pipeline.md) for contracts, acceptance gates, and the legacy boundary.
 
 ## Next Step
 
-Next engineering step: replace the generated smoke assets with task-specific
-door/box assets and start collecting scaffold-only rollout diagnostics.
+Run the converter on the released HDMI `push_door-hand` reference and one simple jointly retargeted OMOMO carry clip. After deterministic replay, connect these canonical episodes to HDMI-style Isaac Lab reference-state initialization and robot-object co-tracking training.

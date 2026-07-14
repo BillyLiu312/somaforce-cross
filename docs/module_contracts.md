@@ -4,21 +4,19 @@ Date: 2026-07-01
 
 This file records the expected module contracts before implementation code is added.
 
-## 1. Sonic-Style Scaffold
+## 1. HDMI + OMOMO Scaffold
 
 Purpose:
 
 ```text
-provide task base motion and nominal action a_nom
+canonicalize HDMI/OMOMO robot-object references and provide nominal action a_nom
 ```
 
 Inputs:
 
-- `task_id`;
-- `cmd_6d`;
-- robot state;
-- object/task prior;
-- safety envelope.
+- HDMI door `motion.npz` or jointly retargeted OMOMO payload result;
+- canonical G1/object/contact reference;
+- `task_id`, phase, robot state, object/task prior, and safety envelope.
 
 Outputs:
 
@@ -26,10 +24,15 @@ Outputs:
 - nominal hand reference;
 - nominal body reference;
 - scaffold confidence or validity flag.
+- nominal object reference;
+- contact intent, object-frame target, and confidence;
+- source provenance and per-frame validity mask.
 
 Non-goal:
 
-- The scaffold should not solve force adaptation. It provides the base motion that SomaForce-Cross corrects.
+- The scaffold should not solve force adaptation. It provides the base robot-object motion that SomaForce-Cross corrects.
+- OMOMO must already be jointly retargeted to G1 before ingestion.
+- Physical force, payload mass, inertia, CoM, and load share must not be inferred from OMOMO kinematics.
 
 ## 2. Virtual Wrist F/T Sensor Model
 

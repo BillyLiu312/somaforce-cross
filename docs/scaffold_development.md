@@ -1,5 +1,7 @@
 # Sonic-Based Scaffold Development
 
+> Legacy scaffold record. The current HDMI + OMOMO construction pipeline is in `docs/hdmi_omomo_scaffold_pipeline.md`.
+
 This note records the first SomaForce-Cross scaffold engineering slice on the
 `dev` branch.
 

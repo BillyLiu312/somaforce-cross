@@ -11,9 +11,9 @@ class MotionTrajectoryScaffold:
     """Generate ``a_nom`` from a G1 motion trajectory.
 
     This class is intentionally independent from Isaac Lab. It supports fast unit
-    tests and lets us validate the scaffold contract before the Sonic manager env
-    is fully running. In an Isaac Lab rollout, ``SonicScaffoldAdapter`` should be
-    used to convert Sonic's ``TrackingCommand`` reference into the same output.
+    tests and preserves the original procedural/Sonic compatibility path. The
+    selected HDMI + OMOMO pipeline uses ``HDMIReferenceScaffold`` over a
+    ``CanonicalReferenceEpisode``.
     """
 
     def __init__(
@@ -53,6 +53,7 @@ class MotionTrajectoryScaffold:
         joint_pos = self._select_frame(self.trajectory.joint_pos, frame_index)
         hand_ref = self._select_optional(self.trajectory.hand_pose_w, frame_index)
         body_ref = self._select_optional(self.trajectory.body_pose_w, frame_index)
+        cmd_6d = self._select_command(frame_index)
         a_nom = (joint_pos - self.action_offset) / self.action_scale
         if self.action_clip is not None:
             a_nom = torch.clamp(a_nom, -self.action_clip, self.action_clip)
@@ -63,7 +64,7 @@ class MotionTrajectoryScaffold:
             nominal_joint_pos=joint_pos,
             nominal_hand_ref=hand_ref,
             nominal_body_ref=body_ref,
-            cmd_6d=self.trajectory.cmd_6d,
+            cmd_6d=cmd_6d,
             confidence=confidence,
             task=self.task,
         )
@@ -100,3 +101,16 @@ class MotionTrajectoryScaffold:
             return tensor[:, frame_index]
         env_ids = torch.arange(tensor.shape[0], device=tensor.device)
         return tensor[env_ids, frame_index.to(device=tensor.device)]
+
+    def _select_command(self, frame_index: int | torch.Tensor) -> torch.Tensor | None:
+        command = self.trajectory.cmd_6d
+        if command is None or command.ndim == 1:
+            return command
+        if self.trajectory.joint_pos.ndim == 2 and command.shape[0] == self.trajectory.joint_pos.shape[0]:
+            return command[frame_index]
+        if self.trajectory.joint_pos.ndim == 3 and command.ndim == 3:
+            if isinstance(frame_index, int):
+                return command[:, frame_index]
+            env_ids = torch.arange(command.shape[0], device=command.device)
+            return command[env_ids, frame_index.to(device=command.device)]
+        return command

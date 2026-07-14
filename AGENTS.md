@@ -6,9 +6,9 @@ You are entering the **SomaForce-Cross** repository.
 
 This repository is the standalone engineering baseline for the current selected SomaForce-Cross pipeline. It should be treated as a self-contained starting point for future engineering work, not as a place to rediscover or redesign the method from scratch.
 
-SomaForce-Cross studies **force-aware whole-body humanoid manipulation of articulated objects**. The first target domain is constrained interaction with human-scale mechanisms such as doors, cabinet doors, and drawers. The central research idea is:
+SomaForce-Cross studies **force-aware whole-body humanoid contact-rich manipulation**. The first target domains are door interaction and heavy-object lift/carry/place. The central research idea is:
 
-> Contact force should not be treated only as a safety threshold. During articulated-object manipulation, force is an embodied observation of environmental constraint mismatch.
+> Contact force should not be treated only as a safety threshold. During execution, wrench history is an embodied observation of mechanism constraint mismatch, payload/load distribution, and required whole-body mobilization.
 
 The method should help a humanoid answer, during contact:
 
@@ -39,7 +39,9 @@ Do not revert the method name to `SomaForce-RLD-S` as the main identity. That ol
 The current baseline pipeline is:
 
 ```text
-Sonic-style task scaffold
+HDMI door reference + jointly retargeted OMOMO payload reference
+  -> canonical G1/object/contact reference library
+  -> HDMI-style robot-object co-tracking scaffold
   -> nominal action a_nom
   -> virtual wrist F/T observation model
   -> privileged direction/magnitude force semantics
@@ -53,17 +55,22 @@ Sonic-style task scaffold
   -> student distillation from real wrist F/T histories
 ```
 
-The included baseline figure is:
+The repository retains the earlier force-stack figure:
 
 ```text
 figures/somaforce_cross_pipeline.png
 ```
 
+Its cross/distillation stages remain useful, but its left scaffold column is historical and still says Sonic-style. Do not use that label as the current Phase 0 decision; follow `docs/hdmi_omomo_scaffold_pipeline.md`.
+
 ## Non-Negotiable Pipeline Decisions
 
 The following decisions are already selected and should not be contradicted unless the project owner explicitly changes the method:
 
-- The scaffold is **Sonic-style / Sonic-based**. It provides the task base motion and nominal action `a_nom`.
+- The Phase 0 scaffold is **HDMI-style robot-object co-tracking**. HDMI supplies door references/task structure; jointly retargeted OMOMO supplies heavy-payload references.
+- Every source reference must pass through the canonical G1/object/contact schema before scaffold training or replay.
+- OMOMO is not a door or wrench dataset. Do not infer mass, force, CoM, or load-share labels from human kinematics; generate them in Isaac Lab rollouts.
+- Sonic/TWIST are later tracker baselines or replaceable backbones, not Phase 0 dependencies.
 - SomaForce-Cross learns a **bounded force-conditioned residual**, not the whole task behavior from scratch.
 - The deployed hardware assumption is a **real wrist/end-effector F/T sensor**.
 - Simulation should include a **virtual wrist F/T sensor model** that mimics deployable sensing.
@@ -84,13 +91,17 @@ z_cross = CrossEncoder(z_joint)
 - `p_dir`, `p_mag`, and `P_cross` are retained for auxiliary supervision, student distillation, logging, and visualization.
 - Student distillation should respect the coupling among `p_dir`, `p_mag`, and `P_cross`; do not treat them as three unrelated equal-weight latent targets.
 
-## Why Sonic-Style Scaffold
+## Why HDMI + OMOMO Scaffold
 
-The scaffold should provide different base motion trajectories for different tasks. It is responsible for nominal task tracking, such as:
+HDMI supplies the object-aware task mechanics that a motion-only tracker lacks: robot-object reference-state initialization, co-tracking, object-frame contact targets, progress/contact rewards, and residual joint-position actions around a reference.
+
+OMOMO expands the heavy-object reference library with full-body human-object motion. It must be jointly retargeted to G1 with the object trajectory and wrist-to-object transforms preserved. Low-confidence contact frames are masked.
+
+The scaffold is responsible for nominal task tracking, such as:
 
 - approximate hand trajectory for door opening;
-- approximate slider motion for drawer pulling;
-- approximate body reference for reach maintenance;
+- approximate lift/carry/place motion for heavy payloads;
+- approximate body reference for reach, balance, and contact maintenance;
 - safe nominal posture and task timing.
 
 The force residual is responsible for adapting this base motion under contact:
@@ -215,16 +226,18 @@ This preserves the factorized semantics without pretending that `p_dir`, `p_mag`
 
 ## Research Scope
 
-The first research target is articulated-object manipulation:
+The first research targets are:
 
 - hinged doors;
-- cabinet or large doors;
-- drawers or sliders.
+- heavy-object lift/carry/place;
+- asymmetric or offset-CoM payload transport.
+
+Cart pulling/pushing is the preferred next task. Drawers, sliders, and valves remain later constraint-generalization tasks.
 
 The main mismatch sources are:
 
 - hinge-axis error;
-- slider-direction error;
+- payload mass, CoM, inertia, and load-share error;
 - handle-pose error;
 - friction or damping variation;
 - initial stance and reach stress;
@@ -253,7 +266,7 @@ Do not frame SomaForce-Cross as:
 
 The current contribution is narrower and cleaner:
 
-> A Sonic-style task scaffold provides nominal humanoid task motion; privileged force teaches direction/magnitude semantics; their outer-product cross representation becomes `z_cross`; a bounded residual actor uses `z_cross`; a student distills the same semantics from deployable wrist F/T histories.
+> An HDMI-style task scaffold trained from HDMI door and OMOMO-derived payload references provides nominal humanoid-object motion; privileged force teaches task-conditioned constraint/load and magnitude semantics; their outer-product cross representation becomes `z_cross`; a bounded residual actor uses `z_cross`; a student distills the same semantics from deployable wrist F/T histories.
 
 ## Baselines and Ablations to Keep in Mind
 

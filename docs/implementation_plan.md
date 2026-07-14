@@ -6,7 +6,7 @@ This document stages the future engineering work for SomaForce-Cross. It intenti
 
 ## 1. Method Route
 
-SomaForce-Cross uses the baseline architecture included in this repository:
+SomaForce-Cross retains the force/cross architecture in the following historical figure. Its Sonic scaffold label is superseded by the HDMI + OMOMO route below:
 
 ```text
 figures/somaforce_cross_pipeline.png
@@ -15,7 +15,8 @@ figures/somaforce_cross_pipeline.png
 The selected route is:
 
 ```text
-Sonic-style scaffold
+HDMI + OMOMO canonical references
+  -> HDMI-style robot-object scaffold
   -> nominal task motion a_nom
   -> privileged force semantics in simulation
   -> virtual wrist F/T observation model
@@ -30,7 +31,8 @@ Sonic-style scaffold
 
 - Start from pipeline contracts before executable code.
 - Keep task generation separate from force residual learning.
-- Treat Sonic-style scaffold as the source of nominal task motion.
+- Treat the HDMI-style co-tracking scaffold as the source of nominal task motion.
+- Use HDMI references for doors and jointly retargeted OMOMO references for heavy payloads.
 - Treat privileged simulation force as teacher supervision, not deployment input.
 - Treat real wrist F/T sensing as the deployment assumption.
 - Make `P_cross(t)` a first-class logged diagnostic.
@@ -93,7 +95,7 @@ Required properties:
 Goal:
 
 ```text
-Sonic-style base trajectory + virtual wrist F/T observation
+HDMI/OMOMO canonical reference + HDMI-style scaffold + virtual wrist F/T observation
 ```
 
 Deliverables:

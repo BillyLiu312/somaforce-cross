@@ -1,5 +1,7 @@
 # Scaffold Completion Audit
 
+> Historical audit: this file records the completed Sonic compatibility slice as of 2026-07-02. Sonic is now a legacy baseline. The selected Phase 0 pipeline is documented in `docs/hdmi_omomo_scaffold_pipeline.md`.
+
 Audit date: 2026-07-02
 
 This audit maps the requested SomaForce-Cross scaffold development order to the
@@ -41,7 +43,7 @@ python -m compileall -q scripts somaforce_cross
 
 The completed scaffold stage is not the force-conditioned residual policy. It
 does not train force semantics, read deployable wrist F/T histories, or consume
-privileged contact labels. It provides the selected Sonic-style nominal task
+privileged contact labels. It provides the historical Sonic-style nominal task
 motion path:
 
 ```text

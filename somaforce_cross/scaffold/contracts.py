@@ -7,7 +7,7 @@ privileged contact labels; SomaForce-Cross adds the bounded force residual later
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import Enum
 
 import torch
 
@@ -47,10 +47,11 @@ G1_BODY_JOINT_NAMES: tuple[str, ...] = (
 G1_FULL_JOINT_NAMES: tuple[str, ...] = G1_BODY_JOINT_NAMES
 
 
-class ScaffoldTask(StrEnum):
+class ScaffoldTask(str, Enum):
     """First diagnostic scaffold tasks."""
 
     PUSH_PULL_DOOR = "push_pull_door"
+    HEAVY_PAYLOAD = "heavy_payload"
     PUSH_PULL_BOX = "push_pull_box"
 
 
@@ -67,7 +68,8 @@ class MotionTrajectory:
             ``[T, H, D]`` or ``[B, T, H, D]``.
         body_pose_w: Optional body reference, shaped ``[T, K, D]`` or
             ``[B, T, K, D]``.
-        cmd_6d: Optional task command vector, shaped ``[6]`` or ``[B, 6]``.
+        cmd_6d: Optional task command vector, shaped ``[6]``, ``[T, 6]``,
+            ``[B, 6]``, or ``[B, T, 6]``.
     """
 
     joint_pos: torch.Tensor
@@ -104,3 +106,11 @@ class ScaffoldOutput:
     cmd_6d: torch.Tensor | None = None
     confidence: torch.Tensor | None = None
     task: ScaffoldTask | None = None
+    object_root_ref: torch.Tensor | None = None
+    object_joint_ref: torch.Tensor | None = None
+    contact_target_obj: torch.Tensor | None = None
+    contact_intent: torch.Tensor | None = None
+    contact_confidence: torch.Tensor | None = None
+    phase: torch.Tensor | None = None
+    reference_valid: torch.Tensor | None = None
+    reference_source: str | None = None

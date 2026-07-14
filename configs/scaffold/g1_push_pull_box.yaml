@@ -3,13 +3,13 @@ robot:
   type: unitree_g1
   joint_order: g1_29dof_sonic_mujoco_order
 scaffold:
-  provider: sonic
+  provider: legacy_sonic_baseline
   command_name: motion
   input: motion_trajectory
   output: a_nom
   action_clip: 20.0
 trajectory:
-  source: procedural_g1_box
+  source: procedural_g1_box_legacy
   default_mode: push
   supported_modes:
     - push

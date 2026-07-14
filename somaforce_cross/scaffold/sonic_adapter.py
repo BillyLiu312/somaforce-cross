@@ -1,4 +1,4 @@
-"""Adapter from Sonic ``TrackingCommand`` to SomaForce-Cross scaffold outputs."""
+"""Legacy baseline adapter from Sonic ``TrackingCommand`` to scaffold outputs."""
 
 from __future__ import annotations
 
@@ -12,11 +12,13 @@ from somaforce_cross.scaffold.contracts import ScaffoldOutput, ScaffoldTask
 
 @dataclass(frozen=True)
 class SonicScaffoldAdapter:
-    """Expose Sonic-style manager env references as SomaForce-Cross ``a_nom``.
+    """Expose Sonic manager-env references as a compatibility ``a_nom`` path.
 
     The adapter expects an Isaac Lab ``ManagerBasedRLEnv`` with Sonic's
     ``motion`` command term. Imports from ``gear_sonic.envs.manager_env.mdp`` are
     intentionally lazy because those modules require an active Isaac/Omni app.
+    The selected Phase 0 route is HDMI + OMOMO; this adapter remains for baseline
+    comparisons and existing smoke tests.
     """
 
     env: Any

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from somaforce_cross.scaffold.contracts import MotionTrajectory, ScaffoldTask
+from somaforce_cross.scaffold.hdmi_scaffold import HDMIReferenceScaffold
+from somaforce_cross.scaffold.reference_schema import CanonicalReferenceEpisode
 from somaforce_cross.scaffold.task_trajectories import (
     InteractionMode,
     make_g1_push_pull_box_trajectory,
@@ -15,7 +17,7 @@ from somaforce_cross.scaffold.trajectory import MotionTrajectoryScaffold
 
 @dataclass(frozen=True)
 class ScaffoldSceneSpec:
-    """Minimal scene identity for Sonic-based nominal scaffold rollouts."""
+    """Minimal scene identity for nominal scaffold rollouts."""
 
     task: ScaffoldTask
     robot: str
@@ -38,6 +40,19 @@ G1_PUSH_PULL_BOX_SCENE = ScaffoldSceneSpec(
     object_type="rigid_box",
     interaction_modes=("push", "pull"),
     mismatch_sources=("box_pose_error", "friction_variation", "initial_stance_reach_stress"),
+)
+
+G1_HEAVY_PAYLOAD_SCENE = ScaffoldSceneSpec(
+    task=ScaffoldTask.HEAVY_PAYLOAD,
+    robot="unitree_g1",
+    object_type="rigid_heavy_payload",
+    interaction_modes=("lift_carry_place",),
+    mismatch_sources=(
+        "payload_mass_error",
+        "payload_com_error",
+        "bilateral_load_share_error",
+        "grasp_transform_error",
+    ),
 )
 
 
@@ -83,3 +98,23 @@ def make_g1_push_pull_box_scaffold(
         task=ScaffoldTask.PUSH_PULL_BOX,
         action_clip=action_clip,
     )
+
+
+def make_g1_hdmi_reference_scaffold(
+    reference: CanonicalReferenceEpisode,
+    action_clip: float | None = 20.0,
+) -> HDMIReferenceScaffold:
+    """Create the selected HDMI-style scaffold for a canonical reference."""
+
+    return HDMIReferenceScaffold(reference=reference, action_clip=action_clip)
+
+
+def make_g1_heavy_payload_scaffold(
+    reference: CanonicalReferenceEpisode,
+    action_clip: float | None = 20.0,
+) -> HDMIReferenceScaffold:
+    """Create an OMOMO-derived heavy-payload scaffold reference policy."""
+
+    if reference.metadata.task != ScaffoldTask.HEAVY_PAYLOAD:
+        raise ValueError("heavy-payload scaffold requires task=heavy_payload")
+    return make_g1_hdmi_reference_scaffold(reference, action_clip=action_clip)

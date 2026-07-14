@@ -1,5 +1,7 @@
 # Scaffold Verification Matrix
 
+> Legacy Sonic verification matrix. These gates remain useful for regression tests, but they are no longer the default Phase 0 acceptance criteria. See `docs/hdmi_omomo_scaffold_pipeline.md`.
+
 This matrix maps the current SomaForce-Cross scaffold engineering slice to the
 requested development gates on the `dev` branch.
 
