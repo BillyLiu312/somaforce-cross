@@ -291,3 +291,33 @@ P_cross(t)
 ```
 
 because it exposes whether the method is using force as a structured semantic signal rather than as an opaque scalar or raw wrench input.
+
+## Training Job Script Workflow
+
+When preparing cluster or distributed training jobs for SomaForce-Cross, HDMI, Isaac Lab, or PyTorch workflows, use the Codex skill:
+
+```text
+$training-job-scripts
+/inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/codex/skills/training-job-scripts/SKILL.md
+```
+
+Reusable task scripts should live under:
+
+```text
+/inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/training-job-scripts
+```
+
+Organize scripts by project and task, for example:
+
+```text
+training-job-scripts/hdmi/push_door_hand/smoke_4gpu.sh
+training-job-scripts/hdmi/push_door_hand/train_4gpu.sh
+```
+
+For platform submissions, prefer returning a one-line command:
+
+```bash
+bash /inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/training-job-scripts/<project>/<task_slug>/<script>.sh
+```
+
+Generated scripts should be self-contained, use absolute workspace paths, write logs through `tee` into persistent log directories, and save checkpoints to persistent output directories rather than only `/tmp`. Prefer explicit Python module launch (`/opt/miniconda3/envs/isaaclab/bin/python -m torch.distributed.run`) over `torchrun` on this platform.
