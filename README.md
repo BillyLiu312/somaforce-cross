@@ -2,7 +2,23 @@
 
 > Scaffolded humanoid force adaptation via cross semantic force distillation.
 
-This repository is the executable engineering baseline for SomaForce-Cross. The first door scaffold is a frozen policy trained with the official HDMI implementation and migrated behind a standalone inference contract. SomaForce-Cross users should not need to install HDMI at runtime.
+This repository is the executable engineering baseline for SomaForce-Cross. The
+first door scaffold is a frozen policy trained with the official HDMI
+implementation and migrated behind a standalone inference contract. Runtime
+play imports only SomaForce-Cross code plus PyTorch/Isaac Lab and reads local
+artifacts under `artifacts/`; it neither imports `active_adaptation` nor accesses
+an HDMI checkout. The exported weights, reference motion, and USD assets still
+retain HDMI provenance and redistribution restrictions.
+
+## Method Overview
+
+![SomaForce-Cross pipeline overview](figures/somaforce_cross_pipeline.png)
+
+The figure is the retained conceptual overview of the complete research
+pipeline. Its older `SomaForce-RLD-S` and `Sonic-style` labels should be read as
+`SomaForce-Cross` and the nominal interaction scaffold, respectively. The
+implemented door baseline now uses the standalone frozen HDMI artifact; the
+force teacher, Cross residual, and deployable student remain future stages.
 
 ## Selected Pipeline
 
@@ -71,6 +87,12 @@ docs/
   hdmi_omomo_scaffold_pipeline.md
   pretrained_hdmi_scaffold_rules.md
   pretrained_hdmi_scaffold_validation.md
+figures/
+  somaforce_cross_pipeline.png
+artifacts/scaffolds/hdmi_push_door_hand/v1/
+  manifest.json
+  observation_contract.json
+  action_contract.json
 somaforce_cross/scaffold/
   pretrained_hdmi.py
   pretrained_hdmi_isaac.py
@@ -86,7 +108,7 @@ scripts/
   verify_pretrained_hdmi_isolation.py
 tests/
   test_hdmi_omomo_pipeline.py
-  test_scaffold_contracts.py
+  test_pretrained_hdmi_scaffold.py
 ```
 
 ## Reference Conversion
@@ -146,6 +168,11 @@ joint/progress, contact and support metrics, root-height stability, finite-state
 status, and the zero-hook result. Omitting `--headless` enables Isaac Lab GUI
 mode where a display is available. Isaac Sim 5.1 may block during teardown after
 an interactive GUI session; headless batch mode exits after flushing metrics.
+
+The rollout is policy-driven: the environment receives the frozen teacher's
+`a_nom` exactly before the declared delay, smoothing, scaling, and joint-position
+control stages. Fixed-input action parity is validated to `1e-5`, but a matched
+closed-loop rollout against the complete HDMI environment is not yet claimed.
 
 For GUI playback, render occurs once per 50 Hz control step rather than once per
 physics substep. `--realtime --playback-rate 1.0` follows reference wall time;
