@@ -36,13 +36,13 @@ Do not revert the method name to `SomaForce-RLD-S` as the main identity. That ol
 
 ## Selected Pipeline
 
-The current baseline pipeline is:
+The current door baseline pipeline is:
 
 ```text
-HDMI door reference + jointly retargeted OMOMO payload reference
-  -> canonical G1/object/contact reference library
-  -> HDMI-style robot-object co-tracking scaffold
-  -> nominal action a_nom
+frozen policy trained with the official HDMI implementation
+  -> standalone exported artifact (no HDMI runtime dependency)
+  -> versioned observation/action adapter
+  -> nominal normalized action a_nom [B, 23]
   -> virtual wrist F/T observation model
   -> privileged direction/magnitude force semantics
   -> p_dir outer p_mag
@@ -55,22 +55,48 @@ HDMI door reference + jointly retargeted OMOMO payload reference
   -> student distillation from real wrist F/T histories
 ```
 
-The repository retains the earlier force-stack figure:
+The canonical HDMI/OMOMO reference library remains part of the broader task
+pipeline for replay, diagnostics, and future payload scaffolds. It is separate
+from the first learned door-policy artifact: canonical G1 references have 29
+joints, while the audited pretrained door policy currently controls 23 joints.
+
+Follow `docs/pretrained_hdmi_scaffold_rules.md`; use
+`docs/hdmi_omomo_scaffold_pipeline.md` only for canonical reference construction
+and future reference-driven tasks.
+
+## Current Pretrained Scaffold Decision
+
+The first door scaffold is a frozen pretrained HDMI policy migrated as a
+standalone artifact. Users of SomaForce-Cross must not need to clone or install
+HDMI. The HDMI checkout is allowed only in a separate export/oracle environment
+for producing the artifact and deterministic parity traces.
+
+Read and follow:
 
 ```text
-figures/somaforce_cross_pipeline.png
+docs/pretrained_hdmi_scaffold_rules.md
 ```
 
-Its cross/distillation stages remain useful, but its left scaffold column is historical and still says Sonic-style. Do not use that label as the current Phase 0 decision; follow `docs/hdmi_omomo_scaffold_pipeline.md`.
+That document is the source of truth for checkpoint provenance, teacher versus
+deployable policy roles, 23-D action semantics, artifact layout, licensing, and
+verification gates. Goal-mode execution prompts are intentionally supplied by
+the project owner per development round and are not stored in this repository.
 
 ## Non-Negotiable Pipeline Decisions
 
 The following decisions are already selected and should not be contradicted unless the project owner explicitly changes the method:
 
-- The Phase 0 scaffold is **HDMI-style robot-object co-tracking**. HDMI supplies door references/task structure; jointly retargeted OMOMO supplies heavy-payload references.
-- Every source reference must pass through the canonical G1/object/contact schema before scaffold training or replay.
+- The first door scaffold is a **frozen pretrained HDMI policy artifact**, not a new scaffold trained inside SomaForce-Cross.
+- SomaForce-Cross runtime code must not import HDMI/`active_adaptation`, require an HDMI checkout, or load a pickle that needs HDMI-defined classes.
+- The audited learned action is 23-D and must remain distinct from the canonical 29-joint G1 reference schema. Use an explicit joint mapping.
+- `a_nom` and the first Cross residual share normalized 23-D action coordinates. Apply joint-position scaling exactly once after their bounded sum.
+- The current `phase=train` HDMI teacher consumes privileged inputs. It is not the production scaffold unless a non-privileged `actor_adapt`/finetune path is separately exported and validated.
+- Keep the pretrained scaffold frozen and in evaluation mode for the primary method and scaffold-only baseline.
+- Preserve HDMI attribution and artifact provenance. Runtime independence must never be presented as independent authorship of the scaffold.
+- Do not redistribute HDMI code, weights, motion, or assets until their permissions are documented; the audited HDMI repository has no root code/data license.
+- Every source reference ingested or replayed by SomaForce-Cross must pass through the canonical G1/object/contact schema. HDMI oracle-only parity traces are kept at the export boundary.
 - OMOMO is not a door or wrench dataset. Do not infer mass, force, CoM, or load-share labels from human kinematics; generate them in Isaac Lab rollouts.
-- Sonic/TWIST are later tracker baselines or replaceable backbones, not Phase 0 dependencies.
+- Alternative trackers are separate future baselines, not dependencies of the selected door scaffold.
 - SomaForce-Cross learns a **bounded force-conditioned residual**, not the whole task behavior from scratch.
 - The deployed hardware assumption is a **real wrist/end-effector F/T sensor**.
 - Simulation should include a **virtual wrist F/T sensor model** that mimics deployable sensing.
@@ -91,11 +117,20 @@ z_cross = CrossEncoder(z_joint)
 - `p_dir`, `p_mag`, and `P_cross` are retained for auxiliary supervision, student distillation, logging, and visualization.
 - Student distillation should respect the coupling among `p_dir`, `p_mag`, and `P_cross`; do not treat them as three unrelated equal-weight latent targets.
 
-## Why HDMI + OMOMO Scaffold
+## Why a Pretrained HDMI Scaffold
 
-HDMI supplies the object-aware task mechanics that a motion-only tracker lacks: robot-object reference-state initialization, co-tracking, object-frame contact targets, progress/contact rewards, and residual joint-position actions around a reference.
+The pretrained HDMI policy already supplies nominal object-aware door behavior.
+Migrating the frozen policy avoids rebuilding the prior scaffold method and
+keeps engineering effort focused on the SomaForce-Cross force contribution.
+The standalone wrapper must nevertheless reproduce HDMI's observation history,
+normalization, reference command, object-relative inputs, action order, scaling,
+delay, smoothing, and reset semantics.
 
-OMOMO expands the heavy-object reference library with full-body human-object motion. It must be jointly retargeted to G1 with the object trajectory and wrist-to-object transforms preserved. Low-confidence contact frames are masked.
+OMOMO remains the selected source for future heavy-payload references. It must
+be jointly retargeted to G1 with the object trajectory and wrist-to-object
+transforms preserved. Low-confidence contact frames are masked. A payload
+scaffold artifact requires its own documented training, export, and verification
+route; it is not implied by the door checkpoint.
 
 The scaffold is responsible for nominal task tracking, such as:
 
@@ -266,7 +301,7 @@ Do not frame SomaForce-Cross as:
 
 The current contribution is narrower and cleaner:
 
-> An HDMI-style task scaffold trained from HDMI door and OMOMO-derived payload references provides nominal humanoid-object motion; privileged force teaches task-conditioned constraint/load and magnitude semantics; their outer-product cross representation becomes `z_cross`; a bounded residual actor uses `z_cross`; a student distills the same semantics from deployable wrist F/T histories.
+> A frozen, explicitly attributed pretrained HDMI door policy provides nominal humanoid-object motion through a standalone artifact; privileged force teaches task-conditioned constraint/load and magnitude semantics; their outer-product cross representation becomes `z_cross`; a bounded residual actor uses `z_cross`; a student distills the same semantics from deployable wrist F/T histories.
 
 ## Baselines and Ablations to Keep in Mind
 

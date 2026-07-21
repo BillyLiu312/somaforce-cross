@@ -2,6 +2,12 @@
 
 Updated: 2026-07-14
 
+> Scope update (2026-07-21): this document now governs canonical reference
+> construction and future reference-driven tasks. It does not govern the first
+> door policy runtime. The selected door scaffold is a frozen pretrained HDMI
+> policy exported as a standalone 23-D artifact; see
+> `docs/pretrained_hdmi_scaffold_rules.md`.
+
 ## Selected Phase 0
 
 ```text
@@ -13,16 +19,11 @@ retargeted OMOMO NPZ (heavy payload)             |
                          CanonicalReferenceEpisode
                                                  |
                          ReferenceLibrary (.pt)
-                                                 |
-                         HDMIReferenceScaffold
-                                                 v
-                         ScaffoldOutput.a_nom
-                         + hand/body/object refs
-                         + contact intent/target
-                         + phase/confidence
 ```
 
-The canonical/replay classes do not replace HDMI's PPO trainer. They establish the data and policy boundary used to feed reference-state initialization, robot-object co-tracking, contact rewards, and residual joint-position training in Isaac Lab.
+The canonical classes do not replace HDMI's PPO trainer or the standalone
+pretrained scaffold. They retain validated robot/object/contact references for
+diagnostics and future reference-driven tasks.
 
 ## Source Boundary
 
@@ -93,20 +94,13 @@ python scripts/build_scaffold_reference.py \
 | HDMI conversion | `somaforce_cross/scaffold/hdmi_adapter.py` |
 | OMOMO retarget-result conversion | `somaforce_cross/scaffold/omomo_adapter.py` |
 | Library storage/filtering | `somaforce_cross/scaffold/reference_library.py` |
-| Nominal policy boundary | `somaforce_cross/scaffold/hdmi_scaffold.py` |
-| Door config | `configs/scaffold/g1_push_pull_door.yaml` |
-| Heavy-payload config | `configs/scaffold/g1_heavy_payload.yaml` |
 
 ## Acceptance Gates
 
 - HDMI door reference converts and deterministically replays.
 - At least one jointly retargeted OMOMO clip passes all schema and contact checks.
-- Door easy-distribution scaffold success reaches at least 80% after HDMI-style training.
+- The standalone learned door policy is verified under the separate gates in `docs/pretrained_hdmi_scaffold_rules.md`.
 - Payload scaffold completes lift-off, carry, and set-down on at least three reference variants.
 - Hinge/handle and mass/CoM mismatch produce interpretable failures rather than simulator instability.
 - All source revisions, clip IDs, retarget versions, and quality metrics are preserved.
 - Force-rich supervision is generated only after reference scaffold construction in Isaac Lab.
-
-## Legacy Compatibility
-
-`sonic_adapter.py`, `sonic_motion.py`, `sonic_env.py`, and the Sonic verification scripts remain for regression and tracker-baseline experiments. They are not the default scaffold construction path.

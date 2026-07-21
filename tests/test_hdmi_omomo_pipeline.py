@@ -5,13 +5,10 @@ import torch
 
 from somaforce_cross.scaffold import (
     G1_FULL_JOINT_NAMES,
-    CanonicalReferenceEpisode,
-    HDMIReferenceScaffold,
     ReferenceLibrary,
     ReferenceSource,
     ScaffoldTask,
     hdmi_mapping_to_reference,
-    make_g1_heavy_payload_scaffold,
     omomo_retarget_mapping_to_reference,
     reconstruct_contact_targets,
 )
@@ -97,59 +94,6 @@ def test_omomo_adapter_rejects_raw_incomplete_data() -> None:
         assert "Raw OMOMO is not accepted" in str(exc)
     else:
         raise AssertionError("raw incomplete OMOMO data was accepted")
-
-
-def test_hdmi_reference_scaffold_exposes_nominal_object_and_contact_contract() -> None:
-    episode = omomo_retarget_mapping_to_reference(
-        _retargeted_omomo_mapping(),
-        episode_id="payload-scaffold",
-        source_clip_id="clip",
-        retarget_version="v1",
-    )
-    scaffold = HDMIReferenceScaffold(episode, action_clip=None)
-
-    output = scaffold.at_frame(2)
-
-    assert output.task == ScaffoldTask.HEAVY_PAYLOAD
-    assert output.a_nom.shape == (29,)
-    assert output.nominal_hand_ref is not None
-    assert output.nominal_hand_ref.shape == (2, 7)
-    assert output.nominal_body_ref is not None
-    assert output.nominal_body_ref.shape == (3, 7)
-    assert output.object_root_ref is not None
-    assert output.object_root_ref.shape == (7,)
-    assert output.contact_target_obj is not None
-    assert output.contact_intent is not None
-    assert output.phase is not None
-    assert output.reference_source == "omomo"
-    assert torch.equal(output.confidence, torch.ones(1))
-
-
-def test_heavy_payload_scene_requires_payload_reference() -> None:
-    payload = omomo_retarget_mapping_to_reference(
-        _retargeted_omomo_mapping(),
-        episode_id="payload-scene",
-        source_clip_id="clip",
-        retarget_version="v1",
-    )
-    scaffold = make_g1_heavy_payload_scaffold(payload)
-    assert scaffold.reference is payload
-
-    wrong = CanonicalReferenceEpisode.from_serializable(
-        {
-            **payload.as_serializable(),
-            "metadata": {
-                **payload.as_serializable()["metadata"],
-                "task": ScaffoldTask.PUSH_PULL_DOOR.value,
-            },
-        }
-    )
-    try:
-        make_g1_heavy_payload_scaffold(wrong)
-    except ValueError as exc:
-        assert "task=heavy_payload" in str(exc)
-    else:
-        raise AssertionError("heavy payload factory accepted a door reference")
 
 
 def test_reference_library_round_trip(tmp_path) -> None:

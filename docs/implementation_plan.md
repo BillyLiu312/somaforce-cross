@@ -2,22 +2,26 @@
 
 Date: 2026-07-01
 
+> Route update (2026-07-21): the first door scaffold now uses a frozen policy
+> trained with the official HDMI implementation and exported behind a standalone
+> 23-D inference contract. Instructions below that prescribe training an
+> HDMI-style door scaffold inside this repository are historical. Follow
+> `docs/pretrained_hdmi_scaffold_rules.md` for current door work. Goal-mode
+> prompts are supplied separately for each scoped development round. The
+> canonical HDMI/OMOMO reference sections remain applicable to reference replay
+> and future payload tasks.
+
 This document stages the future engineering work for SomaForce-Cross. It intentionally avoids code-level implementation until the module contracts and task boundary are stable.
 
 ## 1. Method Route
 
-SomaForce-Cross retains the force/cross architecture in the following historical figure. Its Sonic scaffold label is superseded by the HDMI + OMOMO route below:
-
-```text
-figures/somaforce_cross_pipeline.png
-```
-
 The selected route is:
 
 ```text
-HDMI + OMOMO canonical references
-  -> HDMI-style robot-object scaffold
-  -> nominal task motion a_nom
+frozen pretrained HDMI door policy
+  -> standalone 23-D inference artifact
+  -> versioned observation/action adapter
+  -> nominal normalized action a_nom
   -> privileged force semantics in simulation
   -> virtual wrist F/T observation model
   -> probabilistic direction/magnitude semantics
@@ -31,8 +35,10 @@ HDMI + OMOMO canonical references
 
 - Start from pipeline contracts before executable code.
 - Keep task generation separate from force residual learning.
-- Treat the HDMI-style co-tracking scaffold as the source of nominal task motion.
-- Use HDMI references for doors and jointly retargeted OMOMO references for heavy payloads.
+- Treat the frozen pretrained HDMI artifact as the first door source of nominal task motion.
+- Keep the HDMI export/oracle environment outside the released runtime.
+- Keep 23-D learned actions distinct from canonical 29-joint references.
+- Use canonical HDMI references for replay/diagnostics and jointly retargeted OMOMO references for future heavy payloads.
 - Treat privileged simulation force as teacher supervision, not deployment input.
 - Treat real wrist F/T sensing as the deployment assumption.
 - Make `P_cross(t)` a first-class logged diagnostic.
@@ -90,25 +96,29 @@ Required properties:
 - controllable mismatch;
 - baseline comparison against scaffold-only and local compliance.
 
-## 5. Phase 2: Scaffold and Sensor Prototype
+## 5. Phase 2: Standalone Scaffold and Sensor Prototype
 
 Goal:
 
 ```text
-HDMI/OMOMO canonical reference + HDMI-style scaffold + virtual wrist F/T observation
+standalone frozen pretrained scaffold + virtual wrist F/T observation
 ```
 
 Deliverables:
 
-- task base motion trajectory definition;
-- nominal action `a_nom`;
+- versioned deployable policy input contract and artifact manifest;
+- explicit canonical-29 to controlled-23 joint mapping;
+- parity-verified nominal normalized action `a_nom [B, 23]`;
+- zero-residual and one-time action-scaling tests;
 - virtual wrist F/T sensor model specification;
 - sensor degradation schedule;
 - first logging format.
 
 Exit criteria:
 
-- scaffold-only behavior can run in nominal settings;
+- a clean environment without HDMI can run scaffold-only behavior;
+- fixed-batch export parity and matched rollout evidence pass;
+- the production scaffold has no undeclared privileged input;
 - mismatch produces interpretable force events;
 - the F/T observation is separated from privileged truth.
 

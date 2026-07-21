@@ -4,33 +4,73 @@ Date: 2026-07-01
 
 This file records the expected module contracts before implementation code is added.
 
-## 1. HDMI + OMOMO Scaffold
+## 1. Pretrained HDMI Door Scaffold
 
 Purpose:
 
 ```text
-canonicalize HDMI/OMOMO robot-object references and provide nominal action a_nom
+standalone frozen learned policy -> nominal normalized action a_nom
+```
+
+Inputs:
+
+- versioned deployable observation tensors and declared task/reference priors;
+- frozen observation-normalization state;
+- frozen exported policy artifact;
+- explicit mapping from the canonical 29-joint reference to the 23 controlled
+  action joints.
+
+Outputs:
+
+- nominal normalized action `a_nom [B, 23]`;
+- exact action joint order and action-space metadata;
+- scaffold confidence or health flag where available.
+
+Rules:
+
+- Runtime code must not import HDMI/`active_adaptation` or require an HDMI
+  checkout.
+- The primary scaffold is frozen and runs in evaluation mode.
+- The current `phase=train` HDMI teacher is privileged and is not a production
+  scaffold. Export and validate a non-privileged `actor_adapt`/finetune path.
+- `a_nom` is not a raw 29-DOF joint target. Compose the Cross residual in the
+  same 23-D normalized coordinates and apply action scaling once.
+- Follow `docs/pretrained_hdmi_scaffold_rules.md` for the complete contract,
+  provenance, licensing, and parity gates.
+
+Non-goal:
+
+- The scaffold does not solve force adaptation. It provides the base
+  robot-object motion that SomaForce-Cross corrects.
+- Wrist control is not silently added to the current 23-D policy.
+- The scaffold artifact and HDMI training method are not claimed as a
+  SomaForce-Cross contribution.
+
+## 1A. Canonical HDMI + OMOMO Reference Boundary
+
+Purpose:
+
+```text
+canonicalize HDMI/OMOMO robot-object references for replay and future tasks
 ```
 
 Inputs:
 
 - HDMI door `motion.npz` or jointly retargeted OMOMO payload result;
-- canonical G1/object/contact reference;
-- `task_id`, phase, robot state, object/task prior, and safety envelope.
+- source provenance, task identity, contact mapping, and retarget metadata.
 
 Outputs:
 
-- nominal action `a_nom`;
+- canonical 29-joint G1/object/contact reference;
 - nominal hand reference;
 - nominal body reference;
-- scaffold confidence or validity flag.
 - nominal object reference;
 - contact intent, object-frame target, and confidence;
 - source provenance and per-frame validity mask.
 
 Non-goal:
 
-- The scaffold should not solve force adaptation. It provides the base robot-object motion that SomaForce-Cross corrects.
+- Canonical reference conversion is not the frozen learned policy scaffold.
 - OMOMO must already be jointly retargeted to G1 before ingestion.
 - Physical force, payload mass, inertia, CoM, and load share must not be inferred from OMOMO kinematics.
 

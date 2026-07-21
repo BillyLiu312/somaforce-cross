@@ -10,7 +10,6 @@ import torch
 
 from somaforce_cross.scaffold.contracts import (
     G1_FULL_JOINT_NAMES,
-    MotionTrajectory,
     ScaffoldTask,
 )
 
@@ -120,18 +119,6 @@ class CanonicalReferenceEpisode:
     @property
     def num_object_joints(self) -> int:
         return self.object_joint_pos.shape[1]
-
-    def to_motion_trajectory(self) -> MotionTrajectory:
-        """Return the legacy nominal-motion view used by compatibility code."""
-
-        body_pose = torch.cat((self.body_pos_w, self.body_quat_w), dim=-1)
-        return MotionTrajectory(
-            joint_pos=self.joint_pos,
-            time_s=self.time_s,
-            hand_pose_w=self.hand_pose_w,
-            body_pose_w=body_pose,
-            cmd_6d=self.cmd_6d,
-        )
 
     def as_serializable(self) -> dict[str, Any]:
         """Return a torch-save-compatible dictionary with explicit metadata."""
