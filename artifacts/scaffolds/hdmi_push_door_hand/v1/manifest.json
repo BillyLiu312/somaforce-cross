@@ -1,0 +1,84 @@
+{
+  "artifact_version": "1.0.0-local",
+  "contract_version": "hdmi_push_door_hand_teacher_v1",
+  "role": "frozen_hdmi_phase_train_privileged_teacher_simulation_baseline",
+  "deployable": false,
+  "exported_at_utc": "2026-07-21T09:32:37.559644+00:00",
+  "export_tool": "/inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/somaforce-cross/scripts/export_pretrained_hdmi_scaffold.py",
+  "source": {
+    "project": "HDMI",
+    "revision": "32282f6dcf26cae70b814d585ceb12cc38aa1b60",
+    "worktree_dirty": true,
+    "checkpoint_sha256": "24682b7b66c38f784ca5939dad3841b1b1e5b801c47d2fea59c5f85fd90c238c",
+    "resolved_config_sha256": "fb6ddd53135550b244fd35b707cf2b98e069ddf38dfe456af5b930e4189a074c",
+    "asset_meta_sha256": "663598253052e2f6ceaacad8aafd7d6083f81ac9592eeb231c153e4adfa6c0f0",
+    "motion_sha256": "a4b6027aaea6d4892969fab5464858f914fc6f5bbee165e39af9e39668c4808d",
+    "motion_meta_sha256": "b91a2d667fca3b76ee3cc12de2e86d498726708673ae56c2e4a9725522e08275",
+    "g1_asset_sha256": "faf4d267a7a93fd16186e77e4c2802aa8ea977b5bb971b72fa63dee99c33200d",
+    "door_asset_sha256": "02258e14085439c2b565dceaab6f37c3ea0db7748e8a15401757a35015b00979"
+  },
+  "oracle_parity": {
+    "backend": "HDMI active_adaptation make_mlp + Actor deterministic mean",
+    "batch_size": 4,
+    "seed": 20260721,
+    "max_abs_action_error": 0.0,
+    "tolerance": 1e-05
+  },
+  "files": {
+    "policy": {
+      "path": "policy_state.pt",
+      "sha256": "2c79a63010b8fe3d71450c9765710cb391b435ee4914a2e8bc18aa1f4a00ec8b",
+      "bytes": 4641913
+    },
+    "normalization": {
+      "path": "normalization.npz",
+      "sha256": "91bd11291b95129d2bf500d967aebfe3872a94184fa0be5c3199fa1b18ca3db5",
+      "bytes": 20690
+    },
+    "reference_motion": {
+      "path": "reference/motion.npz",
+      "sha256": "a4b6027aaea6d4892969fab5464858f914fc6f5bbee165e39af9e39668c4808d",
+      "bytes": 829813
+    },
+    "reference_meta": {
+      "path": "reference/meta.json",
+      "sha256": "b91a2d667fca3b76ee3cc12de2e86d498726708673ae56c2e4a9725522e08275",
+      "bytes": 1922
+    },
+    "g1_asset": {
+      "path": "assets/g1.usd",
+      "sha256": "faf4d267a7a93fd16186e77e4c2802aa8ea977b5bb971b72fa63dee99c33200d",
+      "bytes": 27246027
+    },
+    "door_asset": {
+      "path": "assets/door.usd",
+      "sha256": "02258e14085439c2b565dceaab6f37c3ea0db7748e8a15401757a35015b00979",
+      "bytes": 12190
+    },
+    "parity": {
+      "path": "parity/source_outputs.npz",
+      "sha256": "2f7626c26cdec9e16f594126e7dca187538b753c96a263d2e6790689d386e8b6",
+      "bytes": 39482
+    },
+    "observation_contract": {
+      "path": "observation_contract.json",
+      "sha256": "ecbe3ac3cc03b8ea7483c1f1ed77727d5b9f641bc3ffc02b53a1ef4c38692793",
+      "bytes": 3754
+    },
+    "action_contract": {
+      "path": "action_contract.json",
+      "sha256": "790ba9553863fd3760e676aa700700b3a66255a157e76700e009fdd81bfaf89a",
+      "bytes": 2948
+    },
+    "third_party": {
+      "path": "THIRD_PARTY.md",
+      "sha256": "80beff243eada60aa5b593531408d8451ae6141b2b8075742bc627e41dac5b6a",
+      "bytes": 507
+    }
+  },
+  "license": {
+    "status": "undocumented_in_source_checkout",
+    "redistribution": "prohibited_until_permissions_are_documented",
+    "notice": "THIRD_PARTY.md"
+  }
+}
