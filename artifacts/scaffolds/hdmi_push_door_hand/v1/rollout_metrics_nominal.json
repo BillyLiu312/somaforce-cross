@@ -1,4 +1,6 @@
 {
+  "task": "push_door_hand",
+  "condition": "nominal",
   "steps": 540,
   "initial_door_joint": 7.296900981742629e-18,
   "final_door_joint": -2.617999792098999,
@@ -14,5 +16,11 @@
   "nonfinite_count": 0,
   "terminated": false,
   "termination_reason": "completed_requested_steps",
-  "zero_hook_exact": true
+  "zero_hook_exact": true,
+  "settings": {
+    "door_friction": 0.3,
+    "door_damping": 0.55,
+    "delay": 4,
+    "alpha": 0.8999999761581421
+  }
 }

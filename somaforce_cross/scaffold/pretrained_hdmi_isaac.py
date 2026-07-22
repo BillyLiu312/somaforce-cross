@@ -10,6 +10,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -330,6 +331,8 @@ def make_scene_cfg(
 
 @dataclass
 class RolloutMetrics:
+    task: str
+    condition: str
     steps: int
     initial_door_joint: float
     final_door_joint: float
@@ -346,11 +349,13 @@ class RolloutMetrics:
     terminated: bool
     termination_reason: str
     zero_hook_exact: bool
+    settings: dict[str, object]
 
 
 @dataclass
 class PushBoxRolloutMetrics:
-    case: str
+    task: str
+    condition: str
     steps: int
     initial_box_position: list[float]
     final_box_position: list[float]
@@ -384,7 +389,8 @@ class PushBoxRolloutMetrics:
 
 @dataclass
 class MoveSuitcaseRolloutMetrics:
-    case: str
+    task: str
+    condition: str
     steps: int
     initial_object_position: list[float]
     initial_object_orientation_wxyz: list[float]
@@ -454,8 +460,9 @@ class PretrainedHDMIIsaacRuntime:
         initial_object_xy: tuple[float, float] = (0.0, 0.0),
         initial_object_yaw: float = 0.0,
         contact_target_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
-        case_name: str = "nominal",
+        condition_name: str = "nominal",
         show_reference_object: bool = False,
+        frame_callback: Callable[[], None] | None = None,
     ) -> None:
         self.sim = sim
         self.artifact_dir = Path(artifact_dir).expanduser().resolve()
@@ -514,7 +521,8 @@ class PretrainedHDMIIsaacRuntime:
         self.initial_object_xy = tuple(float(value) for value in initial_object_xy)
         self.initial_object_yaw = float(initial_object_yaw)
         self.contact_target_offset = tuple(float(value) for value in contact_target_offset)
-        self.case_name = case_name
+        self.condition_name = condition_name
+        self.frame_callback = frame_callback
         self.reference_step = 0
         self._resolve_indices()
         self.reference_object_marker: VisualizationMarkers | None = None
@@ -946,8 +954,10 @@ class PretrainedHDMIIsaacRuntime:
             self.sim.step(render=False)
             self.scene.update(self.physics_dt)
         self._update_reference_visualization()
-        if self.sim.has_gui():
+        if self.sim.has_gui() or self.frame_callback is not None:
             self.sim.render()
+        if self.frame_callback is not None:
+            self.frame_callback()
         self.history.update_state(
             self.robot.data.root_ang_vel_b,
             self.robot.data.projected_gravity_b,
@@ -1054,6 +1064,8 @@ class PretrainedHDMIIsaacRuntime:
                 time.sleep(1.0 / 60.0)
         final_door = float(self.door.data.joint_pos[0, 0])
         return RolloutMetrics(
+            task=self.task_spec.task,
+            condition=self.condition_name,
             steps=actual_steps,
             initial_door_joint=initial_door,
             final_door_joint=final_door,
@@ -1072,6 +1084,12 @@ class PretrainedHDMIIsaacRuntime:
             zero_hook_exact=torch.equal(
                 self.action_runtime.received_action, self.action_runtime.last_a_nom
             ),
+            settings={
+                "door_friction": self.door_friction,
+                "door_damping": self.door_damping,
+                "delay": int(self.action_runtime.delay[0, 0]),
+                "alpha": float(self.action_runtime.alpha[0, 0]),
+            },
         )
 
     def _rollout_payload(
@@ -1276,7 +1294,8 @@ class PretrainedHDMIIsaacRuntime:
             and min_height >= fall_height_threshold
         )
         return MoveSuitcaseRolloutMetrics(
-            case=self.case_name,
+            task=self.task_spec.task,
+            condition=self.condition_name,
             steps=actual_steps,
             initial_object_position=initial.tolist(),
             initial_object_orientation_wxyz=initial_quat.tolist(),
@@ -1493,7 +1512,8 @@ class PretrainedHDMIIsaacRuntime:
         actual_displacement = final[:2] - initial[:2]
         stable = nonfinite == 0 and not terminated and min_height >= 0.45
         return PushBoxRolloutMetrics(
-            case=self.case_name,
+            task=self.task_spec.task,
+            condition=self.condition_name,
             steps=actual_steps,
             initial_box_position=initial.tolist(),
             final_box_position=final.tolist(),

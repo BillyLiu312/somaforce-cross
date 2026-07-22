@@ -1,0 +1,115 @@
+{
+  "task": "move_largebox",
+  "condition": "stress",
+  "steps": 199,
+  "initial_object_position": [
+    0.28793278336524963,
+    -1.1355794668197632,
+    0.6468214392662048
+  ],
+  "initial_object_orientation_wxyz": [
+    -0.06694035232067108,
+    0.29566678404808044,
+    0.9519899487495422,
+    -0.04260503873229027
+  ],
+  "highest_object_position": [
+    -0.12064507603645325,
+    -0.6643868088722229,
+    0.775972843170166
+  ],
+  "highest_object_orientation_wxyz": [
+    -0.09300994873046875,
+    0.9649922847747803,
+    0.2341284602880478,
+    0.07295753061771393
+  ],
+  "final_object_position": [
+    -0.457929402589798,
+    0.1062014251947403,
+    0.1836981624364853
+  ],
+  "final_object_orientation_wxyz": [
+    -0.053251318633556366,
+    0.9615450501441956,
+    -0.2612704932689667,
+    0.06582667678594589
+  ],
+  "reference_initial_object_position": [
+    0.2882500886917114,
+    -1.135630488395691,
+    0.6472731828689575
+  ],
+  "reference_highest_object_position": [
+    -0.2909785211086273,
+    -0.534744143486023,
+    0.9072921872138977
+  ],
+  "reference_final_object_position": [
+    -0.6386763453483582,
+    0.20972658693790436,
+    0.2861090898513794
+  ],
+  "max_lift_height": 0.12915140390396118,
+  "reference_max_lift_height": 0.2600190043449402,
+  "lift_off_completed": true,
+  "horizontal_displacement": 1.4485613107681274,
+  "actual_path_length": 1.9961725162329458,
+  "reference_path_progress": 2.009514808654785,
+  "reference_path_progress_fraction": 0.9970582195248672,
+  "reference_path_length": 2.015443801879883,
+  "carry_position_tracking_error_mean": 0.19575639215649152,
+  "carry_position_tracking_error_max": 0.22801052033901215,
+  "carry_orientation_tracking_error_mean": 0.3483160631578477,
+  "carry_orientation_tracking_error_max": 0.4870401918888092,
+  "carry_tracking_steps": 61,
+  "set_down_height": 0.1836981624364853,
+  "set_down_position_error": 0.23210971057415009,
+  "set_down_completed": true,
+  "max_left_wrist_contact_force": 47.332115173339844,
+  "max_right_wrist_contact_force": 78.71837615966797,
+  "mean_left_wrist_contact_force": 13.935427374576204,
+  "mean_right_wrist_contact_force": 19.494611090376747,
+  "reference_contact_steps": 95,
+  "both_hand_contact_fraction": 1.0,
+  "min_root_height": 0.5379700064659119,
+  "mean_support_contact_count": 1.4673366834170853,
+  "max_contact_force": 573.3815307617188,
+  "fall_detected": false,
+  "max_abs_action": 7.141106128692627,
+  "mean_abs_action": 1.0411524504898468,
+  "nonfinite_count": 0,
+  "terminated": false,
+  "termination_reason": "completed_requested_steps",
+  "stable": true,
+  "zero_hook_exact": true,
+  "settings": {
+    "object_mass_kg": 2.0,
+    "object_friction": 0.55,
+    "object_com_offset_m": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "initial_object_xy_m": [
+      0.0,
+      0.0
+    ],
+    "initial_object_yaw_rad": 0.0,
+    "contact_target_offset_m": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "training_mass_range_kg": [
+      0.8,
+      1.2
+    ],
+    "nominal_mass_kg": 1.0,
+    "lift_off_threshold_m": 0.1,
+    "set_down_position_tolerance_m": 0.25,
+    "fall_height_threshold_m": 0.25,
+    "delay_physics_substeps": 4,
+    "alpha": 0.8999999761581421
+  }
+}

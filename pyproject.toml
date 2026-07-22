@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "SomaForce-Cross scaffold and force-semantic engineering baseline."
 requires-python = ">=3.10"
 dependencies = [
+  "imageio",
+  "imageio-ffmpeg",
   "numpy",
   "torch",
 ]

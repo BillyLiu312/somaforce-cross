@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -742,3 +743,21 @@ def sha256_file(path: str | Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def write_artifact_checksums(artifact_dir: str | Path) -> None:
+    """Rewrite SHA256SUMS for immutable artifact files, excluding rollout evidence."""
+
+    artifact_dir = Path(artifact_dir).expanduser().resolve()
+    checksums_path = artifact_dir / "SHA256SUMS"
+    entries = [
+        f"{sha256_file(path)}  {path.relative_to(artifact_dir).as_posix()}"
+        for path in sorted(artifact_dir.rglob("*"))
+        if path.is_file()
+        and path != checksums_path
+        and not path.name.startswith(".SHA256SUMS.")
+        and not path.match("rollout_metrics*.json")
+    ]
+    temporary_path = artifact_dir / f".SHA256SUMS.{os.getpid()}.tmp"
+    temporary_path.write_text("\n".join(entries) + "\n", encoding="utf-8")
+    os.replace(temporary_path, checksums_path)

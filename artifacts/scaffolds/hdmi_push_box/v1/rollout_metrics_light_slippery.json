@@ -1,5 +1,6 @@
 {
-  "case": "nominal",
+  "task": "push_box",
+  "condition": "light_slippery",
   "steps": 792,
   "initial_box_position": [
     0.7056298851966858,
@@ -7,9 +8,9 @@
     -3.8743019104003906e-07
   ],
   "final_box_position": [
-    -0.7599411606788635,
-    2.9908721446990967,
-    -1.4901161193847656e-07
+    -1.383504867553711,
+    2.200040578842163,
+    -2.086162567138672e-07
   ],
   "reference_initial_box_position": [
     0.7056303024291992,
@@ -22,37 +23,37 @@
     0.0
   ],
   "actual_xy_displacement": [
-    -1.4655710458755493,
-    -0.09284424781799316
+    -2.089134693145752,
+    -0.8836758136749268
   ],
   "reference_xy_displacement": [
     -1.4443161487579346,
     -0.03465747833251953
   ],
-  "directional_progress": 1.467376470565796,
-  "max_directional_progress": 1.4673774242401123,
-  "path_progress": 1.5118168402046308,
+  "directional_progress": 2.109731674194336,
+  "max_directional_progress": 2.109731912612915,
+  "path_progress": 2.4268512585716167,
   "reference_path_length": 1.4533262252807617,
-  "final_tracking_error": 0.06194771081209183,
-  "final_yaw_error": 0.025033118203282356,
-  "max_left_wrist_contact_force": 52.17310333251953,
-  "max_right_wrist_contact_force": 55.09859085083008,
-  "mean_left_wrist_contact_force": 12.585045648795186,
-  "mean_right_wrist_contact_force": 13.542225621565423,
-  "contact_active_fraction": 1.0,
-  "min_root_height": 0.7183253765106201,
-  "mean_support_contact_count": 1.8863636363636365,
-  "max_contact_force": 919.3914794921875,
-  "max_abs_action": 5.432579040527344,
-  "mean_abs_action": 0.6726469738628972,
+  "final_tracking_error": 1.066125750541687,
+  "final_yaw_error": 0.21421460807323456,
+  "max_left_wrist_contact_force": 46.812255859375,
+  "max_right_wrist_contact_force": 32.902034759521484,
+  "mean_left_wrist_contact_force": 7.357043013936191,
+  "mean_right_wrist_contact_force": 6.706351372102897,
+  "contact_active_fraction": 0.6900584795321637,
+  "min_root_height": 0.7454483509063721,
+  "mean_support_contact_count": 1.7992424242424243,
+  "max_contact_force": 1686.8502197265625,
+  "max_abs_action": 5.577532768249512,
+  "mean_abs_action": 0.6915255614839,
   "nonfinite_count": 0,
   "terminated": false,
   "termination_reason": "completed_requested_steps",
   "stable": true,
   "zero_hook_exact": true,
   "settings": {
-    "box_mass": 8.0,
-    "box_friction": 0.5,
+    "box_mass": 1.0,
+    "box_friction": 0.1,
     "box_com_offset": [
       0.0,
       0.0,

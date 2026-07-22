@@ -148,7 +148,7 @@
   "role": "frozen_hdmi_phase_train_privileged_teacher_simulation_baseline",
   "deployable": false,
   "exported_at_utc": "2026-07-22T09:30:06.802840+00:00",
-  "export_tool": "/inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/somaforce-cross/scripts/export_pretrained_hdmi_scaffold.py",
+  "export_tool": "scripts/export_pretrained_hdmi_scaffold.py",
   "source": {
     "project": "HDMI",
     "revision": "32282f6dcf26cae70b814d585ceb12cc38aa1b60",

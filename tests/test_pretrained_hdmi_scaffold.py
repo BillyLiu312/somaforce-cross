@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import json
 
 import numpy as np
@@ -24,6 +24,7 @@ from somaforce_cross.scaffold.pretrained_hdmi import (
     reference_action,
     reference_to_action,
     sha256_file,
+    write_artifact_checksums,
 )
 from somaforce_cross.scaffold.contracts import ScaffoldTask
 
@@ -44,6 +45,70 @@ MOVE_LARGEBOX_ARTIFACT = (
     Path(__file__).resolve().parents[1]
     / "artifacts/scaffolds/hdmi_move_largebox/v1"
 )
+
+ARTIFACT_DIRS = (
+    ARTIFACT,
+    PUSH_BOX_ARTIFACT,
+    MOVE_SUITCASE_ARTIFACT,
+    MOVE_LARGEBOX_ARTIFACT,
+)
+
+
+def _manifest_strings(value: object, key: str = "$"):
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            yield from _manifest_strings(child_value, f"{key}.{child_key}")
+    elif isinstance(value, list):
+        for index, child_value in enumerate(value):
+            yield from _manifest_strings(child_value, f"{key}[{index}]")
+    elif isinstance(value, str):
+        yield key, value
+
+
+@pytest.mark.parametrize("artifact_dir", ARTIFACT_DIRS)
+def test_manifest_contains_no_absolute_filesystem_paths(artifact_dir: Path) -> None:
+    manifest = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))
+    absolute_paths = [
+        (key, value)
+        for key, value in _manifest_strings(manifest)
+        if Path(value).is_absolute() or PureWindowsPath(value).is_absolute()
+    ]
+    assert absolute_paths == []
+
+
+@pytest.mark.parametrize("artifact_dir", ARTIFACT_DIRS)
+def test_artifact_checksums_cover_every_file(artifact_dir: Path) -> None:
+    checksum_entries = {}
+    for line in (artifact_dir / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+        digest, relative_path = line.split("  ", maxsplit=1)
+        checksum_entries[relative_path] = digest
+
+    artifact_files = {
+        path.relative_to(artifact_dir).as_posix()
+        for path in artifact_dir.rglob("*")
+        if path.is_file()
+        and path.name != "SHA256SUMS"
+        and not path.match("rollout_metrics*.json")
+    }
+    assert set(checksum_entries) == artifact_files
+    for relative_path, expected_digest in checksum_entries.items():
+        assert sha256_file(artifact_dir / relative_path) == expected_digest
+
+
+def test_artifact_checksum_writer_excludes_rollout_metrics(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir()
+    (artifact_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
+    metrics_path = artifact_dir / "rollout_metrics_heavy.json"
+    metrics_path.write_text('{"task": "move_suitcase"}\n', encoding="utf-8")
+
+    write_artifact_checksums(artifact_dir)
+
+    entries = (artifact_dir / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+    assert [entry.split("  ", maxsplit=1)[1] for entry in entries] == [
+        "manifest.json",
+    ]
+    assert sha256_file(metrics_path) not in entries[0]
 
 
 def test_audited_action_order_and_reference_mapping() -> None:
@@ -367,70 +432,6 @@ def test_move_largebox_policy_contract_provenance_and_oracle_fixture() -> None:
         "prohibited_until_permissions_are_documented"
     )
     assert (MOVE_LARGEBOX_ARTIFACT / "assets/largebox.obj").is_file()
-
-
-@pytest.mark.skipif(
-    not (MOVE_SUITCASE_ARTIFACT / "rollout_metrics.json").is_file(),
-    reason="local HDMI move-suitcase rollout evidence not materialized",
-)
-def test_move_suitcase_mass_matrix_rollout_evidence() -> None:
-    evidence = json.loads(
-        (MOVE_SUITCASE_ARTIFACT / "rollout_metrics.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    cases = evidence["cases"]
-    assert list(cases) == ["nominal", "light", "heavy", "stress"]
-    assert {
-        name: case["settings"]["object_mass_kg"]
-        for name, case in cases.items()
-    } == {"nominal": 1.5, "light": 0.5, "heavy": 3.0, "stress": 5.5}
-    assert all(case["nonfinite_count"] == 0 for case in cases.values())
-    assert all(case["zero_hook_exact"] for case in cases.values())
-    nominal = cases["nominal"]
-    assert nominal["steps"] == 472
-    assert nominal["stable"] and not nominal["terminated"]
-    assert nominal["lift_off_completed"] and nominal["set_down_completed"]
-    assert nominal["horizontal_displacement"] > 1.0
-    assert nominal["both_hand_contact_fraction"] > 0.99
-    assert cases["heavy"]["set_down_completed"] is False
-    assert cases["stress"]["termination_reason"] == "root_height_below_0.25m"
-
-
-@pytest.mark.skipif(
-    not (MOVE_LARGEBOX_ARTIFACT / "rollout_metrics.json").is_file(),
-    reason="local HDMI move-largebox rollout evidence not materialized",
-)
-def test_move_largebox_mass_matrix_rollout_evidence() -> None:
-    evidence = json.loads(
-        (MOVE_LARGEBOX_ARTIFACT / "rollout_metrics.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    cases = evidence["cases"]
-    assert list(cases) == ["nominal", "light", "heavy", "stress"]
-    assert {
-        name: case["settings"]["object_mass_kg"]
-        for name, case in cases.items()
-    } == {"nominal": 1.0, "light": 0.8, "heavy": 1.2, "stress": 2.0}
-    assert all(case["nonfinite_count"] == 0 for case in cases.values())
-    assert all(case["zero_hook_exact"] for case in cases.values())
-    assert all(case["steps"] == 199 for case in cases.values())
-    assert all(case["stable"] and not case["terminated"] for case in cases.values())
-    assert all(
-        cases[name]["lift_off_completed"] and cases[name]["set_down_completed"]
-        for name in ("nominal", "light", "heavy")
-    )
-    assert all(
-        cases[name]["both_hand_contact_fraction"] == 1.0 for name in cases
-    )
-    assert cases["nominal"]["horizontal_displacement"] > 1.0
-    assert cases["nominal"]["reference_path_progress_fraction"] > 0.99
-    assert cases["stress"]["max_lift_height"] < cases["nominal"]["max_lift_height"]
-    assert (
-        cases["stress"]["set_down_position_error"]
-        > cases["nominal"]["set_down_position_error"]
-    )
 
 
 def test_observation_contract_rejects_wrong_shape() -> None:

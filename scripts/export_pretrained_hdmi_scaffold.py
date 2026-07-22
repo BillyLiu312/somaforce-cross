@@ -2,7 +2,7 @@
 """Materialize the audited HDMI teacher as a standalone local artifact.
 
 This is an export/oracle-boundary tool. It intentionally reads a trusted HDMI
-checkpoint and source assets. The generated play/runtime artifact does not
+checkpoint and source assets. The generated rollout/runtime artifact does not
 import HDMI or load the source checkpoint pickle.
 """
 
@@ -32,6 +32,7 @@ from somaforce_cross.scaffold.pretrained_hdmi import (
     HDMIObservationBatch,
     get_hdmi_task_spec,
     sha256_file,
+    write_artifact_checksums,
 )
 
 
@@ -739,7 +740,7 @@ export, so the complete artifact remains local/private-only.
         "role": "frozen_hdmi_phase_train_privileged_teacher_simulation_baseline",
         "deployable": False,
         "exported_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "export_tool": str(Path(__file__).resolve()),
+        "export_tool": Path(__file__).resolve().relative_to(REPO_ROOT).as_posix(),
         "source": {
             "project": "HDMI",
             "revision": revision,
@@ -781,12 +782,7 @@ export, so the complete artifact remains local/private-only.
     }
     write_json(output / "manifest.json", manifest)
 
-    checksums = [
-        f"{sha256_file(path)}  {path.relative_to(output)}"
-        for path in sorted(output.rglob("*"))
-        if path.is_file() and path.name != "SHA256SUMS"
-    ]
-    (output / "SHA256SUMS").write_text("\n".join(checksums) + "\n", encoding="utf-8")
+    write_artifact_checksums(output)
     print(json.dumps({"output": str(output), "parity_max_abs_error": error, "policy_sha256": manifest["files"]["policy"]["sha256"]}, indent=2))
 
 

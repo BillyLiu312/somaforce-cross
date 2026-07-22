@@ -1,0 +1,26 @@
+{
+  "task": "push_door_hand",
+  "condition": "high_friction",
+  "steps": 540,
+  "initial_door_joint": 7.296900981742629e-18,
+  "final_door_joint": -1.1032629013061523,
+  "task_progress": 1.1032629013061523,
+  "target_progress": 1.5,
+  "max_task_progress": 1.1032629013061523,
+  "min_root_height": 0.6849894523620605,
+  "max_contact_force": 1314.805419921875,
+  "max_wrist_contact_force": 33.87565231323242,
+  "mean_support_contact_count": 1.711111111111111,
+  "max_abs_action": 4.251062393188477,
+  "mean_abs_action": 0.6158548348959709,
+  "nonfinite_count": 0,
+  "terminated": false,
+  "termination_reason": "completed_requested_steps",
+  "zero_hook_exact": true,
+  "settings": {
+    "door_friction": 10.0,
+    "door_damping": 0.55,
+    "delay": 4,
+    "alpha": 0.8999999761581421
+  }
+}

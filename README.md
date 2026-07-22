@@ -5,7 +5,7 @@
 This repository is the executable engineering baseline for SomaForce-Cross. The
 first door scaffold is a frozen policy trained with the official HDMI
 implementation and migrated behind a standalone inference contract. Runtime
-play imports only SomaForce-Cross code plus PyTorch/Isaac Lab and reads local
+rollout imports only SomaForce-Cross code plus PyTorch/Isaac Lab and reads local
 artifacts under `artifacts/`; it neither imports `active_adaptation` nor accesses
 an HDMI checkout. The exported weights, reference motion, and USD assets still
 retain HDMI provenance and redistribution restrictions.
@@ -77,7 +77,7 @@ The current code provides:
 - explicit 29-D canonical reference to audited 23-D action mapping, VecNorm,
   history/reset and JointPosition delay/alpha runtime;
 - independent PyTorch inference module, per-task HDMI-source deterministic
-  parity fixtures, import-isolation checks, and a shared Isaac Lab play entry
+  parity fixtures, import-isolation checks, and a shared Isaac Lab rollout entry
   for G1 + articulated door or G1 + rigid box.
 
 The current code does not yet provide:
@@ -99,6 +99,9 @@ docs/
   hdmi_omomo_scaffold_pipeline.md
   pretrained_hdmi_scaffold_rules.md
   pretrained_hdmi_scaffold_validation.md
+  scaffold_rollout_results.md
+configs/
+  pretrained_hdmi_rollout_cases.json
 figures/
   somaforce_cross_pipeline.png
 artifacts/scaffolds/hdmi_push_door_hand/v1/
@@ -113,12 +116,10 @@ artifacts/scaffolds/hdmi_move_suitcase/v1/
   manifest.json
   observation_contract.json
   action_contract.json
-  rollout_metrics.json
 artifacts/scaffolds/hdmi_move_largebox/v1/
   manifest.json
   observation_contract.json
   action_contract.json
-  rollout_metrics.json
 somaforce_cross/scaffold/
   pretrained_hdmi.py
   pretrained_hdmi_isaac.py
@@ -129,8 +130,10 @@ somaforce_cross/scaffold/
   contracts.py
 scripts/
   build_scaffold_reference.py
+  batch_rollout_and_render_pretrained_hdmi_scaffolds.py
   export_pretrained_hdmi_scaffold.py       # HDMI export/oracle boundary only
-  play_pretrained_hdmi_scaffold.py         # standalone Isaac Lab runtime
+  rollout_pretrained_hdmi_scaffold.py      # one task/condition -> one metrics file
+  render_pretrained_hdmi_scaffold.py       # one task/condition -> one MP4
   verify_pretrained_hdmi_isolation.py
 tests/
   test_hdmi_omomo_pipeline.py
@@ -176,6 +179,19 @@ The OMOMO command intentionally rejects raw/incomplete data. The input must alre
 python -m pytest -q
 python -m compileall -q scripts somaforce_cross
 
+# one rollout with explicit task and evolution parameters
+python scripts/rollout_pretrained_hdmi_scaffold.py \
+  --task push_door_hand --condition high_friction --headless \
+  --door-friction 10.0 --door-damping 0.55
+
+# render exactly one task/condition without writing rollout metrics
+python scripts/render_pretrained_hdmi_scaffold.py \
+  --task push_door_hand --condition high_friction \
+  --door-friction 10.0 --door-damping 0.55
+
+# sequentially run every configured task/condition and render one MP4 per case
+python scripts/batch_rollout_and_render_pretrained_hdmi_scaffolds.py
+
 # materialize the local/private artifact (requires the trusted HDMI checkout)
 python scripts/export_pretrained_hdmi_scaffold.py \
   --hdmi-root /inspire/hdd/global_user/liumengfan-253108110079/yindianyu_workspace/somaforce/HDMI \
@@ -184,20 +200,37 @@ python scripts/export_pretrained_hdmi_scaffold.py \
 # runtime checks without HDMI on PYTHONPATH
 env -u PYTHONPATH python scripts/verify_pretrained_hdmi_isolation.py --task move_suitcase
 
-# standalone privileged payload baseline
-python scripts/play_pretrained_hdmi_scaffold.py \
-  --task move_suitcase --case nominal --headless --num-envs 1 --steps 472 \
-  --require-progress 0.5 --require-contact-fraction 0.9 \
-  --metrics-json artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics.json
-
-# migrated large-box baseline; use light/heavy/stress for the mass matrix
-python scripts/play_pretrained_hdmi_scaffold.py \
-  --task move_largebox --case nominal --headless --num-envs 1 --steps 199 \
-  --require-progress 0.5 --require-contact-fraction 0.5 \
-  --metrics-json artifacts/scaffolds/hdmi_move_largebox/v1/rollout_metrics.json
 ```
 
-The play command reports `a_nom`, the 23-D action order, reference phase, door
+Both entries operate on exactly one task and one caller-named `--condition`.
+Evolution is defined by explicit arguments such as `--door-friction`,
+`--door-damping`, `--object-mass`, `--object-friction`, `--object-com-offset`,
+and initial object pose. A rollout writes one independent
+`rollout_metrics_<condition>.json`; it never merges multiple conditions into an
+aggregate file. The JSON records the actual task-specific settings used.
+Rollout metrics are mutable run evidence and are intentionally excluded from
+the artifact `SHA256SUMS`; producing a rollout never modifies that checksum file.
+
+The render entry reuses the same evolution arguments, streams frames directly
+to H.264, and verifies codec, resolution, frame readability, and nonblank
+pixels. It does not write or update rollout metrics.
+
+The current per-task case comparison, qualitative findings, metrics links, and
+videos are collected in
+[docs/scaffold_rollout_results.md](docs/scaffold_rollout_results.md).
+
+The batch entry reads `configs/pretrained_hdmi_rollout_cases.json` and invokes
+the two single-condition entries sequentially. The default matrix contains 14
+conditions across all four tasks. Metrics remain one JSON per condition beside
+its artifact, while videos are written as
+`videos/<task>/<condition>.mp4`. The four task directories are siblings;
+`research_category` remains metadata and does not affect filesystem layout.
+Use `--dry-run` to inspect the full
+command plan, `--resume` to skip existing outputs, repeated `--task` or
+`--condition` filters for a subset, and `--rollout-only` or `--render-only` when
+only one stage is needed.
+
+The rollout command reports `a_nom`, the 23-D action order, reference phase, door
 joint/progress, contact and support metrics, root-height stability, finite-state
 status, and the zero-hook result. Omitting `--headless` enables Isaac Lab GUI
 mode where a display is available. Isaac Sim 5.1 may block during teardown after
@@ -208,28 +241,23 @@ The rollout is policy-driven: the environment receives the frozen teacher's
 control stages. Fixed-input action parity is validated to `1e-5`, but a matched
 closed-loop rollout against the complete HDMI environment is not yet claimed.
 
-Push-box rollout metrics always separate the physical box pose/displacement
+Push-box rollout metrics separate the physical box pose/displacement
 from the reference trajectory. GUI mode renders the physical USD normally; the
 translucent green reference box is hidden by default and can be enabled with
 `--show-reference-box` for trajectory debugging. It is never used as actual
-progress. The play entry exposes `--box-mass`, `--box-friction`,
+progress. The rollout entry exposes `--box-mass`, `--box-friction`,
 `--box-com-offset`, `--initial-object-xy`, `--initial-object-yaw`, and
-`--contact-target-offset`. Named `high_mass` and `high_friction` cases support
-repeatable scaffold-only mismatch smoke tests.
+`--contact-target-offset`. The condition name is metadata and a filename slug;
+the numeric arguments are the authority for the physical evolution.
 
-Move-suitcase defaults to the full 472-step, 50 Hz deterministic teacher-mean
-rollout. Cases `nominal`, `light`, `heavy`, and `stress` use 1.5, 0.5, 3.0,
-and 5.5 kg without changing the frozen policy. Each run merges the same lift,
-carry, set-down, contact, support, action, finite-state, and zero-hook fields
-into `artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics.json`.
+Move-suitcase defaults to a 472-step, 50 Hz deterministic teacher-mean rollout
+with a 1.5 kg object. Use explicit object parameters to define each evolution;
+each condition receives its own metrics file.
 
 Move-largebox uses the same manifest-driven payload runtime with a local
-URDF/OBJ asset closure. Its 199-step cases `nominal`, `light`, `heavy`, and
-`stress` use 1.0, 0.8, 1.2, and 2.0 kg. The first three cover the nominal and
-training mass range; the last is a bounded out-of-range diagnostic. Physical
-object lift, displacement, final tracking error, two-hand contact, stability,
-and zero-hook evidence are merged into
-`artifacts/scaffolds/hdmi_move_largebox/v1/rollout_metrics.json`.
+URDF/OBJ asset closure. It defaults to 199 steps and 1.0 kg; each explicitly
+named condition writes physical lift, displacement, tracking, contact,
+stability, and zero-hook evidence to a separate file.
 
 For GUI playback, render occurs once per 50 Hz control step rather than once per
 physics substep. `--realtime --playback-rate 1.0` follows reference wall time;

@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "tasks": [
+    {
+      "task": "push_door_hand",
+      "category": "push_pull_door",
+      "cases": [
+        {
+          "condition": "nominal",
+          "args": {
+            "steps": 540,
+            "door_friction": 0.3,
+            "door_damping": 0.55
+          }
+        },
+        {
+          "condition": "high_friction",
+          "args": {
+            "steps": 540,
+            "door_friction": 10.0,
+            "door_damping": 0.55
+          }
+        },
+        {
+          "condition": "high_damping",
+          "args": {
+            "steps": 540,
+            "door_friction": 0.3,
+            "door_damping": 10.0
+          }
+        }
+      ]
+    },
+    {
+      "task": "push_box",
+      "category": "push_box",
+      "cases": [
+        {
+          "condition": "nominal",
+          "args": {
+            "steps": 792,
+            "object_mass": 8.0,
+            "object_friction": 0.5
+          }
+        },
+        {
+          "condition": "light_slippery",
+          "args": {
+            "steps": 792,
+            "object_mass": 1.0,
+            "object_friction": 0.1
+          }
+        },
+        {
+          "condition": "heavy_friction",
+          "args": {
+            "steps": 792,
+            "object_mass": 16.0,
+            "object_friction": 0.6
+          }
+        }
+      ]
+    },
+    {
+      "task": "move_suitcase",
+      "category": "heavy_payload",
+      "cases": [
+        {
+          "condition": "nominal",
+          "args": {
+            "steps": 472,
+            "object_mass": 1.5,
+            "object_friction": 0.55
+          }
+        },
+        {
+          "condition": "light",
+          "args": {
+            "steps": 472,
+            "object_mass": 0.5,
+            "object_friction": 0.55
+          }
+        },
+        {
+          "condition": "heavy",
+          "args": {
+            "steps": 472,
+            "object_mass": 3.0,
+            "object_friction": 0.55
+          }
+        },
+        {
+          "condition": "stress",
+          "args": {
+            "steps": 472,
+            "object_mass": 5.5,
+            "object_friction": 0.55
+          }
+        }
+      ]
+    },
+    {
+      "task": "move_largebox",
+      "category": "heavy_payload",
+      "cases": [
+        {
+          "condition": "nominal",
+          "args": {
+            "steps": 199,
+            "object_mass": 1.0,
+            "object_friction": 0.55
+          }
+        },
+        {
+          "condition": "light",
+          "args": {
+            "steps": 199,
+            "object_mass": 0.8,
+            "object_friction": 0.55
+          }
+        },
+        {
+          "condition": "heavy",
+          "args": {
+            "steps": 199,
+            "object_mass": 1.2,
+            "object_friction": 0.55
+          }
+        },
+        {
+          "condition": "stress",
+          "args": {
+            "steps": 199,
+            "object_mass": 2.0,
+            "object_friction": 0.55
+          }
+        }
+      ]
+    }
+  ]
+}
