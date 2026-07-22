@@ -24,7 +24,6 @@ from isaaclab.sim import SimulationContext
 from isaaclab.utils import configclass
 
 from somaforce_cross.scaffold.pretrained_hdmi import (
-    HDMI_ACTION_JOINT_NAMES,
     HDMI_DEFAULT_JOINT_POS,
     HDMI_PHYSICS_MATERIAL_COMBINE_MODE,
     HDMITaskSpec,
@@ -109,6 +108,13 @@ def quat_to_matrix(q: torch.Tensor) -> torch.Tensor:
     ).reshape(*q.shape[:-1], 3, 3)
 
 
+def quat_angle_error(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
+    """Shortest rotation angle between unit quaternions in radians."""
+
+    dot = (q1 * q2).sum(dim=-1).abs().clamp(max=1.0)
+    return 2.0 * torch.acos(dot)
+
+
 class HDMIMotionReference:
     def __init__(self, artifact_dir: Path, device: torch.device) -> None:
         with np.load(artifact_dir / "reference/motion.npz", allow_pickle=False) as archive:
@@ -135,7 +141,7 @@ def make_scene_cfg(
     num_envs: int,
     task_spec: HDMITaskSpec | None = None,
     *,
-    box_mass: float = 8.0,
+    rigid_object_mass: float = 8.0,
 ) -> InteractiveSceneCfg:
     task_spec = task_spec or get_hdmi_task_spec("push_door_hand")
     natural_frequency = 10.0 * 2.0 * torch.pi
@@ -173,7 +179,10 @@ def make_scene_cfg(
         ),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.76),
-            joint_pos=dict(HDMI_DEFAULT_JOINT_POS),
+            joint_pos={
+                **HDMI_DEFAULT_JOINT_POS,
+                **task_spec.robot_initial_joint_overrides,
+            },
             joint_vel={".*": 0.0},
         ),
         soft_joint_pos_limit_factor=0.9,
@@ -260,12 +269,14 @@ def make_scene_cfg(
 
         return HDMIDoorSceneCfg(num_envs=num_envs, env_spacing=5.0)
 
-    box_cfg = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Box",
+    rigid_object_cfg = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/RigidObject",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=str(artifact_dir / "assets/box.usd"),
+            usd_path=str(
+                artifact_dir / f"assets/{task_spec.object_asset_name}.usd"
+            ),
             activate_contact_sensors=True,
-            mass_props=sim_utils.MassPropertiesCfg(mass=box_mass),
+            mass_props=sim_utils.MassPropertiesCfg(mass=rigid_object_mass),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
                 retain_accelerations=False,
@@ -279,26 +290,30 @@ def make_scene_cfg(
     )
 
     @configclass
-    class HDMIBoxSceneCfg(InteractiveSceneCfg):
+    class HDMIRigidObjectSceneCfg(InteractiveSceneCfg):
         ground: AssetBaseCfg = ground_cfg
         light: AssetBaseCfg = light_cfg
         robot: ArticulationCfg = robot_cfg
-        box: RigidObjectCfg = box_cfg
+        rigid_object: RigidObjectCfg = rigid_object_cfg
         contacts: ContactSensorCfg = contacts_cfg
-        left_box_contacts = ContactSensorCfg(
+        left_object_contacts = ContactSensorCfg(
             prim_path="{ENV_REGEX_NS}/Robot/left_wrist_yaw_link",
             history_length=0,
             track_air_time=False,
-            filter_prim_paths_expr=["{ENV_REGEX_NS}/Box/box"],
+            filter_prim_paths_expr=[
+                f"{{ENV_REGEX_NS}}/RigidObject/{task_spec.object_body_name}"
+            ],
         )
-        right_box_contacts = ContactSensorCfg(
+        right_object_contacts = ContactSensorCfg(
             prim_path="{ENV_REGEX_NS}/Robot/right_wrist_yaw_link",
             history_length=0,
             track_air_time=False,
-            filter_prim_paths_expr=["{ENV_REGEX_NS}/Box/box"],
+            filter_prim_paths_expr=[
+                f"{{ENV_REGEX_NS}}/RigidObject/{task_spec.object_body_name}"
+            ],
         )
 
-    return HDMIBoxSceneCfg(num_envs=num_envs, env_spacing=5.0)
+    return HDMIRigidObjectSceneCfg(num_envs=num_envs, env_spacing=5.0)
 
 @dataclass
 class RolloutMetrics:
@@ -354,6 +369,55 @@ class PushBoxRolloutMetrics:
     settings: dict[str, object]
 
 
+@dataclass
+class MoveSuitcaseRolloutMetrics:
+    case: str
+    steps: int
+    initial_object_position: list[float]
+    initial_object_orientation_wxyz: list[float]
+    highest_object_position: list[float]
+    highest_object_orientation_wxyz: list[float]
+    final_object_position: list[float]
+    final_object_orientation_wxyz: list[float]
+    reference_initial_object_position: list[float]
+    reference_highest_object_position: list[float]
+    reference_final_object_position: list[float]
+    max_lift_height: float
+    reference_max_lift_height: float
+    lift_off_completed: bool
+    horizontal_displacement: float
+    actual_path_length: float
+    reference_path_progress: float
+    reference_path_progress_fraction: float
+    reference_path_length: float
+    carry_position_tracking_error_mean: float
+    carry_position_tracking_error_max: float
+    carry_orientation_tracking_error_mean: float
+    carry_orientation_tracking_error_max: float
+    carry_tracking_steps: int
+    set_down_height: float
+    set_down_position_error: float
+    set_down_completed: bool
+    max_left_wrist_contact_force: float
+    max_right_wrist_contact_force: float
+    mean_left_wrist_contact_force: float
+    mean_right_wrist_contact_force: float
+    reference_contact_steps: int
+    both_hand_contact_fraction: float
+    min_root_height: float
+    mean_support_contact_count: float
+    max_contact_force: float
+    fall_detected: bool
+    max_abs_action: float
+    mean_abs_action: float
+    nonfinite_count: int
+    terminated: bool
+    termination_reason: str
+    stable: bool
+    zero_hook_exact: bool
+    settings: dict[str, object]
+
+
 class PretrainedHDMIIsaacRuntime:
     """Standalone manifest-selected G1 + object HDMI rollout environment."""
 
@@ -371,14 +435,14 @@ class PretrainedHDMIIsaacRuntime:
         alpha: float = 0.9,
         door_friction: float = 0.3,
         door_damping: float = 0.55,
-        box_mass: float = 8.0,
-        box_friction: float = 0.5,
-        box_com_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        object_mass: float | None = None,
+        object_friction: float = 0.5,
+        object_com_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
         initial_object_xy: tuple[float, float] = (0.0, 0.0),
         initial_object_yaw: float = 0.0,
         contact_target_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
         case_name: str = "nominal",
-        show_reference_box: bool = False,
+        show_reference_object: bool = False,
     ) -> None:
         self.sim = sim
         self.artifact_dir = Path(artifact_dir).expanduser().resolve()
@@ -388,21 +452,32 @@ class PretrainedHDMIIsaacRuntime:
             self.artifact_dir, device=self.device
         )
         self.task_spec = self.scaffold.task_spec
+        if object_mass is None:
+            object_mass = self.task_spec.nominal_object_mass or 8.0
         self.scene = InteractiveScene(
             make_scene_cfg(
-                self.artifact_dir, num_envs, self.task_spec, box_mass=box_mass
+                self.artifact_dir,
+                num_envs,
+                self.task_spec,
+                rigid_object_mass=object_mass,
             )
         )
         self.sim.reset()
         self.scene.update(self.physics_dt)
         self.robot = self.scene["robot"]
-        self.object = self.scene[self.task_spec.object_asset_name]
+        self.object = (
+            self.scene["door"]
+            if self.task_spec.object_kind == "articulation"
+            else self.scene["rigid_object"]
+        )
         self.door = self.object if self.task_spec.object_kind == "articulation" else None
-        self.box = self.object if self.task_spec.object_kind == "rigid_object" else None
         self.contacts = self.scene["contacts"]
         self.filtered_wrist_contacts = (
-            [self.scene["left_box_contacts"], self.scene["right_box_contacts"]]
-            if self.task_spec.task == "push_box"
+            [
+                self.scene["left_object_contacts"],
+                self.scene["right_object_contacts"],
+            ]
+            if self.task_spec.object_kind == "rigid_object"
             else []
         )
         self.reference = HDMIMotionReference(self.artifact_dir, self.device)
@@ -420,9 +495,9 @@ class PretrainedHDMIIsaacRuntime:
         )
         self.door_friction = float(door_friction)
         self.door_damping = float(door_damping)
-        self.box_mass = float(box_mass)
-        self.box_friction = float(box_friction)
-        self.box_com_offset = tuple(float(value) for value in box_com_offset)
+        self.object_mass = float(object_mass)
+        self.object_friction = float(object_friction)
+        self.object_com_offset = tuple(float(value) for value in object_com_offset)
         self.initial_object_xy = tuple(float(value) for value in initial_object_xy)
         self.initial_object_yaw = float(initial_object_yaw)
         self.contact_target_offset = tuple(float(value) for value in contact_target_offset)
@@ -430,13 +505,21 @@ class PretrainedHDMIIsaacRuntime:
         self.reference_step = 0
         self._resolve_indices()
         self.reference_object_marker: VisualizationMarkers | None = None
-        if show_reference_box and self.task_spec.task == "push_box" and self.sim.has_gui():
+        if (
+            show_reference_object
+            and self.task_spec.object_kind == "rigid_object"
+            and self.sim.has_gui()
+        ):
             self.reference_object_marker = VisualizationMarkers(
                 VisualizationMarkersCfg(
-                    prim_path="/Visuals/HDMIReferenceBox",
+                    prim_path="/Visuals/HDMIReferenceObject",
                     markers={
                         "reference_box": sim_utils.CuboidCfg(
-                            size=(1.0, 0.8, 0.8),
+                            size=(
+                                (1.0, 0.8, 0.8)
+                                if self.task_spec.task == "push_box"
+                                else (0.8, 0.5, 0.6)
+                            ),
                             visual_material=sim_utils.PreviewSurfaceCfg(
                                 diffuse_color=(0.05, 0.85, 0.25), opacity=0.3
                             ),
@@ -452,18 +535,18 @@ class PretrainedHDMIIsaacRuntime:
         indices = torch.arange(self.num_envs, device="cpu")
         masses = self.object.root_physx_view.get_masses().clone()
         inertias = self.object.root_physx_view.get_inertias().clone()
-        scale = self.box_mass / masses
-        masses.fill_(self.box_mass)
+        scale = self.object_mass / masses
+        masses.fill_(self.object_mass)
         inertias *= scale.unsqueeze(-1) if inertias.ndim == 3 else scale
         self.object.root_physx_view.set_masses(masses, indices)
         self.object.root_physx_view.set_inertias(inertias, indices)
         materials = self.object.root_physx_view.get_material_properties().clone()
-        materials[..., 0] = self.box_friction
-        materials[..., 1] = self.box_friction
+        materials[..., 0] = self.object_friction
+        materials[..., 1] = self.object_friction
         materials[..., 2] = 0.0
         self.object.root_physx_view.set_material_properties(materials, indices)
         coms = self.object.root_physx_view.get_coms().clone()
-        coms[..., :3] += torch.tensor(self.box_com_offset, device=coms.device)
+        coms[..., :3] += torch.tensor(self.object_com_offset, device=coms.device)
         self.object.root_physx_view.set_coms(coms, indices)
 
     def _resolve_indices(self) -> None:
@@ -487,7 +570,10 @@ class PretrainedHDMIIsaacRuntime:
             device=self.device,
         )
         self.ref_action_joint_ids = torch.tensor(
-            [self.reference.joint_names.index(name) for name in HDMI_ACTION_JOINT_NAMES],
+            [
+                self.reference.joint_names.index(name)
+                for name in self.task_spec.action_joint_names
+            ],
             device=self.device,
         )
         self.root_ref_body_id = self.reference.body_names.index("pelvis")
@@ -536,6 +622,9 @@ class PretrainedHDMIIsaacRuntime:
         )
         source = self.reference.data[key][[frame]].float().expand(self.num_envs, -1)
         result[:, self.robot_shared_joint_ids] = source[:, self.ref_shared_joint_ids]
+        if key == "joint_pos":
+            for name, value in self.task_spec.robot_initial_joint_overrides.items():
+                result[:, self.robot.joint_names.index(name)] = value
         return result
 
     def reset(self) -> None:
@@ -625,9 +714,10 @@ class PretrainedHDMIIsaacRuntime:
             self.reference.data["body_pos_w"][[frame], self.object_ref_body_id].float()
             + self.scene.env_origins
         )
-        # The reference data stores the box origin at its bottom face.
-        position = position.clone()
-        position[:, 2] += 0.4
+        if self.task_spec.task == "push_box":
+            # The push-box reference stores the object origin at its bottom face.
+            position = position.clone()
+            position[:, 2] += 0.4
         orientation = self.reference.data["body_quat_w"][
             [frame], self.object_ref_body_id
         ].float()
@@ -862,7 +952,15 @@ class PretrainedHDMIIsaacRuntime:
         realtime: bool = False,
         playback_rate: float = 1.0,
         hold_seconds: float = 0.0,
-    ) -> RolloutMetrics | PushBoxRolloutMetrics:
+    ) -> RolloutMetrics | PushBoxRolloutMetrics | MoveSuitcaseRolloutMetrics:
+        if self.task_spec.task == "move_suitcase":
+            return self._rollout_move_suitcase(
+                steps,
+                log_interval=log_interval,
+                realtime=realtime,
+                playback_rate=playback_rate,
+                hold_seconds=hold_seconds,
+            )
         if self.task_spec.task == "push_box":
             return self._rollout_push_box(
                 steps,
@@ -961,6 +1059,291 @@ class PretrainedHDMIIsaacRuntime:
             zero_hook_exact=torch.equal(
                 self.action_runtime.received_action, self.action_runtime.last_a_nom
             ),
+        )
+
+    def _rollout_move_suitcase(
+        self,
+        steps: int,
+        *,
+        log_interval: int,
+        realtime: bool,
+        playback_rate: float,
+        hold_seconds: float,
+    ) -> MoveSuitcaseRolloutMetrics:
+        if playback_rate <= 0.0:
+            raise ValueError("playback_rate must be positive")
+        lift_off_threshold = 0.1
+        set_down_height_tolerance = 0.1
+        set_down_position_tolerance = 0.25
+        fall_height_threshold = 0.25
+        ref_positions = self.reference.data["body_pos_w"][
+            :, self.object_ref_body_id
+        ].float()
+        ref_orientations = self.reference.data["body_quat_w"][
+            :, self.object_ref_body_id
+        ].float()
+        ref_initial = ref_positions[0]
+        ref_highest_index = int(ref_positions[:, 2].argmax())
+        ref_highest = ref_positions[ref_highest_index]
+        ref_final = ref_positions[-1]
+        reference_path_segments = torch.linalg.vector_norm(
+            ref_positions[1:] - ref_positions[:-1], dim=-1
+        )
+        reference_path_cumulative = torch.cat(
+            (
+                torch.zeros(1, device=self.device),
+                reference_path_segments.cumsum(dim=0),
+            )
+        )
+        reference_path_length = float(reference_path_cumulative[-1])
+        reference_contact = self.reference.data["object_contact"].reshape(
+            self.reference.length, -1
+        ).any(dim=-1)
+        reference_carry = (
+            ref_positions[:, 2] >= ref_initial[2] + lift_off_threshold
+        ) & reference_contact
+
+        initial = self.object.data.root_link_pos_w[0].clone()
+        initial_quat = self.object.data.root_link_quat_w[0].clone()
+        previous_position = initial.clone()
+        highest = initial.clone()
+        highest_quat = initial_quat.clone()
+        actual_path_length = 0.0
+        max_reference_path_progress = 0.0
+        min_height = float("inf")
+        max_contact = 0.0
+        max_wrist = [0.0, 0.0]
+        wrist_sum = [0.0, 0.0]
+        support_sum = 0.0
+        expected_contact_steps = 0
+        both_contact_steps = 0
+        carry_position_error_sum = 0.0
+        carry_position_error_max = 0.0
+        carry_orientation_error_sum = 0.0
+        carry_orientation_error_max = 0.0
+        carry_steps = 0
+        max_action = 0.0
+        action_abs_sum = 0.0
+        action_count = 0
+        nonfinite = 0
+        terminated = False
+        reason = "completed_requested_steps"
+        actual_steps = 0
+
+        for step in range(steps):
+            wall_step_start = time.perf_counter()
+            a_nom = self.step()
+            actual_steps = step + 1
+            ref_index = min(self.reference_step - 1, self.reference.length - 1)
+            root_height = float(self.robot.data.root_link_pos_w[0, 2])
+            object_position = self.object.data.root_link_pos_w[0]
+            object_orientation = self.object.data.root_link_quat_w[0]
+            object_local_position = object_position - self.scene.env_origins[0]
+            actual_path_length += float(
+                torch.linalg.vector_norm(object_position - previous_position)
+            )
+            previous_position = object_position.clone()
+            if float(object_position[2]) > float(highest[2]):
+                highest = object_position.clone()
+                highest_quat = object_orientation.clone()
+
+            nearest_ref_index = int(
+                torch.linalg.vector_norm(
+                    ref_positions - object_local_position, dim=-1
+                ).argmin()
+            )
+            max_reference_path_progress = max(
+                max_reference_path_progress,
+                float(reference_path_cumulative[nearest_ref_index]),
+            )
+
+            contact_norms = self.contacts.data.net_forces_w[0].norm(dim=-1)
+            contact_force = float(contact_norms.max())
+            wrist_forces = []
+            for sensor in self.filtered_wrist_contacts:
+                force_matrix = sensor.data.force_matrix_w
+                wrist_forces.append(
+                    float(force_matrix[0].norm(dim=-1).max())
+                    if force_matrix is not None
+                    else 0.0
+                )
+            support_count = float(
+                (contact_norms[self.contact_support_ids] > 1.0).sum()
+            )
+            if bool(reference_contact[ref_index]):
+                expected_contact_steps += 1
+                both_contact_steps += int(all(force > 1.0 for force in wrist_forces))
+            if bool(reference_carry[ref_index]):
+                position_error = float(
+                    torch.linalg.vector_norm(
+                        object_local_position - ref_positions[ref_index]
+                    )
+                )
+                orientation_error = float(
+                    quat_angle_error(
+                        object_orientation, ref_orientations[ref_index]
+                    )
+                )
+                carry_steps += 1
+                carry_position_error_sum += position_error
+                carry_position_error_max = max(
+                    carry_position_error_max, position_error
+                )
+                carry_orientation_error_sum += orientation_error
+                carry_orientation_error_max = max(
+                    carry_orientation_error_max, orientation_error
+                )
+
+            min_height = min(min_height, root_height)
+            max_contact = max(max_contact, contact_force)
+            support_sum += support_count
+            for index, force in enumerate(wrist_forces):
+                max_wrist[index] = max(max_wrist[index], force)
+                wrist_sum[index] += force
+            max_action = max(max_action, float(a_nom.abs().max()))
+            action_abs_sum += float(a_nom.abs().sum())
+            action_count += a_nom.numel()
+            tensors = (
+                a_nom,
+                self.robot.data.joint_pos,
+                self.robot.data.root_link_pos_w,
+                self.object.data.root_link_pos_w,
+                self.object.data.root_link_quat_w,
+            )
+            nonfinite += sum(
+                int((~torch.isfinite(tensor)).sum()) for tensor in tensors
+            )
+            if step % log_interval == 0 or step == steps - 1:
+                print(
+                    f"step={step:04d} phase={float(self.history.phase[0, 0]):.4f} "
+                    f"suitcase_xyz={object_position.tolist()} "
+                    f"lift={float(highest[2] - initial[2]):.6f} "
+                    f"ref_path_progress={max_reference_path_progress:.6f} "
+                    f"root_z={root_height:.4f} "
+                    f"left_contact={wrist_forces[0]:.3f} "
+                    f"right_contact={wrist_forces[1]:.3f} "
+                    f"support_contacts={support_count:.0f} "
+                    f"a_nom_abs_mean={float(a_nom.abs().mean()):.4f} "
+                    f"a_nom_abs_max={float(a_nom.abs().max()):.4f}"
+                )
+            if nonfinite:
+                terminated = True
+                reason = "nonfinite_state"
+                break
+            if root_height < fall_height_threshold:
+                terminated = True
+                reason = f"root_height_below_{fall_height_threshold:.2f}m"
+                break
+            if realtime:
+                target_wall_dt = self.control_dt / playback_rate
+                remaining = target_wall_dt - (time.perf_counter() - wall_step_start)
+                if remaining > 0.0:
+                    time.sleep(remaining)
+
+        if hold_seconds > 0.0 and self.sim.has_gui():
+            hold_until = time.monotonic() + hold_seconds
+            while time.monotonic() < hold_until:
+                self.sim.render()
+                time.sleep(1.0 / 60.0)
+        final = self.object.data.root_link_pos_w[0].clone()
+        final_quat = self.object.data.root_link_quat_w[0].clone()
+        final_local = final - self.scene.env_origins[0]
+        max_lift_height = float(highest[2] - initial[2])
+        lift_off_completed = max_lift_height >= lift_off_threshold
+        set_down_position_error = float(
+            torch.linalg.vector_norm(final_local - ref_final)
+        )
+        set_down_completed = (
+            lift_off_completed
+            and abs(float(final[2] - initial[2])) <= set_down_height_tolerance
+            and set_down_position_error <= set_down_position_tolerance
+            and not terminated
+        )
+        stable = (
+            nonfinite == 0
+            and not terminated
+            and min_height >= fall_height_threshold
+        )
+        return MoveSuitcaseRolloutMetrics(
+            case=self.case_name,
+            steps=actual_steps,
+            initial_object_position=initial.tolist(),
+            initial_object_orientation_wxyz=initial_quat.tolist(),
+            highest_object_position=highest.tolist(),
+            highest_object_orientation_wxyz=highest_quat.tolist(),
+            final_object_position=final.tolist(),
+            final_object_orientation_wxyz=final_quat.tolist(),
+            reference_initial_object_position=(
+                ref_initial + self.scene.env_origins[0]
+            ).tolist(),
+            reference_highest_object_position=(
+                ref_highest + self.scene.env_origins[0]
+            ).tolist(),
+            reference_final_object_position=(
+                ref_final + self.scene.env_origins[0]
+            ).tolist(),
+            max_lift_height=max_lift_height,
+            reference_max_lift_height=float(ref_highest[2] - ref_initial[2]),
+            lift_off_completed=lift_off_completed,
+            horizontal_displacement=float(
+                torch.linalg.vector_norm(final[:2] - initial[:2])
+            ),
+            actual_path_length=actual_path_length,
+            reference_path_progress=max_reference_path_progress,
+            reference_path_progress_fraction=(
+                max_reference_path_progress / max(reference_path_length, 1e-8)
+            ),
+            reference_path_length=reference_path_length,
+            carry_position_tracking_error_mean=(
+                carry_position_error_sum / max(carry_steps, 1)
+            ),
+            carry_position_tracking_error_max=carry_position_error_max,
+            carry_orientation_tracking_error_mean=(
+                carry_orientation_error_sum / max(carry_steps, 1)
+            ),
+            carry_orientation_tracking_error_max=carry_orientation_error_max,
+            carry_tracking_steps=carry_steps,
+            set_down_height=float(final[2]),
+            set_down_position_error=set_down_position_error,
+            set_down_completed=set_down_completed,
+            max_left_wrist_contact_force=max_wrist[0],
+            max_right_wrist_contact_force=max_wrist[1],
+            mean_left_wrist_contact_force=wrist_sum[0] / max(actual_steps, 1),
+            mean_right_wrist_contact_force=wrist_sum[1] / max(actual_steps, 1),
+            reference_contact_steps=expected_contact_steps,
+            both_hand_contact_fraction=(
+                both_contact_steps / max(expected_contact_steps, 1)
+            ),
+            min_root_height=min_height,
+            mean_support_contact_count=support_sum / max(actual_steps, 1),
+            max_contact_force=max_contact,
+            fall_detected=min_height < fall_height_threshold,
+            max_abs_action=max_action,
+            mean_abs_action=action_abs_sum / max(action_count, 1),
+            nonfinite_count=nonfinite,
+            terminated=terminated,
+            termination_reason=reason,
+            stable=stable,
+            zero_hook_exact=torch.equal(
+                self.action_runtime.received_action,
+                self.action_runtime.last_a_nom,
+            ),
+            settings={
+                "object_mass_kg": self.object_mass,
+                "object_friction": self.object_friction,
+                "object_com_offset_m": self.object_com_offset,
+                "initial_object_xy_m": self.initial_object_xy,
+                "initial_object_yaw_rad": self.initial_object_yaw,
+                "contact_target_offset_m": self.contact_target_offset,
+                "training_mass_range_kg": [1.2, 1.8],
+                "nominal_mass_kg": self.task_spec.nominal_object_mass,
+                "lift_off_threshold_m": lift_off_threshold,
+                "set_down_height_tolerance_m": set_down_height_tolerance,
+                "set_down_position_tolerance_m": set_down_position_tolerance,
+                "fall_height_threshold_m": fall_height_threshold,
+                "delay_physics_substeps": int(self.action_runtime.delay[0, 0]),
+                "alpha": float(self.action_runtime.alpha[0, 0]),
+            },
         )
 
     def _rollout_push_box(
@@ -1132,9 +1515,9 @@ class PretrainedHDMIIsaacRuntime:
                 self.action_runtime.received_action, self.action_runtime.last_a_nom
             ),
             settings={
-                "box_mass": self.box_mass,
-                "box_friction": self.box_friction,
-                "box_com_offset": self.box_com_offset,
+                "box_mass": self.object_mass,
+                "box_friction": self.object_friction,
+                "box_com_offset": self.object_com_offset,
                 "initial_object_xy": self.initial_object_xy,
                 "initial_object_yaw": self.initial_object_yaw,
                 "contact_target_offset": self.contact_target_offset,
@@ -1152,8 +1535,6 @@ class PretrainedHDMIIsaacRuntime:
         del self.contacts
         if self.door is not None:
             del self.door
-        if self.box is not None:
-            del self.box
         del self.object
         del self.robot
         del self.scene
@@ -1178,3 +1559,12 @@ class PretrainedHDMIBoxIsaacRuntime(PretrainedHDMIIsaacRuntime):
         super().__init__(*args, **kwargs)
         if self.task_spec.task != "push_box":
             raise ValueError("box runtime requires a push_box artifact")
+
+
+class PretrainedHDMISuitcaseIsaacRuntime(PretrainedHDMIIsaacRuntime):
+    """Explicit move-suitcase runtime for payload mismatch validation."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        if self.task_spec.task != "move_suitcase":
+            raise ValueError("suitcase runtime requires a move_suitcase artifact")

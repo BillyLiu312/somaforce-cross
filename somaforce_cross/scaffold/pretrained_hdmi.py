@@ -16,9 +16,12 @@ from typing import Mapping
 import torch
 from torch import nn
 
+from somaforce_cross.scaffold.contracts import ScaffoldTask
+
 
 CONTRACT_VERSION = "hdmi_push_door_hand_teacher_v1"
 PUSH_BOX_CONTRACT_VERSION = "hdmi_push_box_teacher_v1"
+MOVE_SUITCASE_CONTRACT_VERSION = "hdmi_move_suitcase_teacher_v1"
 OBSERVATION_DIMS: dict[str, int] = {
     "command": 356,
     "policy": 249,
@@ -27,6 +30,13 @@ OBSERVATION_DIMS: dict[str, int] = {
     "reference_action": 23,
 }
 PUSH_BOX_OBSERVATION_DIMS: dict[str, int] = {
+    "command": 356,
+    "policy": 249,
+    "object": 10,
+    "privileged": 1714,
+    "reference_action": 23,
+}
+MOVE_SUITCASE_OBSERVATION_DIMS: dict[str, int] = {
     "command": 356,
     "policy": 249,
     "object": 10,
@@ -153,6 +163,7 @@ class HDMITaskSpec:
     """Task identity and tensor contract used by export and runtime."""
 
     task: str
+    research_category: ScaffoldTask
     artifact_name: str
     contract_version: str
     observation_dims: Mapping[str, int]
@@ -166,6 +177,8 @@ class HDMITaskSpec:
     contact_target_offsets: tuple[tuple[float, float, float], ...]
     contact_eef_names: tuple[str, ...]
     contact_eef_offsets: tuple[tuple[float, float, float], ...]
+    robot_initial_joint_overrides: Mapping[str, float]
+    nominal_object_mass: float | None
 
 
 _COMMON_NETWORK = {
@@ -178,6 +191,7 @@ _COMMON_NETWORK = {
 HDMI_TASK_SPECS: dict[str, HDMITaskSpec] = {
     "push_door_hand": HDMITaskSpec(
         task="push_door_hand",
+        research_category=ScaffoldTask.PUSH_PULL_DOOR,
         artifact_name="hdmi_push_door_hand",
         contract_version=CONTRACT_VERSION,
         observation_dims=OBSERVATION_DIMS,
@@ -191,9 +205,12 @@ HDMI_TASK_SPECS: dict[str, HDMITaskSpec] = {
         contact_target_offsets=((0.0, -0.6, 1.0),),
         contact_eef_names=("right_wrist_yaw_link",),
         contact_eef_offsets=((0.05, 0.0, 0.0),),
+        robot_initial_joint_overrides={},
+        nominal_object_mass=None,
     ),
     "push_box": HDMITaskSpec(
         task="push_box",
+        research_category=ScaffoldTask.PUSH_BOX,
         artifact_name="hdmi_push_box",
         contract_version=PUSH_BOX_CONTRACT_VERSION,
         observation_dims=PUSH_BOX_OBSERVATION_DIMS,
@@ -207,6 +224,30 @@ HDMI_TASK_SPECS: dict[str, HDMITaskSpec] = {
         contact_target_offsets=((0.0, -0.2, 0.8), (0.0, 0.2, 0.8)),
         contact_eef_names=("left_wrist_yaw_link", "right_wrist_yaw_link"),
         contact_eef_offsets=((0.1, 0.0, 0.0), (0.1, 0.0, 0.0)),
+        robot_initial_joint_overrides={},
+        nominal_object_mass=8.0,
+    ),
+    "move_suitcase": HDMITaskSpec(
+        task="move_suitcase",
+        research_category=ScaffoldTask.HEAVY_PAYLOAD,
+        artifact_name="hdmi_move_suitcase",
+        contract_version=MOVE_SUITCASE_CONTRACT_VERSION,
+        observation_dims=MOVE_SUITCASE_OBSERVATION_DIMS,
+        network=HDMINetworkContract(privileged_encoder_input_dim=1724, **_COMMON_NETWORK),
+        action_joint_names=HDMI_ACTION_JOINT_NAMES,
+        action_scale=HDMI_ACTION_SCALE,
+        reference_joint_names=HDMI_REFERENCE_JOINT_NAMES,
+        object_kind="rigid_object",
+        object_asset_name="suitcase",
+        object_body_name="suitcase",
+        contact_target_offsets=((-0.1, 0.18, 0.25), (-0.1, -0.18, 0.25)),
+        contact_eef_names=("left_wrist_yaw_link", "right_wrist_yaw_link"),
+        contact_eef_offsets=((0.05, 0.0, 0.0), (0.05, 0.0, 0.0)),
+        robot_initial_joint_overrides={
+            "left_wrist_yaw_joint": -0.4,
+            "right_wrist_yaw_joint": 0.4,
+        },
+        nominal_object_mass=1.5,
     ),
 }
 
@@ -250,6 +291,9 @@ def task_spec_from_manifest(manifest: Mapping[str, object]) -> HDMITaskSpec:
 
     spec = HDMITaskSpec(
         task=base.task,
+        research_category=ScaffoldTask(
+            str(task_data.get("research_category", base.research_category.value))
+        ),
         artifact_name=base.artifact_name,
         contract_version=base.contract_version,
         observation_dims=dims,
@@ -280,6 +324,20 @@ def task_spec_from_manifest(manifest: Mapping[str, object]) -> HDMITaskSpec:
             for value in task_data.get("contact_eef_names", base.contact_eef_names)
         ),
         contact_eef_offsets=tuple3s("contact_eef_offsets", base.contact_eef_offsets),
+        robot_initial_joint_overrides={
+            str(name): float(value)
+            for name, value in dict(
+                task_data.get(
+                    "robot_initial_joint_overrides",
+                    base.robot_initial_joint_overrides,
+                )
+            ).items()
+        },
+        nominal_object_mass=(
+            None
+            if task_data.get("nominal_object_mass", base.nominal_object_mass) is None
+            else float(task_data.get("nominal_object_mass", base.nominal_object_mass))
+        ),
     )
     if len(spec.action_joint_names) != network.action_dim:
         raise ValueError("manifest action joint count does not match network output")

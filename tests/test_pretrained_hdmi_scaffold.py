@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import numpy as np
 import pytest
@@ -12,6 +13,7 @@ from somaforce_cross.scaffold.pretrained_hdmi import (
     HDMI_DEFAULT_JOINT_POS,
     HDMI_PHYSICS_MATERIAL_COMBINE_MODE,
     HDMI_REFERENCE_JOINT_NAMES,
+    MOVE_SUITCASE_OBSERVATION_DIMS,
     REFERENCE_TO_ACTION_INDICES,
     HDMIJointPositionActionRuntime,
     HDMIObservationBatch,
@@ -21,6 +23,7 @@ from somaforce_cross.scaffold.pretrained_hdmi import (
     get_hdmi_task_spec,
     reference_action,
     reference_to_action,
+    sha256_file,
 )
 from somaforce_cross.scaffold.contracts import ScaffoldTask
 
@@ -32,6 +35,10 @@ ARTIFACT = (
 PUSH_BOX_ARTIFACT = (
     Path(__file__).resolve().parents[1]
     / "artifacts/scaffolds/hdmi_push_box/v1"
+)
+MOVE_SUITCASE_ARTIFACT = (
+    Path(__file__).resolve().parents[1]
+    / "artifacts/scaffolds/hdmi_move_suitcase/v1"
 )
 
 
@@ -99,6 +106,36 @@ def test_push_box_task_identity_and_25_joint_reference_mapping() -> None:
         task_spec.action_scale,
     )
     assert normalized.shape == (1, 23)
+
+
+def test_move_suitcase_task_contract_and_reference_mapping() -> None:
+    assert ScaffoldTask.MOVE_SUITCASE.value == "move_suitcase"
+    assert ScaffoldTask.MOVE_SUITCASE is not ScaffoldTask.HEAVY_PAYLOAD
+    task_spec = get_hdmi_task_spec("move_suitcase")
+    assert task_spec.research_category is ScaffoldTask.HEAVY_PAYLOAD
+    assert task_spec.observation_dims == MOVE_SUITCASE_OBSERVATION_DIMS
+    assert task_spec.network.privileged_encoder_input_dim == 1724
+    assert task_spec.object_asset_name == "suitcase"
+    assert task_spec.object_body_name == "suitcase"
+    assert task_spec.nominal_object_mass == 1.5
+    assert task_spec.robot_initial_joint_overrides == {
+        "left_wrist_yaw_joint": -0.4,
+        "right_wrist_yaw_joint": 0.4,
+    }
+    assert task_spec.contact_target_offsets == (
+        (-0.1, 0.18, 0.25),
+        (-0.1, -0.18, 0.25),
+    )
+    assert task_spec.contact_eef_offsets == (
+        (0.05, 0.0, 0.0),
+        (0.05, 0.0, 0.0),
+    )
+    source = torch.arange(29, dtype=torch.float32).unsqueeze(0)
+    selected = reference_to_action(
+        source, HDMI_REFERENCE_JOINT_NAMES, task_spec.action_joint_names
+    )
+    assert selected.shape == (1, 23)
+    assert selected.tolist()[0] == list(REFERENCE_TO_ACTION_INDICES)
 
 
 def test_reset_history_previous_action_and_phase() -> None:
@@ -214,6 +251,82 @@ def test_push_box_policy_contract_is_frozen_and_matches_oracle_fixture() -> None
     assert actual.shape == (4, 23)
     assert float((actual - oracle).abs().max()) <= 1e-5
     assert not actual.requires_grad
+
+
+@pytest.mark.skipif(
+    not (MOVE_SUITCASE_ARTIFACT / "manifest.json").is_file(),
+    reason="local HDMI move-suitcase artifact not materialized",
+)
+def test_move_suitcase_policy_contract_provenance_and_oracle_fixture() -> None:
+    scaffold = PretrainedHDMIScaffold.from_artifact(MOVE_SUITCASE_ARTIFACT)
+    assert scaffold.task_spec.task == "move_suitcase"
+    assert scaffold.task_spec.research_category is ScaffoldTask.HEAVY_PAYLOAD
+    assert scaffold.policy.priv_fc.in_features == 1724
+    assert scaffold.policy.actor_fc1.in_features == 861
+    assert scaffold.policy.actor_mean.out_features == 23
+    assert not scaffold.training and not scaffold.policy.training
+    assert all(not parameter.requires_grad for parameter in scaffold.parameters())
+
+    with np.load(
+        MOVE_SUITCASE_ARTIFACT / "parity/source_outputs.npz", allow_pickle=False
+    ) as data:
+        observation = HDMIObservationBatch(
+            command=torch.from_numpy(data["command"]),
+            policy=torch.from_numpy(data["policy"]),
+            object=torch.from_numpy(data["object"]),
+            privileged=torch.from_numpy(data["privileged"]),
+            reference_action=torch.from_numpy(data["reference_action"]),
+        )
+        oracle = torch.from_numpy(data["oracle_action"])
+    actual = scaffold.nominal_action(observation)
+    assert actual.shape == (4, 23)
+    assert float((actual - oracle).abs().max()) <= 1e-5
+    assert not actual.requires_grad
+
+    manifest = json.loads(
+        (MOVE_SUITCASE_ARTIFACT / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["checkpoint_audit"]["passed"] is True
+    assert manifest["checkpoint_audit"]["forbidden_parameter_paths"] == []
+    assert manifest["checkpoint_audit"]["run_saved_policy_source_checked"] is True
+    assert manifest["task_contract"]["nominal_object_mass"] == 1.5
+    assert manifest["task_contract"]["research_category"] == "heavy_payload"
+    assert manifest["material_dependencies"][0]["required_for_headless_physics"] is False
+    assert manifest["source"]["source_files"]["run_saved_policy"]["sha256"] == (
+        "de7b1546227b64e6ba7f1269753f6a445113838712e252f00006501604f2fd18"
+    )
+    door_g1 = ARTIFACT / "assets/g1.usd"
+    assert sha256_file(MOVE_SUITCASE_ARTIFACT / "assets/g1.usd") == sha256_file(
+        door_g1
+    )
+
+
+@pytest.mark.skipif(
+    not (MOVE_SUITCASE_ARTIFACT / "rollout_metrics.json").is_file(),
+    reason="local HDMI move-suitcase rollout evidence not materialized",
+)
+def test_move_suitcase_mass_matrix_rollout_evidence() -> None:
+    evidence = json.loads(
+        (MOVE_SUITCASE_ARTIFACT / "rollout_metrics.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    cases = evidence["cases"]
+    assert list(cases) == ["nominal", "light", "heavy", "stress"]
+    assert {
+        name: case["settings"]["object_mass_kg"]
+        for name, case in cases.items()
+    } == {"nominal": 1.5, "light": 0.5, "heavy": 3.0, "stress": 5.5}
+    assert all(case["nonfinite_count"] == 0 for case in cases.values())
+    assert all(case["zero_hook_exact"] for case in cases.values())
+    nominal = cases["nominal"]
+    assert nominal["steps"] == 472
+    assert nominal["stable"] and not nominal["terminated"]
+    assert nominal["lift_off_completed"] and nominal["set_down_completed"]
+    assert nominal["horizontal_displacement"] > 1.0
+    assert nominal["both_hand_contact_fraction"] > 0.99
+    assert cases["heavy"]["set_down_completed"] is False
+    assert cases["stress"]["termination_reason"] == "root_height_below_0.25m"
 
 
 def test_observation_contract_rejects_wrong_shape() -> None:

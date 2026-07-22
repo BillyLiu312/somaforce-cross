@@ -124,3 +124,72 @@ and is not copied into the runtime artifact. GUI playback was not captured in
 this headless environment because no X display was available. GUI mode hides
 the translucent green reference box by default; pass `--show-reference-box`
 to render it separately from the physical box for trajectory debugging.
+
+## Move-Suitcase Validation (2026-07-22)
+
+The third artifact is
+`artifacts/scaffolds/hdmi_move_suitcase/v1`. It is the frozen HDMI
+`phase=train` privileged teacher under contract
+`hdmi_move_suitcase_teacher_v1`, not a deployable policy. The export used the
+W&B run-saved `ppo_roa.py`, `cfg.yaml`, and checkpoint tensor shapes and
+confirmed that the checkpoint contains no force-residual parameters.
+
+```bash
+/opt/miniconda3/envs/isaaclab/bin/python scripts/export_pretrained_hdmi_scaffold.py \
+  --hdmi-root /inspire/hdd/global_user/liumengfan-253108110079/yindianyu_workspace/somaforce/HDMI \
+  --task move_suitcase --force
+env -u PYTHONPATH /opt/miniconda3/envs/isaaclab/bin/python \
+  scripts/verify_pretrained_hdmi_isolation.py --task move_suitcase
+/opt/miniconda3/envs/isaaclab/bin/python -m pytest -q
+/opt/miniconda3/envs/isaaclab/bin/python -m compileall -q somaforce_cross scripts tests
+
+env PYTHONUNBUFFERED=1 /opt/miniconda3/envs/isaaclab/bin/python \
+  scripts/play_pretrained_hdmi_scaffold.py --task move_suitcase --case nominal \
+  --headless --num-envs 1 --steps 472 --require-progress 0.5 \
+  --require-contact-fraction 0.9 \
+  --metrics-json artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics.json
+env PYTHONUNBUFFERED=1 /opt/miniconda3/envs/isaaclab/bin/python \
+  scripts/play_pretrained_hdmi_scaffold.py --task move_suitcase --case light \
+  --headless --num-envs 1 --steps 472 \
+  --metrics-json artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics.json
+env PYTHONUNBUFFERED=1 /opt/miniconda3/envs/isaaclab/bin/python \
+  scripts/play_pretrained_hdmi_scaffold.py --task move_suitcase --case heavy \
+  --headless --num-envs 1 --steps 472 \
+  --metrics-json artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics.json
+env PYTHONUNBUFFERED=1 /opt/miniconda3/envs/isaaclab/bin/python \
+  scripts/play_pretrained_hdmi_scaffold.py --task move_suitcase --case stress \
+  --headless --num-envs 1 --steps 472 \
+  --metrics-json artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics.json
+```
+
+Fixed-batch HDMI-source parity was `0.0`; isolated artifact errors were
+`4.77e-7`, `4.77e-7`, and `7.15e-7` for door, push-box, and move-suitcase.
+All isolated outputs were `[1,23]`, frozen/eval, with no
+`active_adaptation` module. Pytest reported `15 passed`; compileall passed.
+
+All progress below comes from the physical suitcase pose. Reference path
+progress is the reference-trajectory arc length nearest to the actual object,
+not reference displacement presented as actual motion.
+
+| Case | kg | Steps | Lift m | XY m | Ref path | Carry pos/orient mean | Set-down error/result | Both hands | Wrist max L/R N | Root min | Outcome |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| nominal | 1.5 | 472 | 0.6484 | 1.8320 | 98.65% | 0.2008 m / 0.1860 rad | 0.2063 m / yes | 99.41% | 72.43 / 72.88 | 0.2813 | complete, stable |
+| light | 0.5 | 472 | 0.7150 | 1.8338 | 98.65% | 0.1474 m / 0.2065 rad | 0.1876 m / yes | 99.41% | 77.97 / 77.72 | 0.2812 | complete, stable |
+| heavy | 3.0 | 472 | 0.5303 | 1.7118 | 98.65% | 0.2862 m / 0.1940 rad | 0.3121 m / no | 100.00% | 66.96 / 69.50 | 0.2814 | set-down position mismatch |
+| stress | 5.5 | 279 | 0.1351 | 1.1102 | 64.51% | 0.6172 m / 0.9957 rad | 0.8524 m / no | 47.71% | 121.62 / 81.80 | 0.1901 | terminated: root below 0.25 m |
+
+Every case had `nonfinite_count=0` and exact zero-hook equality. Nominal action
+max/mean absolute values were `5.4681/0.8435`; light `5.4583/0.8314`; heavy
+`5.4474/0.8537`; stress `5.4496/0.8723`. The source evaluation evidence remains
+the comparison benchmark: episode length 472, success 1.0, `eef_contact_all`
+0.9968, object-position tracking 0.8459, and object-orientation tracking
+0.8706. These source reward values are not relabeled as standalone pose-error
+metrics.
+
+The suitcase USD is preserved byte-for-byte, has no sublayers, and provides
+local geometry/collision. Its visual shader references NVIDIA's remote
+`Cardboard.mdl`; four headless physics runs succeeded without requiring that
+material. The manifest and `THIRD_PARTY.md` record HDMI and OMOMO provenance,
+citation requirements, checksums, and the remote material. HDMI/OMOMO code,
+weights, motion, and asset redistribution permissions remain unconfirmed, so
+the artifact is local/private-only.

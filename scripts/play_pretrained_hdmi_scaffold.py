@@ -22,7 +22,9 @@ parser = argparse.ArgumentParser(
     )
 )
 parser.add_argument(
-    "--task", choices=("push_door_hand", "push_box"), default="push_door_hand"
+    "--task",
+    choices=("push_door_hand", "push_box", "move_suitcase"),
+    default="push_door_hand",
 )
 parser.add_argument("--artifact", type=Path)
 parser.add_argument("--num-envs", type=int, default=1)
@@ -34,19 +36,38 @@ parser.add_argument("--door-friction", type=float, default=0.3)
 parser.add_argument("--door-damping", type=float, default=0.55)
 parser.add_argument(
     "--case",
-    choices=("nominal", "high_mass", "high_friction", "custom"),
+    choices=(
+        "nominal",
+        "light",
+        "heavy",
+        "stress",
+        "high_mass",
+        "high_friction",
+        "custom",
+    ),
     default="nominal",
 )
-parser.add_argument("--box-mass", type=float)
-parser.add_argument("--box-friction", type=float)
-parser.add_argument("--box-com-offset", type=float, nargs=3, default=(0.0, 0.0, 0.0))
+parser.add_argument("--object-mass", "--box-mass", dest="object_mass", type=float)
+parser.add_argument(
+    "--object-friction", "--box-friction", dest="object_friction", type=float
+)
+parser.add_argument(
+    "--object-com-offset",
+    "--box-com-offset",
+    dest="object_com_offset",
+    type=float,
+    nargs=3,
+    default=(0.0, 0.0, 0.0),
+)
 parser.add_argument("--initial-object-xy", type=float, nargs=2, default=(0.0, 0.0))
 parser.add_argument("--initial-object-yaw", type=float, default=0.0)
 parser.add_argument("--contact-target-offset", type=float, nargs=3, default=(0.0, 0.0, 0.0))
 parser.add_argument(
+    "--show-reference-object",
     "--show-reference-box",
+    dest="show_reference_object",
     action="store_true",
-    help="Render the translucent reference box marker in GUI mode.",
+    help="Render the translucent reference object marker in GUI mode.",
 )
 parser.add_argument(
     "--realtime",
@@ -70,13 +91,13 @@ parser.add_argument(
     "--require-progress",
     type=float,
     default=0.05,
-    help="Required task-consistent progress in radians for door or meters for box.",
+    help="Required task-consistent progress in radians for door or meters for a rigid object.",
 )
 parser.add_argument(
     "--require-contact-fraction",
     type=float,
     default=0.0,
-    help="Required fraction of reference-contact steps with both push-box wrists above 1 N.",
+    help="Required fraction of reference-contact steps with both rigid-object wrists above 1 N.",
 )
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -108,6 +129,8 @@ def main() -> int:
     sim = SimulationContext(sim_cfg)
     if args.task == "push_box":
         sim.set_camera_view(eye=(3.0, 6.0, 2.0), target=(0.0, 3.0, 0.6))
+    elif args.task == "move_suitcase":
+        sim.set_camera_view(eye=(2.0, -3.0, 2.0), target=(0.0, -1.0, 0.5))
     else:
         sim.set_camera_view(eye=(3.0, 2.0, 1.0), target=(0.5, -2.5, 0.8))
     artifact = (
@@ -115,18 +138,36 @@ def main() -> int:
         if args.artifact is not None
         else REPO_ROOT / f"artifacts/scaffolds/hdmi_{args.task}/v1"
     )
-    case_defaults = {
-        "nominal": (8.0, 0.5),
-        "high_mass": (10.0, 0.5),
-        "high_friction": (8.0, 1.2),
-        "custom": (8.0, 0.5),
-    }
+    if args.task == "move_suitcase":
+        case_defaults = {
+            "nominal": (1.5, 0.55),
+            "light": (0.5, 0.55),
+            "heavy": (3.0, 0.55),
+            "stress": (5.5, 0.55),
+            "custom": (1.5, 0.55),
+        }
+    else:
+        case_defaults = {
+            "nominal": (8.0, 0.5),
+            "high_mass": (10.0, 0.5),
+            "high_friction": (8.0, 1.2),
+            "custom": (8.0, 0.5),
+        }
+    if args.case not in case_defaults:
+        raise ValueError(f"case {args.case!r} is not valid for task {args.task!r}")
     default_mass, default_friction = case_defaults[args.case]
-    box_mass = args.box_mass if args.box_mass is not None else default_mass
-    box_friction = (
-        args.box_friction if args.box_friction is not None else default_friction
+    object_mass = args.object_mass if args.object_mass is not None else default_mass
+    object_friction = (
+        args.object_friction
+        if args.object_friction is not None
+        else default_friction
     )
-    steps = args.steps if args.steps is not None else (792 if args.task == "push_box" else 540)
+    default_steps = {
+        "push_door_hand": 540,
+        "push_box": 792,
+        "move_suitcase": 472,
+    }
+    steps = args.steps if args.steps is not None else default_steps[args.task]
     runtime = PretrainedHDMIIsaacRuntime(
         sim,
         artifact,
@@ -135,14 +176,14 @@ def main() -> int:
         alpha=args.alpha,
         door_friction=args.door_friction,
         door_damping=args.door_damping,
-        box_mass=box_mass,
-        box_friction=box_friction,
-        box_com_offset=tuple(args.box_com_offset),
+        object_mass=object_mass,
+        object_friction=object_friction,
+        object_com_offset=tuple(args.object_com_offset),
         initial_object_xy=tuple(args.initial_object_xy),
         initial_object_yaw=args.initial_object_yaw,
         contact_target_offset=tuple(args.contact_target_offset),
         case_name=args.case,
-        show_reference_box=args.show_reference_box,
+        show_reference_object=args.show_reference_object,
     )
     print(
         "role=privileged_simulation_baseline deployable=false "
@@ -161,8 +202,42 @@ def main() -> int:
     print("ROLL_OUT_METRICS=" + json.dumps(payload, sort_keys=True))
     if args.metrics_json is not None:
         args.metrics_json.parent.mkdir(parents=True, exist_ok=True)
-        args.metrics_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    if args.task == "push_box":
+        if args.task == "move_suitcase":
+            aggregate = {
+                "task": "move_suitcase",
+                "role": "privileged_simulation_baseline_not_deployable",
+                "cases": {},
+            }
+            if args.metrics_json.is_file():
+                existing = json.loads(args.metrics_json.read_text(encoding="utf-8"))
+                if existing.get("task") == "move_suitcase" and isinstance(
+                    existing.get("cases"), dict
+                ):
+                    aggregate = existing
+            aggregate["cases"][args.case] = payload
+            args.metrics_json.write_text(
+                json.dumps(aggregate, indent=2) + "\n", encoding="utf-8"
+            )
+        else:
+            args.metrics_json.write_text(
+                json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+            )
+    if args.task == "move_suitcase":
+        numerically_valid = metrics.nonfinite_count == 0 and metrics.zero_hook_exact
+        if args.case == "nominal":
+            passed = (
+                numerically_valid
+                and metrics.steps == steps
+                and metrics.stable
+                and metrics.lift_off_completed
+                and metrics.horizontal_displacement >= args.require_progress
+                and metrics.set_down_completed
+                and metrics.both_hand_contact_fraction
+                >= args.require_contact_fraction
+            )
+        else:
+            passed = numerically_valid
+    elif args.task == "push_box":
         passed = (
             metrics.nonfinite_count == 0
             and metrics.stable

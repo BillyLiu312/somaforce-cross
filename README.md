@@ -65,6 +65,9 @@ The current code provides:
 - a second independently selectable push-box artifact under
   `artifacts/scaffolds/hdmi_push_box/v1`, using the no-hand/eef-L G1 asset and
   a rigid box;
+- an independently selectable move-suitcase artifact under
+  `artifacts/scaffolds/hdmi_move_suitcase/v1`, using the shared rubber-hand G1
+  asset, a rigid suitcase, and a 472-frame OMOMO-derived HDMI reference;
 - manifest-driven observation and network dimensions for both tasks, including
   the push-box `command[356]`, `policy[249]`, `object[10]`,
   `privileged[1714]`, encoder input `1724`, and action `[23]` contract;
@@ -103,6 +106,11 @@ artifacts/scaffolds/hdmi_push_box/v1/
   manifest.json
   observation_contract.json
   action_contract.json
+artifacts/scaffolds/hdmi_move_suitcase/v1/
+  manifest.json
+  observation_contract.json
+  action_contract.json
+  rollout_metrics.json
 somaforce_cross/scaffold/
   pretrained_hdmi.py
   pretrained_hdmi_isaac.py
@@ -162,17 +170,17 @@ python -m compileall -q scripts somaforce_cross
 
 # materialize the local/private artifact (requires the trusted HDMI checkout)
 python scripts/export_pretrained_hdmi_scaffold.py \
-  --hdmi-root /inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/HDMI \
-  --task push_box --force
+  --hdmi-root /inspire/hdd/global_user/liumengfan-253108110079/yindianyu_workspace/somaforce/HDMI \
+  --task move_suitcase --force
 
 # runtime checks without HDMI on PYTHONPATH
-env -u PYTHONPATH python scripts/verify_pretrained_hdmi_isolation.py --task push_box
+env -u PYTHONPATH python scripts/verify_pretrained_hdmi_isolation.py --task move_suitcase
 
 # standalone privileged simulation baseline, one G1 + articulated door
 python scripts/play_pretrained_hdmi_scaffold.py \
-  --task push_box --case nominal --headless --num-envs 1 --steps 792 \
-  --require-progress 1.0 \
-  --metrics-json artifacts/scaffolds/hdmi_push_box/v1/rollout_metrics.json
+  --task move_suitcase --case nominal --headless --num-envs 1 --steps 472 \
+  --require-progress 0.5 --require-contact-fraction 0.9 \
+  --metrics-json artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics.json
 ```
 
 The play command reports `a_nom`, the 23-D action order, reference phase, door
@@ -194,6 +202,12 @@ progress. The play entry exposes `--box-mass`, `--box-friction`,
 `--box-com-offset`, `--initial-object-xy`, `--initial-object-yaw`, and
 `--contact-target-offset`. Named `high_mass` and `high_friction` cases support
 repeatable scaffold-only mismatch smoke tests.
+
+Move-suitcase defaults to the full 472-step, 50 Hz deterministic teacher-mean
+rollout. Cases `nominal`, `light`, `heavy`, and `stress` use 1.5, 0.5, 3.0,
+and 5.5 kg without changing the frozen policy. Each run merges the same lift,
+carry, set-down, contact, support, action, finite-state, and zero-hook fields
+into `artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics.json`.
 
 For GUI playback, render occurs once per 50 Hz control step rather than once per
 physics substep. `--realtime --playback-rate 1.0` follows reference wall time;

@@ -28,7 +28,9 @@ class BlockHDMIImports(importlib.abc.MetaPathFinder):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--task", choices=("push_door_hand", "push_box"), default="push_door_hand"
+        "--task",
+        choices=("push_door_hand", "push_box", "move_suitcase"),
+        default="push_door_hand",
     )
     parser.add_argument("--artifact", type=Path)
     return parser.parse_args()

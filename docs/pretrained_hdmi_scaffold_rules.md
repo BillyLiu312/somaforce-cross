@@ -19,8 +19,8 @@ frozen policy trained with the official HDMI implementation
   -> final action in the same normalized action coordinates
 ```
 
-The implemented scope includes independently selectable G1 `push_door-hand`
-and G1 `push_box` frozen artifacts. The canonical reference library remains
+The implemented scope includes independently selectable G1 `push_door-hand`,
+G1 `push_box`, and G1 `move_suitcase` frozen artifacts. The canonical reference library remains
 useful for replay, diagnostics, future tasks, and OMOMO payload work, but
 canonical reference conversion is not the trained policy scaffold.
 
@@ -132,6 +132,31 @@ is 10-D because it contains two contact targets. The privileged encoder input
 is `1714 + 10 = 1724`; the actor remains `861 -> 23`. These dimensions must
 come from the artifact contract rather than task-name conditionals in network
 code.
+
+The move-suitcase source was audited at the same HDMI revision from the dirty
+checkout at
+`/inspire/hdd/global_user/liumengfan-253108110079/yindianyu_workspace/somaforce/HDMI`.
+Its W&B run saved `ppo_roa.py`, resolved `cfg.yaml`, and checkpoint tensor
+shapes are the policy-structure oracle; the later dirty-tree force-residual
+implementation is excluded. Key checksums are:
+
+```text
+checkpoint: be31c2a9893898d26bd989c876d11e359bda5e0d36349b4ce9ca85c758237e14
+config:     7ead1ad6c79b8ddadf219917dac574f58d59e30e1931d714034ea426b050b1c5
+asset_meta: 400425d1137027eb82de4ba1c92bcab7cdfae69defd09a97895d3f2e3b457258
+G1 USD:     faf4d267a7a93fd16186e77e4c2802aa8ea977b5bb971b72fa63dee99c33200d
+suitcase:   d3c25a338fffa58ddfef084fe2cff06023dead787ab8a3c2aaa1e3a08925cf6b
+motion:     d6d08c5792fc7396c89629876d91cfec26404fd803ccb9ffc2439c66ce51f3cf
+motion meta:c20c8a5c5094500d8588a9152f77baa65fc397a476c15717d1db78cb1c7093a0
+```
+
+Its contract is `command[356]`, `policy[249]`, `object[10]`,
+`privileged[1714]`, encoder input `1724`, actor input `861`, and normalized
+action `[23]`. The reference has 29 joints, 472 frames, and 50 Hz. The task
+category is `HEAVY_PAYLOAD`; nominal mass is 1.5 kg within the 1.2-1.8 kg
+training range. Both the 29-D reference and Isaac articulation are mapped by
+joint name. Six wrist joints are not policy actions; the initial left/right
+wrist-yaw defaults are -0.4/+0.4 radians.
 
 ## Current Checkpoint Facts
 
@@ -283,6 +308,16 @@ artifacts/scaffolds/hdmi_push_door_hand/v1/
 The push-box artifact uses the parallel path
 `artifacts/scaffolds/hdmi_push_box/v1` with `assets/box.usd`. Both remain
 local/private under the same permission gate.
+
+The move-suitcase artifact uses
+`artifacts/scaffolds/hdmi_move_suitcase/v1` with `assets/suitcase.usd` and the
+same rubber-hand G1 USD content hash as the door artifact. The suitcase USD
+has no sublayers and retains local geometry/collision, but its visual material
+references NVIDIA's remote `Cardboard.mdl`. Headless physics must work when
+that material is unavailable. The original USD is preserved; no local material
+conversion is claimed. Cite HDMI and OMOMO, and keep the artifact local/private
+until code, motion, weights, robot/object asset, and OMOMO redistribution rights
+are confirmed.
 
 Large artifacts may remain outside Git and be materialized by an authorized
 download/install step. The manifest and schemas should remain versioned in Git.

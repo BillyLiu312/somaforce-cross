@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -59,6 +60,52 @@ SOURCE_SPECS = {
             "motion": "8921f589f8470d25ab1dd0fa65f9b9057676ab122fdcc8d87f43d9c527ed461e",
             "motion_meta": "dffeeed04f3001710bb8ab83061e8e1d1be256d9e2e35a4efa0c6011ae1d4105",
             "reference_video": "65d39e36ce7dded75e9f3c1513aa4a6641589e763fea28c25289a799e2fd7a71",
+        },
+    },
+    "move_suitcase": {
+        "checkpoint": "wandb-local-2gpu/wandb/offline-run-20260716_010416-3qgtez6y/files/checkpoint_final.pt",
+        "resolved_config": "wandb-local-2gpu/wandb/offline-run-20260716_010416-3qgtez6y/files/cfg.yaml",
+        "run_saved_policy": "wandb-local-2gpu/wandb/offline-run-20260716_010416-3qgtez6y/files/ppo_roa.py",
+        "asset_meta": "asset_meta.json",
+        "motion_dir": "data/motion/g1/omomo/sub1_suitcase_011",
+        "g1_asset": "active_adaptation/assets/g1/g1_29dof_rubberhand-feet_sphere-eef_box-body_capsule.usd",
+        "object_asset": "active_adaptation/assets/objects/suitcase/suitcase.usd",
+        "task_config": "cfg/task/G1/hdmi/move_suitcase.yaml",
+        "evaluation_evidence": "scripts/eval/G1TrackSuitcase/G1TrackSuitcase-07-16_15-51.yaml",
+        "material_dependencies": [
+            {
+                "asset": "https://omniverse-content-production.s3.us-west-2.amazonaws.com/Materials/Base/Wall_Board/Cardboard.mdl",
+                "purpose": "visual_material_only",
+                "required_for_headless_physics": False,
+            }
+        ],
+        "reference_origin": {
+            "project": "OMOMO",
+            "integration_source": "HDMI data/motion/g1/omomo/sub1_suitcase_011",
+            "citation_required": True,
+            "redistribution_permission": "not_confirmed",
+        },
+        "object_asset_validation": {
+            "original_usd_preserved": True,
+            "sublayers": [],
+            "local_geometry": True,
+            "local_collision": True,
+            "authored_mass_kg": 2.0,
+            "runtime_mass_override_preserves_geometry_and_inertia_scaling": True,
+            "material_replaced": False,
+            "headless_physics_requires_remote_material": False,
+        },
+        "checksums": {
+            "checkpoint": "be31c2a9893898d26bd989c876d11e359bda5e0d36349b4ce9ca85c758237e14",
+            "resolved_config": "7ead1ad6c79b8ddadf219917dac574f58d59e30e1931d714034ea426b050b1c5",
+            "run_saved_policy": "de7b1546227b64e6ba7f1269753f6a445113838712e252f00006501604f2fd18",
+            "asset_meta": "400425d1137027eb82de4ba1c92bcab7cdfae69defd09a97895d3f2e3b457258",
+            "g1_asset": "faf4d267a7a93fd16186e77e4c2802aa8ea977b5bb971b72fa63dee99c33200d",
+            "object_asset": "d3c25a338fffa58ddfef084fe2cff06023dead787ab8a3c2aaa1e3a08925cf6b",
+            "motion": "d6d08c5792fc7396c89629876d91cfec26404fd803ccb9ffc2439c66ce51f3cf",
+            "motion_meta": "c20c8a5c5094500d8588a9152f77baa65fc397a476c15717d1db78cb1c7093a0",
+            "task_config": "28e7e5f02dcaeeafe7732fe9235a1f6bfe5e752343e96d011cc0adc6d93647a5",
+            "evaluation_evidence": "48e88c04cda00b8dbd3249c707289af57e8443d8c9b3f2d1363d40c06d549413",
         },
     },
 }
@@ -211,12 +258,31 @@ def hdmi_source_oracle_action(
     checkpoint: dict[str, object],
     observation: HDMIObservationBatch,
     task_spec: HDMITaskSpec,
+    run_saved_policy_path: Path | None = None,
 ) -> torch.Tensor:
     """Run the fixed batch through HDMI's own make_mlp and Actor classes."""
 
     sys.path.insert(0, str(hdmi_root))
+    saved_module_name: str | None = None
     try:
-        from active_adaptation.learning.ppo.common import Actor, make_mlp
+        if run_saved_policy_path is None:
+            from active_adaptation.learning.ppo.common import Actor, make_mlp
+        else:
+            saved_module_name = (
+                "active_adaptation.learning.ppo._somaforce_saved_ppo_roa_oracle"
+            )
+            module_spec = importlib.util.spec_from_file_location(
+                saved_module_name, run_saved_policy_path
+            )
+            if module_spec is None or module_spec.loader is None:
+                raise ImportError(
+                    f"cannot load run-saved policy source: {run_saved_policy_path}"
+                )
+            saved_module = importlib.util.module_from_spec(module_spec)
+            sys.modules[saved_module_name] = saved_module
+            module_spec.loader.exec_module(saved_module)
+            Actor = saved_module.Actor
+            make_mlp = saved_module.make_mlp
 
         source_policy = checkpoint["policy"]
         latent = task_spec.network.privileged_hidden_dim
@@ -269,7 +335,53 @@ def hdmi_source_oracle_action(
         loc, _ = actor_head(actor_feature)
         return observation.reference_action + loc
     finally:
+        if saved_module_name is not None:
+            sys.modules.pop(saved_module_name, None)
         sys.path.remove(str(hdmi_root))
+
+
+def audit_checkpoint_for_force_residual(
+    checkpoint: dict[str, object], run_saved_policy_path: Path | None
+) -> dict[str, object]:
+    tensor_paths: list[str] = []
+    forbidden: list[str] = []
+    policy = checkpoint.get("policy")
+    if not isinstance(policy, dict):
+        raise ValueError("checkpoint policy payload must be a mapping")
+    for group_name, group in policy.items():
+        if not isinstance(group, dict):
+            continue
+        for tensor_name, value in group.items():
+            if not torch.is_tensor(value):
+                continue
+            path = f"{group_name}.{tensor_name}"
+            tensor_paths.append(path)
+            lowered = path.lower()
+            if "force_residual" in lowered or "forceresidual" in lowered:
+                forbidden.append(path)
+    if forbidden:
+        raise ValueError(
+            "checkpoint contains prohibited force-residual parameters: "
+            + ", ".join(forbidden)
+        )
+    if run_saved_policy_path is not None:
+        saved_source = run_saved_policy_path.read_text(encoding="utf-8")
+        source_hits = [
+            token
+            for token in ("force_residual", "ForceResidual")
+            if token in saved_source
+        ]
+        if source_hits:
+            raise ValueError(
+                "run-saved policy source unexpectedly contains force-residual code: "
+                + ", ".join(source_hits)
+            )
+    return {
+        "checked_tensor_parameter_count": len(tensor_paths),
+        "forbidden_parameter_paths": forbidden,
+        "run_saved_policy_source_checked": run_saved_policy_path is not None,
+        "passed": True,
+    }
 
 
 def write_json(path: Path, data: object) -> None:
@@ -291,8 +403,16 @@ def main() -> None:
         else REPO_ROOT / f"artifacts/scaffolds/{task_spec.artifact_name}/v1"
     ).expanduser().resolve()
     checkpoint_path = hdmi_root / str(source_spec["checkpoint"])
-    config_path = checkpoint_path.parent / ".hydra/config.yaml"
-    asset_meta_path = checkpoint_path.parent / "asset_meta.json"
+    config_path = (
+        hdmi_root / str(source_spec["resolved_config"])
+        if "resolved_config" in source_spec
+        else checkpoint_path.parent / ".hydra/config.yaml"
+    )
+    asset_meta_path = (
+        hdmi_root / str(source_spec["asset_meta"])
+        if "asset_meta" in source_spec
+        else checkpoint_path.parent / "asset_meta.json"
+    )
     motion_dir = hdmi_root / str(source_spec["motion_dir"])
     sources = {
         "checkpoint": checkpoint_path,
@@ -303,6 +423,13 @@ def main() -> None:
         "g1_asset": hdmi_root / str(source_spec["g1_asset"]),
         "object_asset": hdmi_root / str(source_spec["object_asset"]),
     }
+    for optional_name in (
+        "run_saved_policy",
+        "task_config",
+        "evaluation_evidence",
+    ):
+        if optional_name in source_spec:
+            sources[optional_name] = hdmi_root / str(source_spec[optional_name])
     if "reference_video" in source_spec:
         sources["reference_video"] = hdmi_root / str(source_spec["reference_video"])
     missing = [str(path) for path in sources.values() if not path.is_file()]
@@ -333,6 +460,9 @@ def main() -> None:
     # The source is a trusted local training artifact. This is the only pickle
     # load in the migration path; runtime uses weights_only=True below.
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    force_residual_audit = audit_checkpoint_for_force_residual(
+        checkpoint, sources.get("run_saved_policy")
+    )
     model = build_portable_policy(checkpoint, task_spec)
     policy_path = output / "policy_state.pt"
     torch.save({"format_version": 1, "state_dict": model.state_dict()}, policy_path)
@@ -375,7 +505,11 @@ def main() -> None:
     )
     with torch.inference_mode():
         oracle = hdmi_source_oracle_action(
-            hdmi_root, checkpoint, observation, task_spec
+            hdmi_root,
+            checkpoint,
+            observation,
+            task_spec,
+            sources.get("run_saved_policy"),
         )
         portable = model(observation)
     error = float((oracle - portable).abs().max())
@@ -492,6 +626,16 @@ is not authorized by this repository. Keep these files local/private until
 permissions are documented. Runtime independence does not imply independent
 authorship.
 """
+    if task_spec.task == "move_suitcase":
+        third_party += """
+
+The suitcase reference originates from the OMOMO-derived motion shipped in the
+HDMI checkout. Cite both HDMI and OMOMO. The suitcase USD contains a visual-only
+reference to NVIDIA's remote `Cardboard.mdl`; the original USD is preserved,
+and headless collision/mass/inertia validation does not require that material
+to resolve. Neither HDMI nor OMOMO redistribution rights were established in
+this export, so this complete artifact remains local/private-only.
+"""
     (output / "THIRD_PARTY.md").write_text(third_party, encoding="utf-8")
 
     materialized = {
@@ -507,6 +651,15 @@ authorship.
         "third_party": output / "THIRD_PARTY.md",
     }
     dirty = bool(git_output(hdmi_root, "status", "--porcelain"))
+    dirty_status = git_output(hdmi_root, "status", "--porcelain")
+    source_files = {
+        name: {
+            "path": str(path.relative_to(hdmi_root)),
+            "sha256": sha256_file(path),
+            "bytes": path.stat().st_size,
+        }
+        for name, path in sources.items()
+    }
     manifest = {
         "artifact_version": "1.0.0-local",
         "task": task_spec.task,
@@ -514,6 +667,7 @@ authorship.
         "observation_dims": dict(task_spec.observation_dims),
         "network_contract": task_spec.network.to_dict(),
         "task_contract": {
+            "research_category": task_spec.research_category.value,
             "action_joint_names": task_spec.action_joint_names,
             "action_scale": task_spec.action_scale,
             "object_kind": task_spec.object_kind,
@@ -523,6 +677,10 @@ authorship.
             "contact_eef_names": task_spec.contact_eef_names,
             "contact_eef_offsets": task_spec.contact_eef_offsets,
             "reference_joint_names": reference_joint_names,
+            "robot_initial_joint_overrides": dict(
+                task_spec.robot_initial_joint_overrides
+            ),
+            "nominal_object_mass": task_spec.nominal_object_mass,
         },
         "role": "frozen_hdmi_phase_train_privileged_teacher_simulation_baseline",
         "deployable": False,
@@ -532,6 +690,10 @@ authorship.
             "project": "HDMI",
             "revision": revision,
             "worktree_dirty": dirty,
+            "worktree_status_sha256": hashlib.sha256(
+                dirty_status.encode("utf-8")
+            ).hexdigest(),
+            "source_files": source_files,
             "checkpoint_sha256": sha256_file(checkpoint_path),
             "resolved_config_sha256": sha256_file(config_path),
             "asset_meta_sha256": sha256_file(asset_meta_path),
@@ -545,7 +707,18 @@ authorship.
                 else {}
             ),
         },
-        "oracle_parity": {"backend": "HDMI active_adaptation make_mlp + Actor deterministic mean", "batch_size": 4, "seed": 20260721, "max_abs_action_error": error, "tolerance": 1e-5},
+        "checkpoint_audit": {
+            **force_residual_audit,
+            "policy_structure_authority": (
+                "run-saved ppo_roa.py + cfg.yaml + checkpoint tensor shapes"
+                if "run_saved_policy" in sources
+                else "checkpoint tensor shapes"
+            ),
+        },
+        "oracle_parity": {"backend": "HDMI run-saved ppo_roa make_mlp + Actor deterministic mean" if "run_saved_policy" in sources else "HDMI active_adaptation make_mlp + Actor deterministic mean", "batch_size": 4, "seed": 20260721, "max_abs_action_error": error, "tolerance": 1e-5},
+        "material_dependencies": source_spec.get("material_dependencies", []),
+        "reference_origin": source_spec.get("reference_origin"),
+        "object_asset_validation": source_spec.get("object_asset_validation"),
         "files": {
             name: {"path": str(path.relative_to(output)), "sha256": sha256_file(path), "bytes": path.stat().st_size}
             for name, path in materialized.items()
