@@ -19,9 +19,10 @@ frozen policy trained with the official HDMI implementation
   -> final action in the same normalized action coordinates
 ```
 
-The immediate scope is the G1 `push_door-hand` task. The canonical reference
-library remains useful for replay, diagnostics, future tasks, and OMOMO payload
-work, but canonical reference conversion is not the trained policy scaffold.
+The implemented scope includes independently selectable G1 `push_door-hand`
+and G1 `push_box` frozen artifacts. The canonical reference library remains
+useful for replay, diagnostics, future tasks, and OMOMO payload work, but
+canonical reference conversion is not the trained policy scaffold.
 
 ## Research Attribution
 
@@ -103,6 +104,34 @@ checkpoint SHA256:
 resolved config SHA256:
   fb6ddd53135550b244fd35b707cf2b98e069ddf38dfe456af5b930e4189a074c
 ```
+
+The push-box source artifact was audited at the same HDMI revision from:
+
+```text
+checkpoint:
+  outputs/push_box/hdmi-push-box-4gpu-20260721_200242/rank_0/checkpoint_final.pt
+resolved config:
+  outputs/push_box/hdmi-push-box-4gpu-20260721_200242/rank_0/.hydra/config.yaml
+motion:
+  data/motion/g1/push_box/push_box-VID_20250423_220958-light-high-adjust_root_height
+checkpoint SHA256:
+  83ddea2ed34919be575d678fcac43c3b3d65643a22d3e45ea995f80e9c0a6d41
+config SHA256:
+  5902fe6b0e44a597c9e98504cfbb83110b6baf036d0b827cff122bfdc2a937c3
+asset metadata SHA256:
+  314eae4a38925411cc37cdb56a7fb8a57174d51ae130118f23f0e4aa2b92537d
+motion SHA256:
+  8921f589f8470d25ab1dd0fa65f9b9057676ab122fdcc8d87f43d9c527ed461e
+motion metadata SHA256:
+  dffeeed04f3001710bb8ab83061e8e1d1be256d9e2e35a4efa0c6011ae1d4105
+```
+
+Push-box uses a 25-name motion reference mapped by joint name into the
+29-joint Isaac articulation and the shared 23-D action order. Its object group
+is 10-D because it contains two contact targets. The privileged encoder input
+is `1714 + 10 = 1724`; the actor remains `861 -> 23`. These dimensions must
+come from the artifact contract rather than task-name conditionals in network
+code.
 
 ## Current Checkpoint Facts
 
@@ -250,6 +279,10 @@ artifacts/scaffolds/hdmi_push_door_hand/v1/
   SHA256SUMS
   THIRD_PARTY.md
 ```
+
+The push-box artifact uses the parallel path
+`artifacts/scaffolds/hdmi_push_box/v1` with `assets/box.usd`. Both remain
+local/private under the same permission gate.
 
 Large artifacts may remain outside Git and be materialized by an authorized
 download/install step. The manifest and schemas should remain versioned in Git.

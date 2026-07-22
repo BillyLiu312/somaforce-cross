@@ -2,10 +2,11 @@
 
 Date: 2026-07-21
 
-This round implements and validates a standalone frozen HDMI `phase=train`
-privileged-teacher simulation baseline for `push_door-hand`. It is explicitly
-not a deployable policy. The runtime imports neither HDMI nor
-`active_adaptation`, and it does not resolve paths in the HDMI checkout.
+This round validates the existing `push_door-hand` artifact and adds a second
+standalone frozen HDMI `phase=train` privileged-teacher simulation baseline for
+`push_box`. Neither artifact is a deployable policy. Runtime imports neither
+HDMI nor `active_adaptation`, and it does not resolve paths in the HDMI
+checkout.
 
 ## Commands
 
@@ -13,15 +14,23 @@ not a deployable policy. The runtime imports neither HDMI nor
 cd /inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/somaforce-cross
 /opt/miniconda3/envs/isaaclab/bin/python scripts/export_pretrained_hdmi_scaffold.py \
   --hdmi-root /inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/HDMI \
-  --force
+  --task push_box --force
 env -u PYTHONPATH /opt/miniconda3/envs/isaaclab/bin/python \
-  scripts/verify_pretrained_hdmi_isolation.py
+  scripts/verify_pretrained_hdmi_isolation.py --task push_box
 /opt/miniconda3/envs/isaaclab/bin/python -m pytest -q
 /opt/miniconda3/envs/isaaclab/bin/python -m compileall -q somaforce_cross scripts tests
 env PYTHONUNBUFFERED=1 /opt/miniconda3/envs/isaaclab/bin/python \
-  scripts/play_pretrained_hdmi_scaffold.py --headless --num-envs 1 --steps 540 \
-  --log-interval 50 --require-progress 0.05 \
-  --metrics-json artifacts/scaffolds/hdmi_push_door_hand/v1/rollout_metrics.json
+  scripts/play_pretrained_hdmi_scaffold.py --task push_box --case nominal \
+  --headless --num-envs 1 --steps 792 --require-progress 1.0 \
+  --metrics-json artifacts/scaffolds/hdmi_push_box/v1/rollout_metrics.json
+env PYTHONUNBUFFERED=1 /opt/miniconda3/envs/isaaclab/bin/python \
+  scripts/play_pretrained_hdmi_scaffold.py --task push_box --case high_mass \
+  --headless --num-envs 1 --steps 792 --require-progress 0 \
+  --metrics-json artifacts/scaffolds/hdmi_push_box/v1/rollout_metrics_high_mass.json
+env PYTHONUNBUFFERED=1 /opt/miniconda3/envs/isaaclab/bin/python \
+  scripts/play_pretrained_hdmi_scaffold.py --task push_box --case high_friction \
+  --headless --num-envs 1 --steps 792 --require-progress 0 \
+  --metrics-json artifacts/scaffolds/hdmi_push_box/v1/rollout_metrics_high_friction.json
 ```
 
 ## Artifact And Contracts
@@ -33,6 +42,12 @@ state accepted by `torch.load(..., weights_only=True)`; no HDMI class or pickle
 module is needed at runtime. `observation_contract.json` records the exact
 `command[356]`, `policy[249]`, `object[7]`, `privileged[1714]`, and
 `reference_action[23]` fields, normalization and reset semantics.
+
+The push-box contract is `command[356]`, `policy[249]`, `object[10]`,
+`privileged[1714]`, and `reference_action[23]`. Its portable privileged encoder
+input is `1724`, actor input is `861`, and actor output is `23`. The motion has
+25 named joints; mapping into the 29-joint articulation and 23-D action is by
+name.
 
 The audited action order is:
 
@@ -65,12 +80,29 @@ mapping in `action_contract.json`.
 | Pytest | `10 passed` after removal of the legacy scaffold test suite |
 | Compileall | passed |
 | Isaac rollout | 540 control steps, no NaN, no frame/shape error, no fall termination |
-| Door progress | joint `0 -> -2.6163 rad`; task-consistent progress `2.6163 rad`, reference target `1.5 rad` |
-| Stability/contact | minimum root height `0.7090 m`; mean support contacts `1.65`; max wrist contact `18.28 N`; max all-body contact `1070.47 N` |
-| Action statistics | max abs `4.2702`, mean abs `0.6562` |
+| Door progress | joint `0 -> -2.6180 rad`; task-consistent progress `2.6180 rad`, reference target `1.5 rad` |
+| Stability/contact | minimum root height `0.7131 m`; mean support contacts `1.66`; max wrist contact `19.43 N`; max all-body contact `1314.81 N` |
+| Action statistics | max abs `4.1308`, mean abs `0.5977` |
+
+Push-box results (all 792 control steps, 50 Hz):
+
+| Case | Actual directional progress | Path / final error | Two-hand contact fraction | Wrist force max L/R | Min root height | Stable |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| nominal, 8 kg, friction 0.5 | `1.4674 m` | `1.5118 / 0.0619 m` | `1.0000` | `52.17 / 55.10 N` | `0.7183 m` | yes |
+| high mass, 10 kg | `1.4017 m` | `1.4406 / 0.0586 m` | `1.0000` | `49.90 / 54.52 N` | `0.7135 m` | yes |
+| high friction, 1.2 | `0.00735 m` | `0.1773 / 1.4376 m` | `0.9708` | `79.13 / 66.11 N` | `0.6868 m` | yes |
+
+All three runs had `nonfinite_count=0`, exact zero-hook equality, and valid
+support/contact/action metrics. The physical box moved in nominal and high-mass
+conditions; progress is not derived from the `1.4443 m` reference displacement.
+The high-friction case is a deliberate mismatch boundary: it maintains a
+stable robot and contact signal but the box remains effectively constrained.
 
 The saved rollout evidence is
 `artifacts/scaffolds/hdmi_push_door_hand/v1/rollout_metrics.json`.
+Push-box nominal and mismatch evidence is stored alongside its artifact as
+`rollout_metrics.json`, `rollout_metrics_high_mass.json`, and
+`rollout_metrics_high_friction.json`.
 
 ## Limits And Licensing
 
@@ -86,3 +118,9 @@ The audited HDMI checkout (revision
 `DATA_LICENSE`, or `NOTICE` at audit time. The local artifact is therefore
 private/local-only and must not be redistributed until permissions are
 documented. `THIRD_PARTY.md` and the manifest preserve this restriction.
+The push-box source reference video is provenance-only (SHA256
+`65d39e36ce7dded75e9f3c1513aa4a6641589e763fea28c25289a799e2fd7a71`)
+and is not copied into the runtime artifact. GUI playback was not captured in
+this headless environment because no X display was available. GUI mode hides
+the translucent green reference box by default; pass `--show-reference-box`
+to render it separately from the physical box for trajectory debugging.

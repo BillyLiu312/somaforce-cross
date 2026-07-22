@@ -44,4 +44,5 @@ class ScaffoldTask(str, Enum):
     """Tasks supported by the retained canonical reference boundary."""
 
     PUSH_PULL_DOOR = "push_pull_door"
+    PUSH_BOX = "push_box"
     HEAVY_PAYLOAD = "heavy_payload"

@@ -18,6 +18,7 @@ from torch import nn
 
 
 CONTRACT_VERSION = "hdmi_push_door_hand_teacher_v1"
+PUSH_BOX_CONTRACT_VERSION = "hdmi_push_box_teacher_v1"
 OBSERVATION_DIMS: dict[str, int] = {
     "command": 356,
     "policy": 249,
@@ -25,6 +26,27 @@ OBSERVATION_DIMS: dict[str, int] = {
     "privileged": 1714,
     "reference_action": 23,
 }
+PUSH_BOX_OBSERVATION_DIMS: dict[str, int] = {
+    "command": 356,
+    "policy": 249,
+    "object": 10,
+    "privileged": 1714,
+    "reference_action": 23,
+}
+
+# Source-equivalent G1 spawn state and terrain contact semantics. These values
+# also define the zero-action pose used by reference-action normalization.
+HDMI_DEFAULT_JOINT_POS: dict[str, float] = {
+    ".*_hip_pitch_joint": -0.312,
+    ".*_knee_joint": 0.669,
+    ".*_ankle_pitch_joint": -0.363,
+    ".*_elbow_joint": 0.6,
+    "left_shoulder_roll_joint": 0.2,
+    "left_shoulder_pitch_joint": 0.2,
+    "right_shoulder_roll_joint": -0.2,
+    "right_shoulder_pitch_joint": 0.2,
+}
+HDMI_PHYSICS_MATERIAL_COMBINE_MODE = "multiply"
 
 # Isaac articulation order used by the audited checkpoint.
 HDMI_ACTION_JOINT_NAMES: tuple[str, ...] = (
@@ -97,6 +119,182 @@ REFERENCE_TO_ACTION_INDICES: tuple[int, ...] = tuple(
 
 
 @dataclass(frozen=True)
+class HDMINetworkContract:
+    """Artifact-declared dimensions for the shared HDMI teacher network."""
+
+    privileged_encoder_input_dim: int
+    privileged_hidden_dim: int
+    actor_input_dim: int
+    actor_hidden_dims: tuple[int, int, int]
+    action_dim: int
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "HDMINetworkContract":
+        return cls(
+            privileged_encoder_input_dim=int(value["privileged_encoder_input_dim"]),
+            privileged_hidden_dim=int(value["privileged_hidden_dim"]),
+            actor_input_dim=int(value["actor_input_dim"]),
+            actor_hidden_dims=tuple(int(item) for item in value["actor_hidden_dims"]),
+            action_dim=int(value["action_dim"]),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "privileged_encoder_input_dim": self.privileged_encoder_input_dim,
+            "privileged_hidden_dim": self.privileged_hidden_dim,
+            "actor_input_dim": self.actor_input_dim,
+            "actor_hidden_dims": list(self.actor_hidden_dims),
+            "action_dim": self.action_dim,
+        }
+
+
+@dataclass(frozen=True)
+class HDMITaskSpec:
+    """Task identity and tensor contract used by export and runtime."""
+
+    task: str
+    artifact_name: str
+    contract_version: str
+    observation_dims: Mapping[str, int]
+    network: HDMINetworkContract
+    action_joint_names: tuple[str, ...]
+    action_scale: tuple[float, ...]
+    reference_joint_names: tuple[str, ...]
+    object_kind: str
+    object_asset_name: str
+    object_body_name: str
+    contact_target_offsets: tuple[tuple[float, float, float], ...]
+    contact_eef_names: tuple[str, ...]
+    contact_eef_offsets: tuple[tuple[float, float, float], ...]
+
+
+_COMMON_NETWORK = {
+    "privileged_hidden_dim": 256,
+    "actor_input_dim": 861,
+    "actor_hidden_dims": (512, 256, 256),
+    "action_dim": 23,
+}
+
+HDMI_TASK_SPECS: dict[str, HDMITaskSpec] = {
+    "push_door_hand": HDMITaskSpec(
+        task="push_door_hand",
+        artifact_name="hdmi_push_door_hand",
+        contract_version=CONTRACT_VERSION,
+        observation_dims=OBSERVATION_DIMS,
+        network=HDMINetworkContract(privileged_encoder_input_dim=1721, **_COMMON_NETWORK),
+        action_joint_names=HDMI_ACTION_JOINT_NAMES,
+        action_scale=HDMI_ACTION_SCALE,
+        reference_joint_names=HDMI_REFERENCE_JOINT_NAMES,
+        object_kind="articulation",
+        object_asset_name="door",
+        object_body_name="door_panel",
+        contact_target_offsets=((0.0, -0.6, 1.0),),
+        contact_eef_names=("right_wrist_yaw_link",),
+        contact_eef_offsets=((0.05, 0.0, 0.0),),
+    ),
+    "push_box": HDMITaskSpec(
+        task="push_box",
+        artifact_name="hdmi_push_box",
+        contract_version=PUSH_BOX_CONTRACT_VERSION,
+        observation_dims=PUSH_BOX_OBSERVATION_DIMS,
+        network=HDMINetworkContract(privileged_encoder_input_dim=1724, **_COMMON_NETWORK),
+        action_joint_names=HDMI_ACTION_JOINT_NAMES,
+        action_scale=HDMI_ACTION_SCALE,
+        reference_joint_names=(),
+        object_kind="rigid_object",
+        object_asset_name="box",
+        object_body_name="box",
+        contact_target_offsets=((0.0, -0.2, 0.8), (0.0, 0.2, 0.8)),
+        contact_eef_names=("left_wrist_yaw_link", "right_wrist_yaw_link"),
+        contact_eef_offsets=((0.1, 0.0, 0.0), (0.1, 0.0, 0.0)),
+    ),
+}
+
+
+def get_hdmi_task_spec(task: str) -> HDMITaskSpec:
+    try:
+        return HDMI_TASK_SPECS[task]
+    except KeyError as exc:
+        raise ValueError(f"unsupported pretrained HDMI task: {task!r}") from exc
+
+
+def task_spec_from_manifest(manifest: Mapping[str, object]) -> HDMITaskSpec:
+    task = str(manifest.get("task", "push_door_hand"))
+    base = get_hdmi_task_spec(task)
+    contract_version = str(manifest.get("contract_version"))
+    if contract_version != base.contract_version:
+        raise ValueError(
+            f"unsupported HDMI contract {contract_version!r} for task {task!r}; "
+            f"expected {base.contract_version!r}"
+        )
+    dims = {
+        name: int(dim)
+        for name, dim in dict(manifest.get("observation_dims", base.observation_dims)).items()
+    }
+    network_data = manifest.get("network_contract")
+    network = (
+        HDMINetworkContract.from_mapping(network_data)
+        if isinstance(network_data, Mapping)
+        else base.network
+    )
+    task_data = manifest.get("task_contract", {})
+    if not isinstance(task_data, Mapping):
+        raise ValueError("manifest task_contract must be a mapping")
+
+    def tuple3s(name: str, default: object) -> tuple[tuple[float, float, float], ...]:
+        values = task_data.get(name, default)
+        result = tuple(tuple(float(item) for item in value) for value in values)
+        if any(len(value) != 3 for value in result):
+            raise ValueError(f"manifest {name} entries must have three values")
+        return result
+
+    spec = HDMITaskSpec(
+        task=base.task,
+        artifact_name=base.artifact_name,
+        contract_version=base.contract_version,
+        observation_dims=dims,
+        network=network,
+        action_joint_names=tuple(
+            str(value)
+            for value in task_data.get("action_joint_names", base.action_joint_names)
+        ),
+        action_scale=tuple(
+            float(value) for value in task_data.get("action_scale", base.action_scale)
+        ),
+        reference_joint_names=tuple(
+            str(value)
+            for value in task_data.get(
+                "reference_joint_names", base.reference_joint_names
+            )
+        ),
+        object_kind=str(task_data.get("object_kind", base.object_kind)),
+        object_asset_name=str(
+            task_data.get("object_asset_name", base.object_asset_name)
+        ),
+        object_body_name=str(task_data.get("object_body_name", base.object_body_name)),
+        contact_target_offsets=tuple3s(
+            "contact_target_offsets", base.contact_target_offsets
+        ),
+        contact_eef_names=tuple(
+            str(value)
+            for value in task_data.get("contact_eef_names", base.contact_eef_names)
+        ),
+        contact_eef_offsets=tuple3s("contact_eef_offsets", base.contact_eef_offsets),
+    )
+    if len(spec.action_joint_names) != network.action_dim:
+        raise ValueError("manifest action joint count does not match network output")
+    if len(spec.action_scale) != network.action_dim:
+        raise ValueError("manifest action scale count does not match network output")
+    if not (
+        len(spec.contact_target_offsets)
+        == len(spec.contact_eef_names)
+        == len(spec.contact_eef_offsets)
+    ):
+        raise ValueError("manifest contact target/eef fields must have equal lengths")
+    return spec
+
+
+@dataclass(frozen=True)
 class HDMIObservationBatch:
     """Flat named teacher inputs before frozen VecNorm normalization."""
 
@@ -106,7 +304,7 @@ class HDMIObservationBatch:
     privileged: torch.Tensor
     reference_action: torch.Tensor
 
-    def validate(self) -> int:
+    def validate(self, observation_dims: Mapping[str, int] = OBSERVATION_DIMS) -> int:
         tensors = {
             "command": self.command,
             "policy": self.policy,
@@ -116,9 +314,9 @@ class HDMIObservationBatch:
         }
         batch_size: int | None = None
         for name, tensor in tensors.items():
-            if tensor.ndim != 2 or tensor.shape[1] != OBSERVATION_DIMS[name]:
+            if tensor.ndim != 2 or tensor.shape[1] != observation_dims[name]:
                 raise ValueError(
-                    f"{name} must have shape [B, {OBSERVATION_DIMS[name]}], "
+                    f"{name} must have shape [B, {observation_dims[name]}], "
                     f"got {tuple(tensor.shape)}"
                 )
             if not tensor.is_floating_point():
@@ -133,27 +331,40 @@ class HDMIObservationBatch:
 class FrozenHDMITeacherPolicy(nn.Module):
     """Dependency-free network equivalent to HDMI encoder_priv + actor mean."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        observation_dims: Mapping[str, int] = OBSERVATION_DIMS,
+        network_contract: HDMINetworkContract | None = None,
+    ) -> None:
         super().__init__()
-        self.priv_fc = nn.Linear(1721, 256)
-        self.priv_ln = nn.LayerNorm(256)
-        self.priv_out = nn.Linear(256, 256)
+        self.observation_dims = dict(observation_dims)
+        self.network_contract = network_contract or HDMI_TASK_SPECS["push_door_hand"].network
+        contract = self.network_contract
+        if len(contract.actor_hidden_dims) != 3:
+            raise ValueError("portable HDMI actor requires exactly three hidden layers")
+        if self.observation_dims["privileged"] + self.observation_dims["object"] != contract.privileged_encoder_input_dim:
+            raise ValueError("privileged and object dimensions do not match encoder input")
+        if self.observation_dims["command"] + self.observation_dims["policy"] + contract.privileged_hidden_dim != contract.actor_input_dim:
+            raise ValueError("command, policy, and latent dimensions do not match actor input")
+        if self.observation_dims["reference_action"] != contract.action_dim:
+            raise ValueError("reference action dimension does not match actor output")
+        h1, h2, h3 = contract.actor_hidden_dims
+        latent = contract.privileged_hidden_dim
+        self.priv_fc = nn.Linear(contract.privileged_encoder_input_dim, latent)
+        self.priv_ln = nn.LayerNorm(latent)
+        self.priv_out = nn.Linear(latent, latent)
 
-        self.actor_fc1 = nn.Linear(861, 512)
-        self.actor_ln1 = nn.LayerNorm(512)
-        self.actor_fc2 = nn.Linear(512, 256)
-        self.actor_ln2 = nn.LayerNorm(256)
-        self.actor_fc3 = nn.Linear(256, 256)
-        self.actor_ln3 = nn.LayerNorm(256)
-        self.actor_mean = nn.Linear(256, 23)
+        self.actor_fc1 = nn.Linear(contract.actor_input_dim, h1)
+        self.actor_ln1 = nn.LayerNorm(h1)
+        self.actor_fc2 = nn.Linear(h1, h2)
+        self.actor_ln2 = nn.LayerNorm(h2)
+        self.actor_fc3 = nn.Linear(h2, h3)
+        self.actor_ln3 = nn.LayerNorm(h3)
+        self.actor_mean = nn.Linear(h3, contract.action_dim)
         self.activation = nn.Mish()
 
-        for name, dim in (
-            ("command", 356),
-            ("policy", 249),
-            ("object", 7),
-            ("privileged", 1714),
-        ):
+        for name in ("command", "policy", "object", "privileged"):
+            dim = self.observation_dims[name]
             self.register_buffer(f"{name}_mean", torch.zeros(dim))
             self.register_buffer(f"{name}_scale", torch.ones(dim))
 
@@ -163,7 +374,7 @@ class FrozenHDMITeacherPolicy(nn.Module):
         return (value - mean) / scale
 
     def forward(self, observation: HDMIObservationBatch) -> torch.Tensor:
-        observation.validate()
+        observation.validate(self.observation_dims)
         command = self._normalize("command", observation.command)
         policy = self._normalize("policy", observation.policy)
         object_obs = self._normalize("object", observation.object)
@@ -202,11 +413,7 @@ class PretrainedHDMIScaffold(nn.Module):
         if not manifest_path.is_file():
             raise FileNotFoundError(f"missing HDMI scaffold manifest: {manifest_path}")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if manifest.get("contract_version") != CONTRACT_VERSION:
-            raise ValueError(
-                f"unsupported HDMI contract {manifest.get('contract_version')!r}; "
-                f"expected {CONTRACT_VERSION!r}"
-            )
+        task_spec = task_spec_from_manifest(manifest)
         policy_name = str(manifest["files"]["policy"]["path"])
         policy_path = artifact_dir / policy_name
         if verify_checksum:
@@ -217,10 +424,12 @@ class PretrainedHDMIScaffold(nn.Module):
         payload = torch.load(policy_path, map_location="cpu", weights_only=True)
         if payload.get("format_version") != 1:
             raise ValueError("unsupported portable HDMI policy format")
-        policy = FrozenHDMITeacherPolicy()
+        policy = FrozenHDMITeacherPolicy(task_spec.observation_dims, task_spec.network)
         policy.load_state_dict(payload["state_dict"], strict=True)
         policy.to(device=device)
-        return cls(policy, manifest)
+        instance = cls(policy, manifest)
+        instance.task_spec = task_spec
+        return instance
 
     def train(self, mode: bool = True) -> "PretrainedHDMIScaffold":
         if mode:
@@ -241,7 +450,7 @@ class PretrainedHDMIScaffold(nn.Module):
 
     @property
     def action_joint_names(self) -> tuple[str, ...]:
-        return HDMI_ACTION_JOINT_NAMES
+        return getattr(self, "task_spec", HDMI_TASK_SPECS["push_door_hand"]).action_joint_names
 
     @property
     def is_privileged_simulation_baseline(self) -> bool:
@@ -332,6 +541,8 @@ class HDMIJointPositionActionRuntime:
         decimation: int = 4,
         delay: int = 4,
         alpha: float = 0.9,
+        action_joint_names: tuple[str, ...] = HDMI_ACTION_JOINT_NAMES,
+        action_scale: tuple[float, ...] = HDMI_ACTION_SCALE,
         device: str | torch.device | None = None,
     ) -> None:
         if not 2 <= delay <= 6:
@@ -343,16 +554,17 @@ class HDMIJointPositionActionRuntime:
         if self.default_joint_pos.shape != (num_envs, len(articulation_joint_names)):
             raise ValueError("default_joint_pos shape does not match articulation joints")
         self.joint_ids = torch.tensor(
-            [articulation_joint_names.index(name) for name in HDMI_ACTION_JOINT_NAMES],
+            [articulation_joint_names.index(name) for name in action_joint_names],
             device=self.device,
             dtype=torch.long,
         )
-        self.scale = torch.tensor(HDMI_ACTION_SCALE, device=self.device)
+        self.scale = torch.tensor(action_scale, device=self.device)
         self.decimation = decimation
         self.delay = torch.full((num_envs, 1), delay, device=self.device, dtype=torch.long)
         self.alpha = torch.full((num_envs, 1), alpha, device=self.device)
-        self.action_buffer = torch.zeros(num_envs, 23, 3, device=self.device)
-        self.applied_action = torch.zeros(num_envs, 23, device=self.device)
+        action_dim = len(action_joint_names)
+        self.action_buffer = torch.zeros(num_envs, action_dim, 3, device=self.device)
+        self.applied_action = torch.zeros(num_envs, action_dim, device=self.device)
         self.last_a_nom = torch.zeros_like(self.applied_action)
         self.received_action = torch.zeros_like(self.applied_action)
 
@@ -384,21 +596,36 @@ class HDMIJointPositionActionRuntime:
         return target
 
 
-def reference_to_action(reference_joint_pos: torch.Tensor) -> torch.Tensor:
-    """Select canonical 29-D reference joints in audited 23-D action order."""
+def reference_to_action(
+    reference_joint_pos: torch.Tensor,
+    reference_joint_names: tuple[str, ...] = HDMI_REFERENCE_JOINT_NAMES,
+    action_joint_names: tuple[str, ...] = HDMI_ACTION_JOINT_NAMES,
+) -> torch.Tensor:
+    """Select reference joints in the artifact's explicit action order."""
 
-    if reference_joint_pos.shape[-1] != 29:
-        raise ValueError("canonical HDMI reference must have 29 robot joints")
-    indices = torch.tensor(REFERENCE_TO_ACTION_INDICES, device=reference_joint_pos.device)
+    if reference_joint_pos.shape[-1] != len(reference_joint_names):
+        raise ValueError(
+            "reference joint dimension does not match the declared joint names"
+        )
+    try:
+        mapping = [reference_joint_names.index(name) for name in action_joint_names]
+    except ValueError as exc:
+        raise ValueError(f"reference is missing an action joint: {exc}") from exc
+    indices = torch.tensor(mapping, device=reference_joint_pos.device)
     return reference_joint_pos.index_select(-1, indices)
 
 
 def reference_action(
     reference_joint_pos: torch.Tensor,
     default_joint_pos_action_order: torch.Tensor,
+    reference_joint_names: tuple[str, ...] = HDMI_REFERENCE_JOINT_NAMES,
+    action_joint_names: tuple[str, ...] = HDMI_ACTION_JOINT_NAMES,
+    action_scale: tuple[float, ...] = HDMI_ACTION_SCALE,
 ) -> torch.Tensor:
-    selected = reference_to_action(reference_joint_pos)
-    scale = torch.tensor(HDMI_ACTION_SCALE, device=selected.device, dtype=selected.dtype)
+    selected = reference_to_action(
+        reference_joint_pos, reference_joint_names, action_joint_names
+    )
+    scale = torch.tensor(action_scale, device=selected.device, dtype=selected.dtype)
     return (selected - default_joint_pos_action_order) / scale
 
 

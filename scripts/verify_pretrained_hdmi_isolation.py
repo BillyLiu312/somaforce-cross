@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.abc
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -24,8 +25,22 @@ class BlockHDMIImports(importlib.abc.MetaPathFinder):
         return None
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--task", choices=("push_door_hand", "push_box"), default="push_door_hand"
+    )
+    parser.add_argument("--artifact", type=Path)
+    return parser.parse_args()
+
+
 def main() -> None:
-    artifact = REPO_ROOT / "artifacts/scaffolds/hdmi_push_door_hand/v1"
+    args = parse_args()
+    artifact = (
+        args.artifact
+        if args.artifact is not None
+        else REPO_ROOT / f"artifacts/scaffolds/hdmi_{args.task}/v1"
+    ).expanduser().resolve()
     sys.path[:] = [entry for entry in sys.path if not entry.rstrip("/").endswith("/HDMI")]
     blocker = BlockHDMIImports()
     sys.meta_path.insert(0, blocker)
@@ -36,6 +51,10 @@ def main() -> None:
         )
 
         scaffold = PretrainedHDMIScaffold.from_artifact(artifact)
+        if scaffold.task_spec.task != args.task:
+            raise AssertionError(
+                f"artifact task {scaffold.task_spec.task!r} != requested {args.task!r}"
+            )
         with np.load(artifact / "parity/source_outputs.npz", allow_pickle=False) as data:
             observation = HDMIObservationBatch(
                 command=torch.from_numpy(data["command"][:1]),
@@ -58,6 +77,7 @@ def main() -> None:
             json.dumps(
                 {
                     "artifact": str(artifact),
+                    "task": scaffold.task_spec.task,
                     "active_adaptation_modules": imported,
                     "action_shape": list(action.shape),
                     "max_abs_action_error": error,

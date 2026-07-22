@@ -14,7 +14,6 @@ from isaaclab.app import AppLauncher
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_ARTIFACT = REPO_ROOT / "artifacts/scaffolds/hdmi_push_door_hand/v1"
 
 parser = argparse.ArgumentParser(
     description=(
@@ -22,14 +21,33 @@ parser = argparse.ArgumentParser(
         "This is not a deployable policy."
     )
 )
-parser.add_argument("--artifact", type=Path, default=DEFAULT_ARTIFACT)
+parser.add_argument(
+    "--task", choices=("push_door_hand", "push_box"), default="push_door_hand"
+)
+parser.add_argument("--artifact", type=Path)
 parser.add_argument("--num-envs", type=int, default=1)
-parser.add_argument("--steps", type=int, default=540)
+parser.add_argument("--steps", type=int)
 parser.add_argument("--log-interval", type=int, default=25)
 parser.add_argument("--delay", type=int, default=4)
 parser.add_argument("--alpha", type=float, default=0.9)
 parser.add_argument("--door-friction", type=float, default=0.3)
 parser.add_argument("--door-damping", type=float, default=0.55)
+parser.add_argument(
+    "--case",
+    choices=("nominal", "high_mass", "high_friction", "custom"),
+    default="nominal",
+)
+parser.add_argument("--box-mass", type=float)
+parser.add_argument("--box-friction", type=float)
+parser.add_argument("--box-com-offset", type=float, nargs=3, default=(0.0, 0.0, 0.0))
+parser.add_argument("--initial-object-xy", type=float, nargs=2, default=(0.0, 0.0))
+parser.add_argument("--initial-object-yaw", type=float, default=0.0)
+parser.add_argument("--contact-target-offset", type=float, nargs=3, default=(0.0, 0.0, 0.0))
+parser.add_argument(
+    "--show-reference-box",
+    action="store_true",
+    help="Render the translucent reference box marker in GUI mode.",
+)
 parser.add_argument(
     "--realtime",
     action="store_true",
@@ -52,7 +70,13 @@ parser.add_argument(
     "--require-progress",
     type=float,
     default=0.05,
-    help="Exit nonzero unless task-consistent door progress reaches this value in radians.",
+    help="Required task-consistent progress in radians for door or meters for box.",
+)
+parser.add_argument(
+    "--require-contact-fraction",
+    type=float,
+    default=0.0,
+    help="Required fraction of reference-contact steps with both push-box wrists above 1 N.",
 )
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -70,7 +94,7 @@ def main() -> int:
     from isaaclab.sim import SimulationContext
 
     from somaforce_cross.scaffold.pretrained_hdmi_isaac import (
-        PretrainedHDMIDoorIsaacRuntime,
+        PretrainedHDMIIsaacRuntime,
     )
 
     if args.num_envs != 1:
@@ -82,23 +106,52 @@ def main() -> int:
         device=args.device,
     )
     sim = SimulationContext(sim_cfg)
-    sim.set_camera_view(eye=(3.0, 2.0, 1.0), target=(0.5, -2.5, 0.8))
-    runtime = PretrainedHDMIDoorIsaacRuntime(
+    if args.task == "push_box":
+        sim.set_camera_view(eye=(3.0, 6.0, 2.0), target=(0.0, 3.0, 0.6))
+    else:
+        sim.set_camera_view(eye=(3.0, 2.0, 1.0), target=(0.5, -2.5, 0.8))
+    artifact = (
+        args.artifact
+        if args.artifact is not None
+        else REPO_ROOT / f"artifacts/scaffolds/hdmi_{args.task}/v1"
+    )
+    case_defaults = {
+        "nominal": (8.0, 0.5),
+        "high_mass": (10.0, 0.5),
+        "high_friction": (8.0, 1.2),
+        "custom": (8.0, 0.5),
+    }
+    default_mass, default_friction = case_defaults[args.case]
+    box_mass = args.box_mass if args.box_mass is not None else default_mass
+    box_friction = (
+        args.box_friction if args.box_friction is not None else default_friction
+    )
+    steps = args.steps if args.steps is not None else (792 if args.task == "push_box" else 540)
+    runtime = PretrainedHDMIIsaacRuntime(
         sim,
-        args.artifact,
+        artifact,
         num_envs=args.num_envs,
         delay=args.delay,
         alpha=args.alpha,
         door_friction=args.door_friction,
         door_damping=args.door_damping,
+        box_mass=box_mass,
+        box_friction=box_friction,
+        box_com_offset=tuple(args.box_com_offset),
+        initial_object_xy=tuple(args.initial_object_xy),
+        initial_object_yaw=args.initial_object_yaw,
+        contact_target_offset=tuple(args.contact_target_offset),
+        case_name=args.case,
+        show_reference_box=args.show_reference_box,
     )
     print(
         "role=privileged_simulation_baseline deployable=false "
-        f"device={args.device} action_dim=23 steps={args.steps}"
+        f"task={args.task} case={args.case} device={args.device} "
+        f"action_dim=23 steps={steps}"
     )
     print("action_joints=" + ",".join(runtime.scaffold.action_joint_names))
     metrics = runtime.rollout(
-        args.steps,
+        steps,
         log_interval=args.log_interval,
         realtime=args.realtime,
         playback_rate=args.playback_rate,
@@ -109,12 +162,21 @@ def main() -> int:
     if args.metrics_json is not None:
         args.metrics_json.parent.mkdir(parents=True, exist_ok=True)
         args.metrics_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    passed = (
-        metrics.nonfinite_count == 0
-        and not metrics.terminated
-        and metrics.zero_hook_exact
-        and metrics.max_task_progress >= args.require_progress
-    )
+    if args.task == "push_box":
+        passed = (
+            metrics.nonfinite_count == 0
+            and metrics.stable
+            and metrics.zero_hook_exact
+            and metrics.max_directional_progress >= args.require_progress
+            and metrics.contact_active_fraction >= args.require_contact_fraction
+        )
+    else:
+        passed = (
+            metrics.nonfinite_count == 0
+            and not metrics.terminated
+            and metrics.zero_hook_exact
+            and metrics.max_task_progress >= args.require_progress
+        )
     return 0 if passed else 2
 
 

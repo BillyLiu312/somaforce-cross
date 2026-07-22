@@ -25,21 +25,43 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from somaforce_cross.scaffold.pretrained_hdmi import (
-    CONTRACT_VERSION,
-    HDMI_ACTION_JOINT_NAMES,
-    HDMI_ACTION_SCALE,
-    HDMI_REFERENCE_JOINT_NAMES,
-    OBSERVATION_DIMS,
-    REFERENCE_TO_ACTION_INDICES,
+    HDMINetworkContract,
+    HDMITaskSpec,
     FrozenHDMITeacherPolicy,
     HDMIObservationBatch,
+    get_hdmi_task_spec,
     sha256_file,
 )
 
 
-EXPECTED_CHECKPOINT_SHA256 = "24682b7b66c38f784ca5939dad3841b1b1e5b801c47d2fea59c5f85fd90c238c"
-EXPECTED_CONFIG_SHA256 = "fb6ddd53135550b244fd35b707cf2b98e069ddf38dfe456af5b930e4189a074c"
 EXPECTED_HDMI_REVISION = "32282f6dcf26cae70b814d585ceb12cc38aa1b60"
+SOURCE_SPECS = {
+    "push_door_hand": {
+        "checkpoint": "outputs/doorpushhand/hdmi-doorpushhand-4gpu/rank_0/checkpoint_final.pt",
+        "motion_dir": "data/motion/data_for_sim/push_door-hand-0828",
+        "g1_asset": "active_adaptation/assets/g1/g1_29dof_rubberhand-feet_sphere-eef_box-body_capsule.usd",
+        "object_asset": "active_adaptation/assets/objects/door/door.usd",
+        "checksums": {
+            "checkpoint": "24682b7b66c38f784ca5939dad3841b1b1e5b801c47d2fea59c5f85fd90c238c",
+            "resolved_config": "fb6ddd53135550b244fd35b707cf2b98e069ddf38dfe456af5b930e4189a074c",
+        },
+    },
+    "push_box": {
+        "checkpoint": "outputs/push_box/hdmi-push-box-4gpu-20260721_200242/rank_0/checkpoint_final.pt",
+        "motion_dir": "data/motion/g1/push_box/push_box-VID_20250423_220958-light-high-adjust_root_height",
+        "g1_asset": "active_adaptation/assets/g1/g1_29dof_nohand-feet_sphere-eef_L-body_capsule.usd",
+        "object_asset": "active_adaptation/assets/objects/box/box.usd",
+        "reference_video": "scripts/recording-07-21_21-43.mp4",
+        "checksums": {
+            "checkpoint": "83ddea2ed34919be575d678fcac43c3b3d65643a22d3e45ea995f80e9c0a6d41",
+            "resolved_config": "5902fe6b0e44a597c9e98504cfbb83110b6baf036d0b827cff122bfdc2a937c3",
+            "asset_meta": "314eae4a38925411cc37cdb56a7fb8a57174d51ae130118f23f0e4aa2b92537d",
+            "motion": "8921f589f8470d25ab1dd0fa65f9b9057676ab122fdcc8d87f43d9c527ed461e",
+            "motion_meta": "dffeeed04f3001710bb8ab83061e8e1d1be256d9e2e35a4efa0c6011ae1d4105",
+            "reference_video": "65d39e36ce7dded75e9f3c1513aa4a6641589e763fea28c25289a799e2fd7a71",
+        },
+    },
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,10 +69,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--hdmi-root", type=Path, default=workspace / "HDMI")
     parser.add_argument(
+        "--task", choices=tuple(SOURCE_SPECS), default="push_door_hand"
+    )
+    parser.add_argument(
         "--output",
         type=Path,
-        default=Path(__file__).resolve().parents[1]
-        / "artifacts/scaffolds/hdmi_push_door_hand/v1",
+        default=None,
     )
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
@@ -62,11 +86,35 @@ def copy_tensor(target: torch.Tensor, source: torch.Tensor) -> None:
     target.copy_(source)
 
 
-def build_portable_policy(checkpoint: dict[str, object]) -> FrozenHDMITeacherPolicy:
+def discover_network_contract(checkpoint: dict[str, object]) -> HDMINetworkContract:
+    source_policy = checkpoint["policy"]
+    encoder = source_policy["encoder_priv"]
+    actor = source_policy["actor"]
+    return HDMINetworkContract(
+        privileged_encoder_input_dim=int(encoder["module.1.module.0.0.weight"].shape[1]),
+        privileged_hidden_dim=int(encoder["module.1.module.1.weight"].shape[0]),
+        actor_input_dim=int(actor["module.0.module.1.module.0.weight"].shape[1]),
+        actor_hidden_dims=(
+            int(actor["module.0.module.1.module.0.weight"].shape[0]),
+            int(actor["module.0.module.1.module.3.weight"].shape[0]),
+            int(actor["module.0.module.1.module.6.weight"].shape[0]),
+        ),
+        action_dim=int(actor["module.0.module.2.module.actor_mean.weight"].shape[0]),
+    )
+
+
+def build_portable_policy(
+    checkpoint: dict[str, object], task_spec: HDMITaskSpec
+) -> FrozenHDMITeacherPolicy:
     policy_state = checkpoint["policy"]
     source_encoder = policy_state["encoder_priv"]
     source_actor = policy_state["actor"]
-    model = FrozenHDMITeacherPolicy()
+    discovered = discover_network_contract(checkpoint)
+    if discovered != task_spec.network:
+        raise ValueError(
+            f"checkpoint network contract {discovered} does not match {task_spec.network}"
+        )
+    model = FrozenHDMITeacherPolicy(task_spec.observation_dims, discovered)
     mapping = {
         "priv_fc.weight": source_encoder["module.1.module.0.0.weight"],
         "priv_fc.bias": source_encoder["module.1.module.0.0.bias"],
@@ -136,7 +184,11 @@ def oracle_action(
         mish(feature), state["priv_out.weight"], state["priv_out.bias"]
     )
     actor = torch.cat((command, policy, feature), dim=-1)
-    for prefix, width in (("actor_fc1", 512), ("actor_fc2", 256), ("actor_fc3", 256)):
+    for prefix, width in zip(
+        ("actor_fc1", "actor_fc2", "actor_fc3"),
+        model.network_contract.actor_hidden_dims,
+        strict=True,
+    ):
         actor = torch.nn.functional.linear(
             actor, state[f"{prefix}.weight"], state[f"{prefix}.bias"]
         )
@@ -158,6 +210,7 @@ def hdmi_source_oracle_action(
     hdmi_root: Path,
     checkpoint: dict[str, object],
     observation: HDMIObservationBatch,
+    task_spec: HDMITaskSpec,
 ) -> torch.Tensor:
     """Run the fixed batch through HDMI's own make_mlp and Actor classes."""
 
@@ -166,8 +219,9 @@ def hdmi_source_oracle_action(
         from active_adaptation.learning.ppo.common import Actor, make_mlp
 
         source_policy = checkpoint["policy"]
-        encoder = torch.nn.Sequential(make_mlp([256]), torch.nn.LazyLinear(256))
-        encoder(torch.zeros(1, 1721))
+        latent = task_spec.network.privileged_hidden_dim
+        encoder = torch.nn.Sequential(make_mlp([latent]), torch.nn.LazyLinear(latent))
+        encoder(torch.zeros(1, task_spec.network.privileged_encoder_input_dim))
         encoder.load_state_dict(
             {
                 key.removeprefix("module.1.module."): value
@@ -175,8 +229,8 @@ def hdmi_source_oracle_action(
             },
             strict=True,
         )
-        actor_backbone = make_mlp([512, 256, 256])
-        actor_backbone(torch.zeros(1, 861))
+        actor_backbone = make_mlp(list(task_spec.network.actor_hidden_dims))
+        actor_backbone(torch.zeros(1, task_spec.network.actor_input_dim))
         actor_backbone.load_state_dict(
             {
                 key.removeprefix("module.0.module.1.module."): value
@@ -185,8 +239,8 @@ def hdmi_source_oracle_action(
             },
             strict=True,
         )
-        actor_head = Actor(23)
-        actor_head(torch.zeros(1, 256))
+        actor_head = Actor(task_spec.network.action_dim)
+        actor_head(torch.zeros(1, task_spec.network.actor_hidden_dims[-1]))
         actor_head.load_state_dict(
             {
                 key.removeprefix("module.0.module.2.module."): value
@@ -229,27 +283,37 @@ def git_output(root: Path, *args: str) -> str:
 def main() -> None:
     args = parse_args()
     hdmi_root = args.hdmi_root.expanduser().resolve()
-    output = args.output.expanduser().resolve()
-    checkpoint_path = hdmi_root / "outputs/doorpushhand/hdmi-doorpushhand-4gpu/rank_0/checkpoint_final.pt"
+    task_spec = get_hdmi_task_spec(args.task)
+    source_spec = SOURCE_SPECS[args.task]
+    output = (
+        args.output
+        if args.output is not None
+        else REPO_ROOT / f"artifacts/scaffolds/{task_spec.artifact_name}/v1"
+    ).expanduser().resolve()
+    checkpoint_path = hdmi_root / str(source_spec["checkpoint"])
     config_path = checkpoint_path.parent / ".hydra/config.yaml"
     asset_meta_path = checkpoint_path.parent / "asset_meta.json"
-    motion_dir = hdmi_root / "data/motion/data_for_sim/push_door-hand-0828"
+    motion_dir = hdmi_root / str(source_spec["motion_dir"])
     sources = {
         "checkpoint": checkpoint_path,
         "resolved_config": config_path,
         "asset_meta": asset_meta_path,
         "motion": motion_dir / "motion.npz",
         "motion_meta": motion_dir / "meta.json",
-        "g1_asset": hdmi_root / "active_adaptation/assets/g1/g1_29dof_rubberhand-feet_sphere-eef_box-body_capsule.usd",
-        "door_asset": hdmi_root / "active_adaptation/assets/objects/door/door.usd",
+        "g1_asset": hdmi_root / str(source_spec["g1_asset"]),
+        "object_asset": hdmi_root / str(source_spec["object_asset"]),
     }
+    if "reference_video" in source_spec:
+        sources["reference_video"] = hdmi_root / str(source_spec["reference_video"])
     missing = [str(path) for path in sources.values() if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"missing HDMI source files: {missing}")
-    if sha256_file(checkpoint_path) != EXPECTED_CHECKPOINT_SHA256:
-        raise ValueError("source checkpoint checksum does not match audited checkpoint")
-    if sha256_file(config_path) != EXPECTED_CONFIG_SHA256:
-        raise ValueError("resolved config checksum does not match audited config")
+    for name, expected in dict(source_spec["checksums"]).items():
+        actual = sha256_file(sources[name])
+        if actual != expected:
+            raise ValueError(
+                f"source {name} checksum does not match audited value: {actual}"
+            )
     revision = git_output(hdmi_root, "rev-parse", "HEAD")
     if revision != EXPECTED_HDMI_REVISION:
         raise ValueError(f"HDMI revision mismatch: {revision}")
@@ -269,7 +333,7 @@ def main() -> None:
     # The source is a trusted local training artifact. This is the only pickle
     # load in the migration path; runtime uses weights_only=True below.
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    model = build_portable_policy(checkpoint)
+    model = build_portable_policy(checkpoint, task_spec)
     policy_path = output / "policy_state.pt"
     torch.save({"format_version": 1, "state_dict": model.state_dict()}, policy_path)
     # Assert the generated artifact is accepted by the restricted loader.
@@ -278,7 +342,14 @@ def main() -> None:
     shutil.copy2(sources["motion"], output / "reference/motion.npz")
     shutil.copy2(sources["motion_meta"], output / "reference/meta.json")
     shutil.copy2(sources["g1_asset"], output / "assets/g1.usd")
-    shutil.copy2(sources["door_asset"], output / "assets/door.usd")
+    object_asset_path = output / f"assets/{task_spec.object_asset_name}.usd"
+    shutil.copy2(sources["object_asset"], object_asset_path)
+
+    reference_meta = json.loads(sources["motion_meta"].read_text(encoding="utf-8"))
+    reference_joint_names = tuple(reference_meta["joint_names"])
+    reference_to_action_indices = tuple(
+        reference_joint_names.index(name) for name in task_spec.action_joint_names
+    )
 
     state = model.state_dict()
     np.savez(
@@ -293,7 +364,7 @@ def main() -> None:
     generator = torch.Generator().manual_seed(20260721)
     values = {
         name: torch.randn(4, dim, generator=generator, dtype=torch.float32)
-        for name, dim in OBSERVATION_DIMS.items()
+        for name, dim in task_spec.observation_dims.items()
     }
     observation = HDMIObservationBatch(
         command=values["command"],
@@ -303,7 +374,9 @@ def main() -> None:
         reference_action=values["reference_action"],
     )
     with torch.inference_mode():
-        oracle = hdmi_source_oracle_action(hdmi_root, checkpoint, observation)
+        oracle = hdmi_source_oracle_action(
+            hdmi_root, checkpoint, observation, task_spec
+        )
         portable = model(observation)
     error = float((oracle - portable).abs().max())
     if error > 1e-5:
@@ -319,13 +392,25 @@ def main() -> None:
     )
 
     action_contract = {
-        "contract_version": CONTRACT_VERSION,
-        "output": {"name": "a_nom", "dtype": "float32", "shape": ["B", 23], "coordinates": "normalized_joint_position"},
-        "action_joint_names": list(HDMI_ACTION_JOINT_NAMES),
-        "action_scale_rad": list(HDMI_ACTION_SCALE),
-        "canonical_reference_joint_names": list(HDMI_REFERENCE_JOINT_NAMES),
-        "reference_to_action_indices": list(REFERENCE_TO_ACTION_INDICES),
-        "excluded_wrist_joints": [name for name in HDMI_REFERENCE_JOINT_NAMES if "wrist" in name],
+        "contract_version": task_spec.contract_version,
+        "output": {
+            "name": "a_nom",
+            "dtype": "float32",
+            "shape": ["B", task_spec.network.action_dim],
+            "coordinates": "normalized_joint_position",
+        },
+        "action_joint_names": list(task_spec.action_joint_names),
+        "action_scale_rad": list(task_spec.action_scale),
+        "reference_joint_names": list(reference_joint_names),
+        "reference_joint_count": len(reference_joint_names),
+        "reference_to_action_indices": list(reference_to_action_indices),
+        "articulation_joint_count": 29,
+        "reference_to_articulation": "map by joint name; absent articulation joints are initialized to zero",
+        "excluded_wrist_joints": [
+            name
+            for name in reference_joint_names
+            if "wrist" in name and name not in task_spec.action_joint_names
+        ],
         "joint_target": "default_joint_position + a_applied * action_scale",
         "physics_dt_s": 0.005,
         "control_dt_s": 0.02,
@@ -337,7 +422,7 @@ def main() -> None:
     write_json(output / "action_contract.json", action_contract)
 
     observation_contract = {
-        "contract_version": CONTRACT_VERSION,
+        "contract_version": task_spec.contract_version,
         "role": "privileged_simulation_baseline_not_deployable",
         "concatenation_order": ["command", "policy", "object", "privileged"],
         "groups": {
@@ -345,7 +430,7 @@ def main() -> None:
                 "shape": ["B", 356],
                 "fields": [
                     {"name": "ref_body_pos_future_local", "shape": ["B", 5, 16, 3], "frame": "reference root yaw frame"},
-                    {"name": "ref_joint_pos_future", "shape": ["B", 5, 23], "joint_order": "action_joint_names"},
+                    {"name": "ref_joint_pos_future", "shape": ["B", 5, task_spec.network.action_dim], "joint_order": "action_joint_names"},
                     {"name": "ref_motion_phase", "shape": ["B", 1], "formula": "reference_step / motion_length"},
                 ],
             },
@@ -355,12 +440,41 @@ def main() -> None:
                     {"name": "root_ang_vel_history", "steps": [0], "shape": ["B", 3], "frame": "root"},
                     {"name": "projected_gravity_history", "steps": [0], "shape": ["B", 3], "frame": "root"},
                     {"name": "joint_pos_history", "steps": [0, 1, 2, 3, 4, 8], "shape": ["B", 174], "joint_order": "Isaac articulation 29-D order"},
-                    {"name": "prev_actions", "steps": 3, "shape": ["B", 69], "layout": "action-major, newest-to-oldest"},
+                    {"name": "prev_actions", "steps": 3, "shape": ["B", task_spec.network.action_dim * 3], "layout": "action-major, newest-to-oldest"},
                 ],
             },
-            "object": {"shape": ["B", 7], "fields": ["object_xy_in_root_yaw_frame", "cos_sin_relative_heading", "contact_target_in_root_yaw_frame"]},
-            "privileged": {"shape": ["B", 1714], "classification": "simulator_privileged", "field_order": ["root_ang_vel_history_0_to_8", "projected_gravity_history_0_to_8", "joint_pos_history_0_to_8", "ref_root_pos_future_b", "ref_root_ori_future_b_first_two_rows", "diff_body_pos_future_local", "diff_body_ori_future_local_first_two_rows", "diff_body_lin_vel_future_local", "diff_body_ang_vel_future_local", "root_linvel_b", "ankle_pos_b", "ankle_linvel_b", "ankle_pelvis_torso_height", "applied_action", "applied_torque", "object_pos_b", "object_ori_b_full_matrix", "diff_object_pos_future", "diff_object_ori_future_full_matrix", "ref_object_contact_future", "diff_contact_pos_b", "object_joint_pos", "object_joint_vel", "object_joint_torque"]},
-            "reference_action": {"shape": ["B", 23], "formula": "(reference_joint_pos[action_mapping] - default_joint_pos) / action_scale"},
+            "object": {
+                "shape": ["B", task_spec.observation_dims["object"]],
+                "fields": [
+                    "object_xy_in_root_yaw_frame",
+                    "cos_sin_relative_heading",
+                    *[
+                        f"contact_target_{index}_in_root_yaw_frame"
+                        for index in range(len(task_spec.contact_target_offsets))
+                    ],
+                ],
+            },
+            "privileged": {
+                "shape": ["B", task_spec.observation_dims["privileged"]],
+                "classification": "simulator_privileged",
+                "field_order": [
+                    "root_ang_vel_history_0_to_8", "projected_gravity_history_0_to_8",
+                    "joint_pos_history_0_to_8", "ref_root_pos_future_b",
+                    "ref_root_ori_future_b_first_two_rows", "diff_body_pos_future_local",
+                    "diff_body_ori_future_local_first_two_rows", "diff_body_lin_vel_future_local",
+                    "diff_body_ang_vel_future_local", "root_linvel_b", "ankle_pos_b",
+                    "ankle_linvel_b", "ankle_pelvis_torso_height", "applied_action",
+                    "applied_torque", "object_pos_b", "object_ori_b_full_matrix",
+                    "diff_object_pos_future", "diff_object_ori_future_full_matrix",
+                    "ref_object_contact_future", "diff_contact_pos_b",
+                    *(
+                        ["object_joint_pos", "object_joint_vel", "object_joint_torque"]
+                        if task_spec.object_kind == "articulation"
+                        else []
+                    ),
+                ],
+            },
+            "reference_action": {"shape": ["B", task_spec.network.action_dim], "formula": "(reference_joint_pos[action_mapping] - default_joint_pos) / action_scale"},
         },
         "normalization": {"groups": ["command", "policy", "object", "privileged"], "formula": "(x - frozen_mean) / frozen_scale", "variance_floor": 0.0001, "reference_action_normalized": False},
         "reset": {"state_histories": "fill all slots with reset state", "previous_actions": "zero", "reference_step": 0, "phase": 0.0},
@@ -373,9 +487,10 @@ def main() -> None:
 This local artifact was derived from the HDMI checkout and checkpoint identified
 in `manifest.json`. HDMI is prior work and must be cited. At export time the HDMI
 checkout had no root LICENSE, DATA_LICENSE, or NOTICE file. Redistribution of
-the checkpoint, exported weights, reference motion, G1 USD, or door USD is not
-authorized by this repository. Keep these files local/private until permissions
-are documented. Runtime independence does not imply independent authorship.
+the checkpoint, exported weights, reference motion/video, G1 USD, or object USD
+is not authorized by this repository. Keep these files local/private until
+permissions are documented. Runtime independence does not imply independent
+authorship.
 """
     (output / "THIRD_PARTY.md").write_text(third_party, encoding="utf-8")
 
@@ -385,7 +500,7 @@ are documented. Runtime independence does not imply independent authorship.
         "reference_motion": output / "reference/motion.npz",
         "reference_meta": output / "reference/meta.json",
         "g1_asset": output / "assets/g1.usd",
-        "door_asset": output / "assets/door.usd",
+        f"{task_spec.object_asset_name}_asset": object_asset_path,
         "parity": output / "parity/source_outputs.npz",
         "observation_contract": output / "observation_contract.json",
         "action_contract": output / "action_contract.json",
@@ -394,7 +509,21 @@ are documented. Runtime independence does not imply independent authorship.
     dirty = bool(git_output(hdmi_root, "status", "--porcelain"))
     manifest = {
         "artifact_version": "1.0.0-local",
-        "contract_version": CONTRACT_VERSION,
+        "task": task_spec.task,
+        "contract_version": task_spec.contract_version,
+        "observation_dims": dict(task_spec.observation_dims),
+        "network_contract": task_spec.network.to_dict(),
+        "task_contract": {
+            "action_joint_names": task_spec.action_joint_names,
+            "action_scale": task_spec.action_scale,
+            "object_kind": task_spec.object_kind,
+            "object_asset_name": task_spec.object_asset_name,
+            "object_body_name": task_spec.object_body_name,
+            "contact_target_offsets": task_spec.contact_target_offsets,
+            "contact_eef_names": task_spec.contact_eef_names,
+            "contact_eef_offsets": task_spec.contact_eef_offsets,
+            "reference_joint_names": reference_joint_names,
+        },
         "role": "frozen_hdmi_phase_train_privileged_teacher_simulation_baseline",
         "deployable": False,
         "exported_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -409,7 +538,12 @@ are documented. Runtime independence does not imply independent authorship.
             "motion_sha256": sha256_file(sources["motion"]),
             "motion_meta_sha256": sha256_file(sources["motion_meta"]),
             "g1_asset_sha256": sha256_file(sources["g1_asset"]),
-            "door_asset_sha256": sha256_file(sources["door_asset"]),
+            f"{task_spec.object_asset_name}_asset_sha256": sha256_file(sources["object_asset"]),
+            **(
+                {"reference_video_sha256": sha256_file(sources["reference_video"])}
+                if "reference_video" in sources
+                else {}
+            ),
         },
         "oracle_parity": {"backend": "HDMI active_adaptation make_mlp + Actor deterministic mean", "batch_size": 4, "seed": 20260721, "max_abs_action_error": error, "tolerance": 1e-5},
         "files": {

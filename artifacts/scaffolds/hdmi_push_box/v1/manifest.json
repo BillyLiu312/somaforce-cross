@@ -1,0 +1,214 @@
+{
+  "artifact_version": "1.0.0-local",
+  "task": "push_box",
+  "contract_version": "hdmi_push_box_teacher_v1",
+  "observation_dims": {
+    "command": 356,
+    "policy": 249,
+    "object": 10,
+    "privileged": 1714,
+    "reference_action": 23
+  },
+  "network_contract": {
+    "privileged_encoder_input_dim": 1724,
+    "privileged_hidden_dim": 256,
+    "actor_input_dim": 861,
+    "actor_hidden_dims": [
+      512,
+      256,
+      256
+    ],
+    "action_dim": 23
+  },
+  "task_contract": {
+    "action_joint_names": [
+      "left_hip_pitch_joint",
+      "right_hip_pitch_joint",
+      "waist_yaw_joint",
+      "left_hip_roll_joint",
+      "right_hip_roll_joint",
+      "waist_roll_joint",
+      "left_hip_yaw_joint",
+      "right_hip_yaw_joint",
+      "waist_pitch_joint",
+      "left_knee_joint",
+      "right_knee_joint",
+      "left_shoulder_pitch_joint",
+      "right_shoulder_pitch_joint",
+      "left_ankle_pitch_joint",
+      "right_ankle_pitch_joint",
+      "left_shoulder_roll_joint",
+      "right_shoulder_roll_joint",
+      "left_ankle_roll_joint",
+      "right_ankle_roll_joint",
+      "left_shoulder_yaw_joint",
+      "right_shoulder_yaw_joint",
+      "left_elbow_joint",
+      "right_elbow_joint"
+    ],
+    "action_scale": [
+      0.55,
+      0.55,
+      0.55,
+      0.35,
+      0.35,
+      0.44,
+      0.55,
+      0.55,
+      0.44,
+      0.35,
+      0.35,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44
+    ],
+    "object_kind": "rigid_object",
+    "object_asset_name": "box",
+    "object_body_name": "box",
+    "contact_target_offsets": [
+      [
+        0.0,
+        -0.2,
+        0.8
+      ],
+      [
+        0.0,
+        0.2,
+        0.8
+      ]
+    ],
+    "contact_eef_names": [
+      "left_wrist_yaw_link",
+      "right_wrist_yaw_link"
+    ],
+    "contact_eef_offsets": [
+      [
+        0.1,
+        0.0,
+        0.0
+      ],
+      [
+        0.1,
+        0.0,
+        0.0
+      ]
+    ],
+    "reference_joint_names": [
+      "left_hip_pitch_joint",
+      "left_hip_roll_joint",
+      "left_hip_yaw_joint",
+      "left_knee_joint",
+      "left_ankle_pitch_joint",
+      "left_ankle_roll_joint",
+      "right_hip_pitch_joint",
+      "right_hip_roll_joint",
+      "right_hip_yaw_joint",
+      "right_knee_joint",
+      "right_ankle_pitch_joint",
+      "right_ankle_roll_joint",
+      "waist_yaw_joint",
+      "waist_roll_joint",
+      "waist_pitch_joint",
+      "left_shoulder_pitch_joint",
+      "left_shoulder_roll_joint",
+      "left_shoulder_yaw_joint",
+      "left_elbow_joint",
+      "left_wrist_roll_joint",
+      "right_shoulder_pitch_joint",
+      "right_shoulder_roll_joint",
+      "right_shoulder_yaw_joint",
+      "right_elbow_joint",
+      "right_wrist_roll_joint"
+    ]
+  },
+  "role": "frozen_hdmi_phase_train_privileged_teacher_simulation_baseline",
+  "deployable": false,
+  "exported_at_utc": "2026-07-21T14:45:47.481069+00:00",
+  "export_tool": "/inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/somaforce-cross/scripts/export_pretrained_hdmi_scaffold.py",
+  "source": {
+    "project": "HDMI",
+    "revision": "32282f6dcf26cae70b814d585ceb12cc38aa1b60",
+    "worktree_dirty": true,
+    "checkpoint_sha256": "83ddea2ed34919be575d678fcac43c3b3d65643a22d3e45ea995f80e9c0a6d41",
+    "resolved_config_sha256": "5902fe6b0e44a597c9e98504cfbb83110b6baf036d0b827cff122bfdc2a937c3",
+    "asset_meta_sha256": "314eae4a38925411cc37cdb56a7fb8a57174d51ae130118f23f0e4aa2b92537d",
+    "motion_sha256": "8921f589f8470d25ab1dd0fa65f9b9057676ab122fdcc8d87f43d9c527ed461e",
+    "motion_meta_sha256": "dffeeed04f3001710bb8ab83061e8e1d1be256d9e2e35a4efa0c6011ae1d4105",
+    "g1_asset_sha256": "dc24fd9fb205be3c558c14015bde5e65827d8b28f5ef536889dd2ca101780912",
+    "box_asset_sha256": "5c299ef74daeaebe1e5be13edc0f8e2352cb9da2f09600b919d89a08a9e2147e",
+    "reference_video_sha256": "65d39e36ce7dded75e9f3c1513aa4a6641589e763fea28c25289a799e2fd7a71"
+  },
+  "oracle_parity": {
+    "backend": "HDMI active_adaptation make_mlp + Actor deterministic mean",
+    "batch_size": 4,
+    "seed": 20260721,
+    "max_abs_action_error": 0.0,
+    "tolerance": 1e-05
+  },
+  "files": {
+    "policy": {
+      "path": "policy_state.pt",
+      "sha256": "60ede9e41c5e03ac745d8e7cdc6c2cc5e88a42f68bf588fccd17f90c5906efb7",
+      "bytes": 4644985
+    },
+    "normalization": {
+      "path": "normalization.npz",
+      "sha256": "8befb6467a35added173196abeb4e7ebc98b02a799e97471b59db941d7787cd9",
+      "bytes": 20714
+    },
+    "reference_motion": {
+      "path": "reference/motion.npz",
+      "sha256": "8921f589f8470d25ab1dd0fa65f9b9057676ab122fdcc8d87f43d9c527ed461e",
+      "bytes": 1319693
+    },
+    "reference_meta": {
+      "path": "reference/meta.json",
+      "sha256": "dffeeed04f3001710bb8ab83061e8e1d1be256d9e2e35a4efa0c6011ae1d4105",
+      "bytes": 1765
+    },
+    "g1_asset": {
+      "path": "assets/g1.usd",
+      "sha256": "dc24fd9fb205be3c558c14015bde5e65827d8b28f5ef536889dd2ca101780912",
+      "bytes": 20817173
+    },
+    "box_asset": {
+      "path": "assets/box.usd",
+      "sha256": "5c299ef74daeaebe1e5be13edc0f8e2352cb9da2f09600b919d89a08a9e2147e",
+      "bytes": 8745
+    },
+    "parity": {
+      "path": "parity/source_outputs.npz",
+      "sha256": "0a8fb9edef67906116c05c9126363eb327b41f32188fc8019683f1f1a90540fa",
+      "bytes": 39530
+    },
+    "observation_contract": {
+      "path": "observation_contract.json",
+      "sha256": "cfaa9ce69d3f95c777603ba585f5921c82c74332d69293f24d3f284f804b0274",
+      "bytes": 3710
+    },
+    "action_contract": {
+      "path": "action_contract.json",
+      "sha256": "5872ac8ec3832d598c31fd1ca4fb99ea586312024595d9b9aa615d7edde38c7e",
+      "bytes": 2865
+    },
+    "third_party": {
+      "path": "THIRD_PARTY.md",
+      "sha256": "9497d85979d126384f775f251d6b05bb88395abb2f854da520da1ad2248e248a",
+      "bytes": 515
+    }
+  },
+  "license": {
+    "status": "undocumented_in_source_checkout",
+    "redistribution": "prohibited_until_permissions_are_documented",
+    "notice": "THIRD_PARTY.md"
+  }
+}

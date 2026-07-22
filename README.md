@@ -62,11 +62,17 @@ The current code provides:
 - deterministic `ReferenceLibrary` persistence;
 - standalone frozen HDMI `phase=train` privileged-teacher artifact under
   `artifacts/scaffolds/hdmi_push_door_hand/v1`;
+- a second independently selectable push-box artifact under
+  `artifacts/scaffolds/hdmi_push_box/v1`, using the no-hand/eef-L G1 asset and
+  a rigid box;
+- manifest-driven observation and network dimensions for both tasks, including
+  the push-box `command[356]`, `policy[249]`, `object[10]`,
+  `privileged[1714]`, encoder input `1724`, and action `[23]` contract;
 - explicit 29-D canonical reference to audited 23-D action mapping, VecNorm,
   history/reset and JointPosition delay/alpha runtime;
-- independent PyTorch inference module, HDMI-source deterministic parity
-  fixture, import-isolation check, and an Isaac Lab G1 + articulated-door play
-  entry.
+- independent PyTorch inference module, per-task HDMI-source deterministic
+  parity fixtures, import-isolation checks, and a shared Isaac Lab play entry
+  for G1 + articulated door or G1 + rigid box.
 
 The current code does not yet provide:
 
@@ -90,6 +96,10 @@ docs/
 figures/
   somaforce_cross_pipeline.png
 artifacts/scaffolds/hdmi_push_door_hand/v1/
+  manifest.json
+  observation_contract.json
+  action_contract.json
+artifacts/scaffolds/hdmi_push_box/v1/
   manifest.json
   observation_contract.json
   action_contract.json
@@ -152,15 +162,17 @@ python -m compileall -q scripts somaforce_cross
 
 # materialize the local/private artifact (requires the trusted HDMI checkout)
 python scripts/export_pretrained_hdmi_scaffold.py \
-  --hdmi-root /inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/HDMI
+  --hdmi-root /inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/HDMI \
+  --task push_box --force
 
 # runtime checks without HDMI on PYTHONPATH
-env -u PYTHONPATH python scripts/verify_pretrained_hdmi_isolation.py
+env -u PYTHONPATH python scripts/verify_pretrained_hdmi_isolation.py --task push_box
 
 # standalone privileged simulation baseline, one G1 + articulated door
 python scripts/play_pretrained_hdmi_scaffold.py \
-  --headless --num-envs 1 --steps 540 \
-  --metrics-json artifacts/scaffolds/hdmi_push_door_hand/v1/rollout_metrics.json
+  --task push_box --case nominal --headless --num-envs 1 --steps 792 \
+  --require-progress 1.0 \
+  --metrics-json artifacts/scaffolds/hdmi_push_box/v1/rollout_metrics.json
 ```
 
 The play command reports `a_nom`, the 23-D action order, reference phase, door
@@ -173,6 +185,15 @@ The rollout is policy-driven: the environment receives the frozen teacher's
 `a_nom` exactly before the declared delay, smoothing, scaling, and joint-position
 control stages. Fixed-input action parity is validated to `1e-5`, but a matched
 closed-loop rollout against the complete HDMI environment is not yet claimed.
+
+Push-box rollout metrics always separate the physical box pose/displacement
+from the reference trajectory. GUI mode renders the physical USD normally; the
+translucent green reference box is hidden by default and can be enabled with
+`--show-reference-box` for trajectory debugging. It is never used as actual
+progress. The play entry exposes `--box-mass`, `--box-friction`,
+`--box-com-offset`, `--initial-object-xy`, `--initial-object-yaw`, and
+`--contact-target-offset`. Named `high_mass` and `high_friction` cases support
+repeatable scaffold-only mismatch smoke tests.
 
 For GUI playback, render occurs once per 50 Hz control step rather than once per
 physics substep. `--realtime --playback-rate 1.0` follows reference wall time;
