@@ -193,3 +193,53 @@ material. The manifest and `THIRD_PARTY.md` record HDMI and OMOMO provenance,
 citation requirements, checksums, and the remote material. HDMI/OMOMO code,
 weights, motion, and asset redistribution permissions remain unconfirmed, so
 the artifact is local/private-only.
+
+
+## Move-Largebox Validation (2026-07-22)
+
+The fourth artifact is `artifacts/scaffolds/hdmi_move_largebox/v1` under
+contract `hdmi_move_largebox_teacher_v1`. It is a frozen HDMI `phase=train`
+privileged teacher for local simulation research, not a deployable policy. The
+source checkout was dirty; resolved run config, checkpoint tensors, asset
+metadata, and the fixed-input source oracle are recorded in the manifest.
+
+```bash
+/opt/miniconda3/envs/isaaclab/bin/python scripts/export_pretrained_hdmi_scaffold.py \
+  --hdmi-root /inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/HDMI \
+  --task move_largebox --force
+env -u PYTHONPATH /opt/miniconda3/envs/isaaclab/bin/python \
+  scripts/verify_pretrained_hdmi_isolation.py --task move_largebox
+/opt/miniconda3/envs/isaaclab/bin/python -m pytest -q
+/opt/miniconda3/envs/isaaclab/bin/python -m compileall -q somaforce_cross scripts tests
+
+env PYTHONUNBUFFERED=1 /opt/miniconda3/envs/isaaclab/bin/python \
+  scripts/play_pretrained_hdmi_scaffold.py --task move_largebox --case nominal \
+  --headless --num-envs 1 --steps 199 --require-progress 0.5 \
+  --require-contact-fraction 0.5 \
+  --metrics-json artifacts/scaffolds/hdmi_move_largebox/v1/rollout_metrics.json
+# Repeat with --case light, --case heavy, and --case stress.
+```
+
+Export parity was `0.0`; isolated loading with HDMI imports blocked produced
+`[1,23]`, frozen/eval output with maximum error `2.3841858e-7`. The canonical
+`policy_state.pt` loads with `weights_only=True` and contains only tensor state.
+All physical progress below comes from the standalone Isaac object pose.
+
+| Case | kg | Steps | Lift m | XY m | Ref path | Final error | Both hands | Wrist max L/R N | Root min | Outcome |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| nominal | 1.0 | 199 | 0.2762 | 1.5107 | 99.71% | 0.1823 m | 100% | 83.29 / 92.93 | 0.5418 | placed, stable |
+| light | 0.8 | 199 | 0.2797 | 1.5432 | 99.71% | 0.1510 m | 100% | 76.60 / 175.75 | 0.5457 | placed, stable |
+| heavy | 1.2 | 199 | 0.1761 | 1.5017 | 99.71% | 0.1942 m | 100% | 59.03 / 81.72 | 0.5539 | placed, stable |
+| stress | 2.0 | 199 | 0.1292 | 1.4486 | 99.71% | 0.2321 m | 100% | 47.33 / 78.72 | 0.5380 | placed, degraded lift/error |
+
+All cases had `nonfinite_count=0`, exact zero-hook equality, and no fall or
+early terminated state. The 2.0 kg out-of-range diagnostic remains stable but
+shows reduced lift and larger final error than nominal, providing a bounded
+load-mismatch signal without policy training. The source 1280x720, 50 FPS,
+250-frame video supports only single-episode nominal feasibility.
+
+The standalone asset closure contains the original largebox URDF and local OBJ
+visual/collision mesh; the manifest hashes both. HDMI and OMOMO attribution is
+required. Code, weights, motion, robot geometry, URDF/OBJ, and video
+redistribution permissions remain undocumented, so the artifact is explicitly
+local/private-only.

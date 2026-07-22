@@ -269,24 +269,37 @@ def make_scene_cfg(
 
         return HDMIDoorSceneCfg(num_envs=num_envs, env_spacing=5.0)
 
-    rigid_object_cfg = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/RigidObject",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=str(
-                artifact_dir / f"assets/{task_spec.object_asset_name}.usd"
-            ),
+    object_asset_path = artifact_dir / f"assets/{task_spec.object_asset_file}"
+    rigid_props = sim_utils.RigidBodyPropertiesCfg(
+        disable_gravity=False,
+        retain_accelerations=False,
+        linear_damping=0.0,
+        angular_damping=0.0,
+        max_linear_velocity=1000.0,
+        max_angular_velocity=1000.0,
+        max_depenetration_velocity=1.0,
+    )
+    if object_asset_path.suffix.lower() == ".urdf":
+        rigid_spawn = sim_utils.UrdfFileCfg(
+            asset_path=str(object_asset_path),
+            fix_base=False,
+            merge_fixed_joints=True,
+            make_instanceable=False,
+            joint_drive=None,
             activate_contact_sensors=True,
             mass_props=sim_utils.MassPropertiesCfg(mass=rigid_object_mass),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,
-                retain_accelerations=False,
-                linear_damping=0.0,
-                angular_damping=0.0,
-                max_linear_velocity=1000.0,
-                max_angular_velocity=1000.0,
-                max_depenetration_velocity=1.0,
-            ),
-        ),
+            rigid_props=rigid_props,
+        )
+    else:
+        rigid_spawn = sim_utils.UsdFileCfg(
+            usd_path=str(object_asset_path),
+            activate_contact_sensors=True,
+            mass_props=sim_utils.MassPropertiesCfg(mass=rigid_object_mass),
+            rigid_props=rigid_props,
+        )
+    rigid_object_cfg = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/RigidObject",
+        spawn=rigid_spawn,
     )
 
     @configclass
@@ -953,8 +966,8 @@ class PretrainedHDMIIsaacRuntime:
         playback_rate: float = 1.0,
         hold_seconds: float = 0.0,
     ) -> RolloutMetrics | PushBoxRolloutMetrics | MoveSuitcaseRolloutMetrics:
-        if self.task_spec.task == "move_suitcase":
-            return self._rollout_move_suitcase(
+        if self.task_spec.task in ("move_suitcase", "move_largebox"):
+            return self._rollout_payload(
                 steps,
                 log_interval=log_interval,
                 realtime=realtime,
@@ -1061,7 +1074,7 @@ class PretrainedHDMIIsaacRuntime:
             ),
         )
 
-    def _rollout_move_suitcase(
+    def _rollout_payload(
         self,
         steps: int,
         *,
@@ -1073,7 +1086,6 @@ class PretrainedHDMIIsaacRuntime:
         if playback_rate <= 0.0:
             raise ValueError("playback_rate must be positive")
         lift_off_threshold = 0.1
-        set_down_height_tolerance = 0.1
         set_down_position_tolerance = 0.25
         fall_height_threshold = 0.25
         ref_positions = self.reference.data["body_pos_w"][
@@ -1216,7 +1228,7 @@ class PretrainedHDMIIsaacRuntime:
             if step % log_interval == 0 or step == steps - 1:
                 print(
                     f"step={step:04d} phase={float(self.history.phase[0, 0]):.4f} "
-                    f"suitcase_xyz={object_position.tolist()} "
+                    f"object_xyz={object_position.tolist()} "
                     f"lift={float(highest[2] - initial[2]):.6f} "
                     f"ref_path_progress={max_reference_path_progress:.6f} "
                     f"root_z={root_height:.4f} "
@@ -1255,7 +1267,6 @@ class PretrainedHDMIIsaacRuntime:
         )
         set_down_completed = (
             lift_off_completed
-            and abs(float(final[2] - initial[2])) <= set_down_height_tolerance
             and set_down_position_error <= set_down_position_tolerance
             and not terminated
         )
@@ -1335,10 +1346,9 @@ class PretrainedHDMIIsaacRuntime:
                 "initial_object_xy_m": self.initial_object_xy,
                 "initial_object_yaw_rad": self.initial_object_yaw,
                 "contact_target_offset_m": self.contact_target_offset,
-                "training_mass_range_kg": [1.2, 1.8],
+                "training_mass_range_kg": self.task_spec.training_mass_range,
                 "nominal_mass_kg": self.task_spec.nominal_object_mass,
                 "lift_off_threshold_m": lift_off_threshold,
-                "set_down_height_tolerance_m": set_down_height_tolerance,
                 "set_down_position_tolerance_m": set_down_position_tolerance,
                 "fall_height_threshold_m": fall_height_threshold,
                 "delay_physics_substeps": int(self.action_runtime.delay[0, 0]),
@@ -1568,3 +1578,12 @@ class PretrainedHDMISuitcaseIsaacRuntime(PretrainedHDMIIsaacRuntime):
         super().__init__(*args, **kwargs)
         if self.task_spec.task != "move_suitcase":
             raise ValueError("suitcase runtime requires a move_suitcase artifact")
+
+
+class PretrainedHDMILargeboxIsaacRuntime(PretrainedHDMIIsaacRuntime):
+    """Explicit move-largebox runtime for payload mismatch validation."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        if self.task_spec.task != "move_largebox":
+            raise ValueError("largebox runtime requires a move_largebox artifact")

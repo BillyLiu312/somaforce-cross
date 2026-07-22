@@ -20,9 +20,10 @@ frozen policy trained with the official HDMI implementation
 ```
 
 The implemented scope includes independently selectable G1 `push_door-hand`,
-G1 `push_box`, and G1 `move_suitcase` frozen artifacts. The canonical reference library remains
-useful for replay, diagnostics, future tasks, and OMOMO payload work, but
-canonical reference conversion is not the trained policy scaffold.
+G1 `push_box`, G1 `move_suitcase`, and G1 `move_largebox` frozen artifacts. The
+canonical reference library remains useful for replay, diagnostics, future
+tasks, and OMOMO payload work, but canonical reference conversion is not the
+trained policy scaffold.
 
 ## Research Attribution
 
@@ -157,6 +158,33 @@ category is `HEAVY_PAYLOAD`; nominal mass is 1.5 kg within the 1.2-1.8 kg
 training range. Both the 29-D reference and Isaac articulation are mapped by
 joint name. Six wrist joints are not policy actions; the initial left/right
 wrist-yaw defaults are -0.4/+0.4 radians.
+
+The move-largebox source was audited from the dirty local HDMI checkout at
+revision `32282f6dcf26cae70b814d585ceb12cc38aa1b60`. The resolved run config,
+checkpoint tensor shapes, asset metadata, and fixed-input HDMI source oracle are
+the authorities because no run-saved policy source was available. Key checksums
+are:
+
+```text
+checkpoint: a4c33009a756c3e29d2d389061eaa96926ab1c868aceaa9f8bc810e4ef98504d
+config:     10f222bf5b9170fd316e5071d9e9150cd02b865be2b7f1bbc332a808be1aa678
+asset_meta: 400425d1137027eb82de4ba1c92bcab7cdfae69defd09a97895d3f2e3b457258
+G1 USD:     faf4d267a7a93fd16186e77e4c2802aa8ea977b5bb971b72fa63dee99c33200d
+URDF:       e3281a96e9b6aff6988ae4fc6d219f61751bebdc4a4628ae3045eeb4e9aa99c4
+OBJ:        dbcc11281f62e9226f49165252375080d2e490e5a3f0ab6ba917acbd8f7abc1c
+motion:     1e79ff64f495200afb4830468a3a050328f835a6b7e0c336a874722f8849d941
+motion meta:da27c333286a6718e51198b7321f369b4633e808ca3c7a441a1b478c1e8f1a99
+video:      01594f429ecd9a68c93da8183ac43218e412579b4b06034b5ab06a77d8f5bdd7
+```
+
+Its contract is `command[356]`, `policy[249]`, `object[10]`,
+`privileged[1714]`, encoder input `1724`, actor input `861`, and normalized
+action `[23]`. The 199-frame, 50 Hz reference has 29 named joints, two wrist
+contact targets, a 1.0 kg nominal mass, and a 0.8-1.2 kg training mass range.
+The source video is one 250-frame nominal episode, not a robustness estimate.
+The artifact is an HDMI-derived privileged simulation teacher and remains
+local/private-only because weight, motion, robot, URDF, and OBJ redistribution
+permissions are undocumented.
 
 ## Current Checkpoint Facts
 
@@ -318,6 +346,13 @@ that material is unavailable. The original USD is preserved; no local material
 conversion is claimed. Cite HDMI and OMOMO, and keep the artifact local/private
 until code, motion, weights, robot/object asset, and OMOMO redistribution rights
 are confirmed.
+
+The move-largebox artifact uses
+`artifacts/scaffolds/hdmi_move_largebox/v1` with `assets/largebox.urdf`, its
+local `assets/largebox.obj` visual/collision mesh, and the same rubber-hand G1
+USD hash. Isaac Lab imports the URDF from the standalone artifact; no source
+path is resolved at runtime. Cite HDMI and OMOMO, and keep the full artifact
+local/private until all redistribution permissions are documented.
 
 Large artifacts may remain outside Git and be materialized by an authorized
 download/install step. The manifest and schemas should remain versioned in Git.

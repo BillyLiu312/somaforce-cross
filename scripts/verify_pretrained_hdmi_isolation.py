@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--task",
-        choices=("push_door_hand", "push_box", "move_suitcase"),
+        choices=("push_door_hand", "push_box", "move_suitcase", "move_largebox"),
         default="push_door_hand",
     )
     parser.add_argument("--artifact", type=Path)

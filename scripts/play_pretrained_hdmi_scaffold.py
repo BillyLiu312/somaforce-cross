@@ -23,7 +23,7 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument(
     "--task",
-    choices=("push_door_hand", "push_box", "move_suitcase"),
+    choices=("push_door_hand", "push_box", "move_suitcase", "move_largebox"),
     default="push_door_hand",
 )
 parser.add_argument("--artifact", type=Path)
@@ -129,7 +129,7 @@ def main() -> int:
     sim = SimulationContext(sim_cfg)
     if args.task == "push_box":
         sim.set_camera_view(eye=(3.0, 6.0, 2.0), target=(0.0, 3.0, 0.6))
-    elif args.task == "move_suitcase":
+    elif args.task in ("move_suitcase", "move_largebox"):
         sim.set_camera_view(eye=(2.0, -3.0, 2.0), target=(0.0, -1.0, 0.5))
     else:
         sim.set_camera_view(eye=(3.0, 2.0, 1.0), target=(0.5, -2.5, 0.8))
@@ -145,6 +145,14 @@ def main() -> int:
             "heavy": (3.0, 0.55),
             "stress": (5.5, 0.55),
             "custom": (1.5, 0.55),
+        }
+    elif args.task == "move_largebox":
+        case_defaults = {
+            "nominal": (1.0, 0.55),
+            "light": (0.8, 0.55),
+            "heavy": (1.2, 0.55),
+            "stress": (2.0, 0.55),
+            "custom": (1.0, 0.55),
         }
     else:
         case_defaults = {
@@ -166,6 +174,7 @@ def main() -> int:
         "push_door_hand": 540,
         "push_box": 792,
         "move_suitcase": 472,
+        "move_largebox": 199,
     }
     steps = args.steps if args.steps is not None else default_steps[args.task]
     runtime = PretrainedHDMIIsaacRuntime(
@@ -202,15 +211,15 @@ def main() -> int:
     print("ROLL_OUT_METRICS=" + json.dumps(payload, sort_keys=True))
     if args.metrics_json is not None:
         args.metrics_json.parent.mkdir(parents=True, exist_ok=True)
-        if args.task == "move_suitcase":
+        if args.task in ("move_suitcase", "move_largebox"):
             aggregate = {
-                "task": "move_suitcase",
+                "task": args.task,
                 "role": "privileged_simulation_baseline_not_deployable",
                 "cases": {},
             }
             if args.metrics_json.is_file():
                 existing = json.loads(args.metrics_json.read_text(encoding="utf-8"))
-                if existing.get("task") == "move_suitcase" and isinstance(
+                if existing.get("task") == args.task and isinstance(
                     existing.get("cases"), dict
                 ):
                     aggregate = existing
@@ -222,7 +231,7 @@ def main() -> int:
             args.metrics_json.write_text(
                 json.dumps(payload, indent=2) + "\n", encoding="utf-8"
             )
-    if args.task == "move_suitcase":
+    if args.task in ("move_suitcase", "move_largebox"):
         numerically_valid = metrics.nonfinite_count == 0 and metrics.zero_hook_exact
         if args.case == "nominal":
             passed = (

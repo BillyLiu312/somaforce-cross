@@ -68,7 +68,10 @@ The current code provides:
 - an independently selectable move-suitcase artifact under
   `artifacts/scaffolds/hdmi_move_suitcase/v1`, using the shared rubber-hand G1
   asset, a rigid suitcase, and a 472-frame OMOMO-derived HDMI reference;
-- manifest-driven observation and network dimensions for both tasks, including
+- an independently selectable move-largebox artifact under
+  `artifacts/scaffolds/hdmi_move_largebox/v1`, using the shared rubber-hand G1,
+  a local URDF/OBJ rigid object, and a 199-frame OMOMO-derived HDMI reference;
+- manifest-driven observation and network dimensions for all tasks, including
   the push-box `command[356]`, `policy[249]`, `object[10]`,
   `privileged[1714]`, encoder input `1724`, and action `[23]` contract;
 - explicit 29-D canonical reference to audited 23-D action mapping, VecNorm,
@@ -107,6 +110,11 @@ artifacts/scaffolds/hdmi_push_box/v1/
   observation_contract.json
   action_contract.json
 artifacts/scaffolds/hdmi_move_suitcase/v1/
+  manifest.json
+  observation_contract.json
+  action_contract.json
+  rollout_metrics.json
+artifacts/scaffolds/hdmi_move_largebox/v1/
   manifest.json
   observation_contract.json
   action_contract.json
@@ -176,11 +184,17 @@ python scripts/export_pretrained_hdmi_scaffold.py \
 # runtime checks without HDMI on PYTHONPATH
 env -u PYTHONPATH python scripts/verify_pretrained_hdmi_isolation.py --task move_suitcase
 
-# standalone privileged simulation baseline, one G1 + articulated door
+# standalone privileged payload baseline
 python scripts/play_pretrained_hdmi_scaffold.py \
   --task move_suitcase --case nominal --headless --num-envs 1 --steps 472 \
   --require-progress 0.5 --require-contact-fraction 0.9 \
   --metrics-json artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics.json
+
+# migrated large-box baseline; use light/heavy/stress for the mass matrix
+python scripts/play_pretrained_hdmi_scaffold.py \
+  --task move_largebox --case nominal --headless --num-envs 1 --steps 199 \
+  --require-progress 0.5 --require-contact-fraction 0.5 \
+  --metrics-json artifacts/scaffolds/hdmi_move_largebox/v1/rollout_metrics.json
 ```
 
 The play command reports `a_nom`, the 23-D action order, reference phase, door
@@ -208,6 +222,14 @@ rollout. Cases `nominal`, `light`, `heavy`, and `stress` use 1.5, 0.5, 3.0,
 and 5.5 kg without changing the frozen policy. Each run merges the same lift,
 carry, set-down, contact, support, action, finite-state, and zero-hook fields
 into `artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics.json`.
+
+Move-largebox uses the same manifest-driven payload runtime with a local
+URDF/OBJ asset closure. Its 199-step cases `nominal`, `light`, `heavy`, and
+`stress` use 1.0, 0.8, 1.2, and 2.0 kg. The first three cover the nominal and
+training mass range; the last is a bounded out-of-range diagnostic. Physical
+object lift, displacement, final tracking error, two-hand contact, stability,
+and zero-hook evidence are merged into
+`artifacts/scaffolds/hdmi_move_largebox/v1/rollout_metrics.json`.
 
 For GUI playback, render occurs once per 50 Hz control step rather than once per
 physics substep. `--realtime --playback-rate 1.0` follows reference wall time;

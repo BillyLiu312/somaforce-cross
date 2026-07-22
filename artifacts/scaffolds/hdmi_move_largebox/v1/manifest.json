@@ -1,0 +1,308 @@
+{
+  "artifact_version": "1.0.0-local",
+  "task": "move_largebox",
+  "contract_version": "hdmi_move_largebox_teacher_v1",
+  "observation_dims": {
+    "command": 356,
+    "policy": 249,
+    "object": 10,
+    "privileged": 1714,
+    "reference_action": 23
+  },
+  "network_contract": {
+    "privileged_encoder_input_dim": 1724,
+    "privileged_hidden_dim": 256,
+    "actor_input_dim": 861,
+    "actor_hidden_dims": [
+      512,
+      256,
+      256
+    ],
+    "action_dim": 23
+  },
+  "task_contract": {
+    "research_category": "heavy_payload",
+    "action_joint_names": [
+      "left_hip_pitch_joint",
+      "right_hip_pitch_joint",
+      "waist_yaw_joint",
+      "left_hip_roll_joint",
+      "right_hip_roll_joint",
+      "waist_roll_joint",
+      "left_hip_yaw_joint",
+      "right_hip_yaw_joint",
+      "waist_pitch_joint",
+      "left_knee_joint",
+      "right_knee_joint",
+      "left_shoulder_pitch_joint",
+      "right_shoulder_pitch_joint",
+      "left_ankle_pitch_joint",
+      "right_ankle_pitch_joint",
+      "left_shoulder_roll_joint",
+      "right_shoulder_roll_joint",
+      "left_ankle_roll_joint",
+      "right_ankle_roll_joint",
+      "left_shoulder_yaw_joint",
+      "right_shoulder_yaw_joint",
+      "left_elbow_joint",
+      "right_elbow_joint"
+    ],
+    "action_scale": [
+      0.55,
+      0.55,
+      0.55,
+      0.35,
+      0.35,
+      0.44,
+      0.55,
+      0.55,
+      0.44,
+      0.35,
+      0.35,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44,
+      0.44
+    ],
+    "object_kind": "rigid_object",
+    "object_asset_name": "largebox",
+    "object_asset_file": "largebox.urdf",
+    "object_body_name": "largebox_link",
+    "contact_target_offsets": [
+      [
+        -0.027635,
+        0.244158,
+        0.099234
+      ],
+      [
+        0.198793,
+        -0.151816,
+        0.149164
+      ]
+    ],
+    "contact_eef_names": [
+      "left_wrist_yaw_link",
+      "right_wrist_yaw_link"
+    ],
+    "contact_eef_offsets": [
+      [
+        0.05,
+        0.0,
+        0.0
+      ],
+      [
+        0.05,
+        0.0,
+        0.0
+      ]
+    ],
+    "reference_joint_names": [
+      "left_hip_pitch_joint",
+      "left_hip_roll_joint",
+      "left_hip_yaw_joint",
+      "left_knee_joint",
+      "left_ankle_pitch_joint",
+      "left_ankle_roll_joint",
+      "right_hip_pitch_joint",
+      "right_hip_roll_joint",
+      "right_hip_yaw_joint",
+      "right_knee_joint",
+      "right_ankle_pitch_joint",
+      "right_ankle_roll_joint",
+      "waist_yaw_joint",
+      "waist_roll_joint",
+      "waist_pitch_joint",
+      "left_shoulder_pitch_joint",
+      "left_shoulder_roll_joint",
+      "left_shoulder_yaw_joint",
+      "left_elbow_joint",
+      "left_wrist_roll_joint",
+      "left_wrist_pitch_joint",
+      "left_wrist_yaw_joint",
+      "right_shoulder_pitch_joint",
+      "right_shoulder_roll_joint",
+      "right_shoulder_yaw_joint",
+      "right_elbow_joint",
+      "right_wrist_roll_joint",
+      "right_wrist_pitch_joint",
+      "right_wrist_yaw_joint"
+    ],
+    "robot_initial_joint_overrides": {
+      "left_wrist_yaw_joint": -0.4,
+      "right_wrist_yaw_joint": 0.4
+    },
+    "nominal_object_mass": 1.0,
+    "training_mass_range": [
+      0.8,
+      1.2
+    ]
+  },
+  "role": "frozen_hdmi_phase_train_privileged_teacher_simulation_baseline",
+  "deployable": false,
+  "exported_at_utc": "2026-07-22T09:30:06.802840+00:00",
+  "export_tool": "/inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/somaforce-cross/scripts/export_pretrained_hdmi_scaffold.py",
+  "source": {
+    "project": "HDMI",
+    "revision": "32282f6dcf26cae70b814d585ceb12cc38aa1b60",
+    "worktree_dirty": true,
+    "worktree_status_sha256": "0c30b49a6f8bf6b9f94d5f459c970e1da80539c0a279ac4b3fd9c51827627924",
+    "source_files": {
+      "checkpoint": {
+        "path": "outputs/move_largebox/hdmi-move-largebox-resume-final-4gpu-20260722_143803/rank_0/checkpoint_final.pt",
+        "sha256": "a4c33009a756c3e29d2d389061eaa96926ab1c868aceaa9f8bc810e4ef98504d",
+        "bytes": 15114129
+      },
+      "resolved_config": {
+        "path": "outputs/move_largebox/hdmi-move-largebox-resume-final-4gpu-20260722_143803/rank_0/.hydra/config.yaml",
+        "sha256": "10f222bf5b9170fd316e5071d9e9150cd02b865be2b7f1bbc332a808be1aa678",
+        "bytes": 12857
+      },
+      "asset_meta": {
+        "path": "outputs/move_largebox/hdmi-move-largebox-resume-final-4gpu-20260722_143803/rank_0/asset_meta.json",
+        "sha256": "400425d1137027eb82de4ba1c92bcab7cdfae69defd09a97895d3f2e3b457258",
+        "bytes": 12432
+      },
+      "motion": {
+        "path": "data/motion/g1/omomo/sub10_largebox_014/motion.npz",
+        "sha256": "1e79ff64f495200afb4830468a3a050328f835a6b7e0c336a874722f8849d941",
+        "bytes": 322379
+      },
+      "motion_meta": {
+        "path": "data/motion/g1/omomo/sub10_largebox_014/meta.json",
+        "sha256": "da27c333286a6718e51198b7321f369b4633e808ca3c7a441a1b478c1e8f1a99",
+        "bytes": 1663
+      },
+      "g1_asset": {
+        "path": "active_adaptation/assets/g1/g1_29dof_rubberhand-feet_sphere-eef_box-body_capsule.usd",
+        "sha256": "faf4d267a7a93fd16186e77e4c2802aa8ea977b5bb971b72fa63dee99c33200d",
+        "bytes": 27246027
+      },
+      "object_asset": {
+        "path": "active_adaptation/assets/objects/largebox/largebox.urdf",
+        "sha256": "e3281a96e9b6aff6988ae4fc6d219f61751bebdc4a4628ae3045eeb4e9aa99c4",
+        "bytes": 901
+      },
+      "task_config": {
+        "path": "cfg/task/G1/hdmi/move_largebox.yaml",
+        "sha256": "0eed880acf7b04968739ae19c62f382ee76b9bd8cbfffedecaf0d2ce71d7c6f6",
+        "bytes": 1045
+      },
+      "object_mesh": {
+        "path": "active_adaptation/assets/objects/largebox/largebox.obj",
+        "sha256": "dbcc11281f62e9226f49165252375080d2e490e5a3f0ab6ba917acbd8f7abc1c",
+        "bytes": 1998275
+      },
+      "reference_video": {
+        "path": "scripts/recording-07-22_15-16.mp4",
+        "sha256": "01594f429ecd9a68c93da8183ac43218e412579b4b06034b5ab06a77d8f5bdd7",
+        "bytes": 631433
+      }
+    },
+    "checkpoint_sha256": "a4c33009a756c3e29d2d389061eaa96926ab1c868aceaa9f8bc810e4ef98504d",
+    "resolved_config_sha256": "10f222bf5b9170fd316e5071d9e9150cd02b865be2b7f1bbc332a808be1aa678",
+    "asset_meta_sha256": "400425d1137027eb82de4ba1c92bcab7cdfae69defd09a97895d3f2e3b457258",
+    "motion_sha256": "1e79ff64f495200afb4830468a3a050328f835a6b7e0c336a874722f8849d941",
+    "motion_meta_sha256": "da27c333286a6718e51198b7321f369b4633e808ca3c7a441a1b478c1e8f1a99",
+    "g1_asset_sha256": "faf4d267a7a93fd16186e77e4c2802aa8ea977b5bb971b72fa63dee99c33200d",
+    "largebox_asset_sha256": "e3281a96e9b6aff6988ae4fc6d219f61751bebdc4a4628ae3045eeb4e9aa99c4",
+    "reference_video_sha256": "01594f429ecd9a68c93da8183ac43218e412579b4b06034b5ab06a77d8f5bdd7"
+  },
+  "checkpoint_audit": {
+    "checked_tensor_parameter_count": 72,
+    "forbidden_parameter_paths": [],
+    "run_saved_policy_source_checked": false,
+    "passed": true,
+    "policy_structure_authority": "checkpoint tensor shapes"
+  },
+  "oracle_parity": {
+    "backend": "HDMI active_adaptation make_mlp + Actor deterministic mean",
+    "batch_size": 4,
+    "seed": 20260721,
+    "max_abs_action_error": 0.0,
+    "tolerance": 1e-05
+  },
+  "material_dependencies": [],
+  "reference_origin": {
+    "project": "OMOMO",
+    "integration_source": "HDMI data/motion/g1/omomo/sub10_largebox_014",
+    "citation_required": true,
+    "redistribution_permission": "not_confirmed"
+  },
+  "object_asset_validation": {
+    "source_format": "URDF with local OBJ visual and collision mesh",
+    "local_geometry": true,
+    "local_collision": true,
+    "runtime_mass_override_preserves_inertia_scaling": true,
+    "remote_dependencies": []
+  },
+  "files": {
+    "policy": {
+      "path": "policy_state.pt",
+      "sha256": "ef768885e23277d5513e186892f9a902f427fe05963f5165015ecac3c5885da8",
+      "bytes": 4644985
+    },
+    "normalization": {
+      "path": "normalization.npz",
+      "sha256": "7fed86ad452ad1708c22326595e948b6fdafd46a4435438fe559028b25f22559",
+      "bytes": 20714
+    },
+    "reference_motion": {
+      "path": "reference/motion.npz",
+      "sha256": "1e79ff64f495200afb4830468a3a050328f835a6b7e0c336a874722f8849d941",
+      "bytes": 322379
+    },
+    "reference_meta": {
+      "path": "reference/meta.json",
+      "sha256": "da27c333286a6718e51198b7321f369b4633e808ca3c7a441a1b478c1e8f1a99",
+      "bytes": 1663
+    },
+    "g1_asset": {
+      "path": "assets/g1.usd",
+      "sha256": "faf4d267a7a93fd16186e77e4c2802aa8ea977b5bb971b72fa63dee99c33200d",
+      "bytes": 27246027
+    },
+    "largebox_asset": {
+      "path": "assets/largebox.urdf",
+      "sha256": "e3281a96e9b6aff6988ae4fc6d219f61751bebdc4a4628ae3045eeb4e9aa99c4",
+      "bytes": 901
+    },
+    "parity": {
+      "path": "parity/source_outputs.npz",
+      "sha256": "e666e93c7f71a8215f68796d0829eeccd7d9b9783334eaeca31d0812c25f0134",
+      "bytes": 39530
+    },
+    "observation_contract": {
+      "path": "observation_contract.json",
+      "sha256": "1648fdd4961f6db04541981ea6932044e8ef0a2cae84a77055c0ad39130c497f",
+      "bytes": 3715
+    },
+    "action_contract": {
+      "path": "action_contract.json",
+      "sha256": "c18b814adce75cd743c17740c565d3a3851e6da8b8c8d882ea7c1932adf42ac5",
+      "bytes": 3106
+    },
+    "third_party": {
+      "path": "THIRD_PARTY.md",
+      "sha256": "4060338b07d4f507d1dac8e44661699ed10f0dba278e085ae248d0ca14ce2b03",
+      "bytes": 894
+    },
+    "largebox_mesh": {
+      "path": "assets/largebox.obj",
+      "sha256": "dbcc11281f62e9226f49165252375080d2e490e5a3f0ab6ba917acbd8f7abc1c",
+      "bytes": 1998275
+    }
+  },
+  "license": {
+    "status": "undocumented_in_source_checkout",
+    "redistribution": "prohibited_until_permissions_are_documented",
+    "notice": "THIRD_PARTY.md"
+  }
+}

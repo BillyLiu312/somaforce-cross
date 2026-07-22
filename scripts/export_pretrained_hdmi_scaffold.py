@@ -108,6 +108,42 @@ SOURCE_SPECS = {
             "evaluation_evidence": "48e88c04cda00b8dbd3249c707289af57e8443d8c9b3f2d1363d40c06d549413",
         },
     },
+    "move_largebox": {
+        "checkpoint": "outputs/move_largebox/hdmi-move-largebox-resume-final-4gpu-20260722_143803/rank_0/checkpoint_final.pt",
+        "resolved_config": "outputs/move_largebox/hdmi-move-largebox-resume-final-4gpu-20260722_143803/rank_0/.hydra/config.yaml",
+        "asset_meta": "outputs/move_largebox/hdmi-move-largebox-resume-final-4gpu-20260722_143803/rank_0/asset_meta.json",
+        "motion_dir": "data/motion/g1/omomo/sub10_largebox_014",
+        "g1_asset": "active_adaptation/assets/g1/g1_29dof_rubberhand-feet_sphere-eef_box-body_capsule.usd",
+        "object_asset": "active_adaptation/assets/objects/largebox/largebox.urdf",
+        "object_mesh": "active_adaptation/assets/objects/largebox/largebox.obj",
+        "task_config": "cfg/task/G1/hdmi/move_largebox.yaml",
+        "reference_video": "scripts/recording-07-22_15-16.mp4",
+        "reference_origin": {
+            "project": "OMOMO",
+            "integration_source": "HDMI data/motion/g1/omomo/sub10_largebox_014",
+            "citation_required": True,
+            "redistribution_permission": "not_confirmed",
+        },
+        "object_asset_validation": {
+            "source_format": "URDF with local OBJ visual and collision mesh",
+            "local_geometry": True,
+            "local_collision": True,
+            "runtime_mass_override_preserves_inertia_scaling": True,
+            "remote_dependencies": [],
+        },
+        "checksums": {
+            "checkpoint": "a4c33009a756c3e29d2d389061eaa96926ab1c868aceaa9f8bc810e4ef98504d",
+            "resolved_config": "10f222bf5b9170fd316e5071d9e9150cd02b865be2b7f1bbc332a808be1aa678",
+            "asset_meta": "400425d1137027eb82de4ba1c92bcab7cdfae69defd09a97895d3f2e3b457258",
+            "g1_asset": "faf4d267a7a93fd16186e77e4c2802aa8ea977b5bb971b72fa63dee99c33200d",
+            "object_asset": "e3281a96e9b6aff6988ae4fc6d219f61751bebdc4a4628ae3045eeb4e9aa99c4",
+            "object_mesh": "dbcc11281f62e9226f49165252375080d2e490e5a3f0ab6ba917acbd8f7abc1c",
+            "motion": "1e79ff64f495200afb4830468a3a050328f835a6b7e0c336a874722f8849d941",
+            "motion_meta": "da27c333286a6718e51198b7321f369b4633e808ca3c7a441a1b478c1e8f1a99",
+            "task_config": "0eed880acf7b04968739ae19c62f382ee76b9bd8cbfffedecaf0d2ce71d7c6f6",
+            "reference_video": "01594f429ecd9a68c93da8183ac43218e412579b4b06034b5ab06a77d8f5bdd7",
+        },
+    },
 }
 
 
@@ -427,6 +463,7 @@ def main() -> None:
         "run_saved_policy",
         "task_config",
         "evaluation_evidence",
+        "object_mesh",
     ):
         if optional_name in source_spec:
             sources[optional_name] = hdmi_root / str(source_spec[optional_name])
@@ -472,8 +509,12 @@ def main() -> None:
     shutil.copy2(sources["motion"], output / "reference/motion.npz")
     shutil.copy2(sources["motion_meta"], output / "reference/meta.json")
     shutil.copy2(sources["g1_asset"], output / "assets/g1.usd")
-    object_asset_path = output / f"assets/{task_spec.object_asset_name}.usd"
+    object_asset_path = output / f"assets/{task_spec.object_asset_file}"
     shutil.copy2(sources["object_asset"], object_asset_path)
+    object_mesh_path = None
+    if "object_mesh" in sources:
+        object_mesh_path = output / f"assets/{sources['object_mesh'].name}"
+        shutil.copy2(sources["object_mesh"], object_mesh_path)
 
     reference_meta = json.loads(sources["motion_meta"].read_text(encoding="utf-8"))
     reference_joint_names = tuple(reference_meta["joint_names"])
@@ -636,6 +677,15 @@ and headless collision/mass/inertia validation does not require that material
 to resolve. Neither HDMI nor OMOMO redistribution rights were established in
 this export, so this complete artifact remains local/private-only.
 """
+    elif task_spec.task == "move_largebox":
+        third_party += """
+
+The large-box reference originates from the OMOMO-derived motion shipped in the
+HDMI checkout. Cite both HDMI and OMOMO. The local object scene consists of an
+HDMI URDF and its OBJ visual/collision mesh. No HDMI, OMOMO, checkpoint, motion,
+robot-asset, URDF, or OBJ redistribution permission was established by this
+export, so the complete artifact remains local/private-only.
+"""
     (output / "THIRD_PARTY.md").write_text(third_party, encoding="utf-8")
 
     materialized = {
@@ -650,6 +700,8 @@ this export, so this complete artifact remains local/private-only.
         "action_contract": output / "action_contract.json",
         "third_party": output / "THIRD_PARTY.md",
     }
+    if object_mesh_path is not None:
+        materialized[f"{task_spec.object_asset_name}_mesh"] = object_mesh_path
     dirty = bool(git_output(hdmi_root, "status", "--porcelain"))
     dirty_status = git_output(hdmi_root, "status", "--porcelain")
     source_files = {
@@ -672,6 +724,7 @@ this export, so this complete artifact remains local/private-only.
             "action_scale": task_spec.action_scale,
             "object_kind": task_spec.object_kind,
             "object_asset_name": task_spec.object_asset_name,
+            "object_asset_file": task_spec.object_asset_file,
             "object_body_name": task_spec.object_body_name,
             "contact_target_offsets": task_spec.contact_target_offsets,
             "contact_eef_names": task_spec.contact_eef_names,
@@ -681,6 +734,7 @@ this export, so this complete artifact remains local/private-only.
                 task_spec.robot_initial_joint_overrides
             ),
             "nominal_object_mass": task_spec.nominal_object_mass,
+            "training_mass_range": task_spec.training_mass_range,
         },
         "role": "frozen_hdmi_phase_train_privileged_teacher_simulation_baseline",
         "deployable": False,

@@ -40,6 +40,10 @@ MOVE_SUITCASE_ARTIFACT = (
     Path(__file__).resolve().parents[1]
     / "artifacts/scaffolds/hdmi_move_suitcase/v1"
 )
+MOVE_LARGEBOX_ARTIFACT = (
+    Path(__file__).resolve().parents[1]
+    / "artifacts/scaffolds/hdmi_move_largebox/v1"
+)
 
 
 def test_audited_action_order_and_reference_mapping() -> None:
@@ -129,6 +133,29 @@ def test_move_suitcase_task_contract_and_reference_mapping() -> None:
     assert task_spec.contact_eef_offsets == (
         (0.05, 0.0, 0.0),
         (0.05, 0.0, 0.0),
+    )
+    source = torch.arange(29, dtype=torch.float32).unsqueeze(0)
+    selected = reference_to_action(
+        source, HDMI_REFERENCE_JOINT_NAMES, task_spec.action_joint_names
+    )
+    assert selected.shape == (1, 23)
+    assert selected.tolist()[0] == list(REFERENCE_TO_ACTION_INDICES)
+
+
+def test_move_largebox_task_contract_and_reference_mapping() -> None:
+    assert ScaffoldTask.MOVE_LARGEBOX.value == "move_largebox"
+    task_spec = get_hdmi_task_spec("move_largebox")
+    assert task_spec.research_category is ScaffoldTask.HEAVY_PAYLOAD
+    assert task_spec.observation_dims == MOVE_SUITCASE_OBSERVATION_DIMS
+    assert task_spec.network.privileged_encoder_input_dim == 1724
+    assert task_spec.object_asset_name == "largebox"
+    assert task_spec.object_asset_file == "largebox.urdf"
+    assert task_spec.object_body_name == "largebox_link"
+    assert task_spec.nominal_object_mass == 1.0
+    assert task_spec.training_mass_range == (0.8, 1.2)
+    assert task_spec.contact_target_offsets == (
+        (-0.027635, 0.244158, 0.099234),
+        (0.198793, -0.151816, 0.149164),
     )
     source = torch.arange(29, dtype=torch.float32).unsqueeze(0)
     selected = reference_to_action(
@@ -302,6 +329,47 @@ def test_move_suitcase_policy_contract_provenance_and_oracle_fixture() -> None:
 
 
 @pytest.mark.skipif(
+    not (MOVE_LARGEBOX_ARTIFACT / "manifest.json").is_file(),
+    reason="local HDMI move-largebox artifact not materialized",
+)
+def test_move_largebox_policy_contract_provenance_and_oracle_fixture() -> None:
+    scaffold = PretrainedHDMIScaffold.from_artifact(MOVE_LARGEBOX_ARTIFACT)
+    assert scaffold.task_spec.task == "move_largebox"
+    assert scaffold.task_spec.research_category is ScaffoldTask.HEAVY_PAYLOAD
+    assert scaffold.policy.priv_fc.in_features == 1724
+    assert scaffold.policy.actor_fc1.in_features == 861
+    assert scaffold.policy.actor_mean.out_features == 23
+    assert not scaffold.training and not scaffold.policy.training
+    assert all(not parameter.requires_grad for parameter in scaffold.parameters())
+
+    with np.load(
+        MOVE_LARGEBOX_ARTIFACT / "parity/source_outputs.npz", allow_pickle=False
+    ) as data:
+        observation = HDMIObservationBatch(
+            command=torch.from_numpy(data["command"]),
+            policy=torch.from_numpy(data["policy"]),
+            object=torch.from_numpy(data["object"]),
+            privileged=torch.from_numpy(data["privileged"]),
+            reference_action=torch.from_numpy(data["reference_action"]),
+        )
+        oracle = torch.from_numpy(data["oracle_action"])
+    actual = scaffold.nominal_action(observation)
+    assert actual.shape == (4, 23)
+    assert float((actual - oracle).abs().max()) <= 1e-5
+
+    manifest = json.loads(
+        (MOVE_LARGEBOX_ARTIFACT / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["checkpoint_audit"]["passed"] is True
+    assert manifest["task_contract"]["object_asset_file"] == "largebox.urdf"
+    assert manifest["task_contract"]["training_mass_range"] == [0.8, 1.2]
+    assert manifest["license"]["redistribution"] == (
+        "prohibited_until_permissions_are_documented"
+    )
+    assert (MOVE_LARGEBOX_ARTIFACT / "assets/largebox.obj").is_file()
+
+
+@pytest.mark.skipif(
     not (MOVE_SUITCASE_ARTIFACT / "rollout_metrics.json").is_file(),
     reason="local HDMI move-suitcase rollout evidence not materialized",
 )
@@ -327,6 +395,42 @@ def test_move_suitcase_mass_matrix_rollout_evidence() -> None:
     assert nominal["both_hand_contact_fraction"] > 0.99
     assert cases["heavy"]["set_down_completed"] is False
     assert cases["stress"]["termination_reason"] == "root_height_below_0.25m"
+
+
+@pytest.mark.skipif(
+    not (MOVE_LARGEBOX_ARTIFACT / "rollout_metrics.json").is_file(),
+    reason="local HDMI move-largebox rollout evidence not materialized",
+)
+def test_move_largebox_mass_matrix_rollout_evidence() -> None:
+    evidence = json.loads(
+        (MOVE_LARGEBOX_ARTIFACT / "rollout_metrics.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    cases = evidence["cases"]
+    assert list(cases) == ["nominal", "light", "heavy", "stress"]
+    assert {
+        name: case["settings"]["object_mass_kg"]
+        for name, case in cases.items()
+    } == {"nominal": 1.0, "light": 0.8, "heavy": 1.2, "stress": 2.0}
+    assert all(case["nonfinite_count"] == 0 for case in cases.values())
+    assert all(case["zero_hook_exact"] for case in cases.values())
+    assert all(case["steps"] == 199 for case in cases.values())
+    assert all(case["stable"] and not case["terminated"] for case in cases.values())
+    assert all(
+        cases[name]["lift_off_completed"] and cases[name]["set_down_completed"]
+        for name in ("nominal", "light", "heavy")
+    )
+    assert all(
+        cases[name]["both_hand_contact_fraction"] == 1.0 for name in cases
+    )
+    assert cases["nominal"]["horizontal_displacement"] > 1.0
+    assert cases["nominal"]["reference_path_progress_fraction"] > 0.99
+    assert cases["stress"]["max_lift_height"] < cases["nominal"]["max_lift_height"]
+    assert (
+        cases["stress"]["set_down_position_error"]
+        > cases["nominal"]["set_down_position_error"]
+    )
 
 
 def test_observation_contract_rejects_wrong_shape() -> None:

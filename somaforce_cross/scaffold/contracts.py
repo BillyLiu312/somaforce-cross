@@ -46,4 +46,5 @@ class ScaffoldTask(str, Enum):
     PUSH_PULL_DOOR = "push_pull_door"
     PUSH_BOX = "push_box"
     MOVE_SUITCASE = "move_suitcase"
+    MOVE_LARGEBOX = "move_largebox"
     HEAVY_PAYLOAD = "heavy_payload"

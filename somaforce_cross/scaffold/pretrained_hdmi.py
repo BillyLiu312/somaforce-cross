@@ -22,6 +22,7 @@ from somaforce_cross.scaffold.contracts import ScaffoldTask
 CONTRACT_VERSION = "hdmi_push_door_hand_teacher_v1"
 PUSH_BOX_CONTRACT_VERSION = "hdmi_push_box_teacher_v1"
 MOVE_SUITCASE_CONTRACT_VERSION = "hdmi_move_suitcase_teacher_v1"
+MOVE_LARGEBOX_CONTRACT_VERSION = "hdmi_move_largebox_teacher_v1"
 OBSERVATION_DIMS: dict[str, int] = {
     "command": 356,
     "policy": 249,
@@ -173,12 +174,14 @@ class HDMITaskSpec:
     reference_joint_names: tuple[str, ...]
     object_kind: str
     object_asset_name: str
+    object_asset_file: str
     object_body_name: str
     contact_target_offsets: tuple[tuple[float, float, float], ...]
     contact_eef_names: tuple[str, ...]
     contact_eef_offsets: tuple[tuple[float, float, float], ...]
     robot_initial_joint_overrides: Mapping[str, float]
     nominal_object_mass: float | None
+    training_mass_range: tuple[float, float] | None
 
 
 _COMMON_NETWORK = {
@@ -201,12 +204,14 @@ HDMI_TASK_SPECS: dict[str, HDMITaskSpec] = {
         reference_joint_names=HDMI_REFERENCE_JOINT_NAMES,
         object_kind="articulation",
         object_asset_name="door",
+        object_asset_file="door.usd",
         object_body_name="door_panel",
         contact_target_offsets=((0.0, -0.6, 1.0),),
         contact_eef_names=("right_wrist_yaw_link",),
         contact_eef_offsets=((0.05, 0.0, 0.0),),
         robot_initial_joint_overrides={},
         nominal_object_mass=None,
+        training_mass_range=None,
     ),
     "push_box": HDMITaskSpec(
         task="push_box",
@@ -220,12 +225,14 @@ HDMI_TASK_SPECS: dict[str, HDMITaskSpec] = {
         reference_joint_names=(),
         object_kind="rigid_object",
         object_asset_name="box",
+        object_asset_file="box.usd",
         object_body_name="box",
         contact_target_offsets=((0.0, -0.2, 0.8), (0.0, 0.2, 0.8)),
         contact_eef_names=("left_wrist_yaw_link", "right_wrist_yaw_link"),
         contact_eef_offsets=((0.1, 0.0, 0.0), (0.1, 0.0, 0.0)),
         robot_initial_joint_overrides={},
         nominal_object_mass=8.0,
+        training_mass_range=None,
     ),
     "move_suitcase": HDMITaskSpec(
         task="move_suitcase",
@@ -239,6 +246,7 @@ HDMI_TASK_SPECS: dict[str, HDMITaskSpec] = {
         reference_joint_names=HDMI_REFERENCE_JOINT_NAMES,
         object_kind="rigid_object",
         object_asset_name="suitcase",
+        object_asset_file="suitcase.usd",
         object_body_name="suitcase",
         contact_target_offsets=((-0.1, 0.18, 0.25), (-0.1, -0.18, 0.25)),
         contact_eef_names=("left_wrist_yaw_link", "right_wrist_yaw_link"),
@@ -248,6 +256,34 @@ HDMI_TASK_SPECS: dict[str, HDMITaskSpec] = {
             "right_wrist_yaw_joint": 0.4,
         },
         nominal_object_mass=1.5,
+        training_mass_range=(1.2, 1.8),
+    ),
+    "move_largebox": HDMITaskSpec(
+        task="move_largebox",
+        research_category=ScaffoldTask.HEAVY_PAYLOAD,
+        artifact_name="hdmi_move_largebox",
+        contract_version=MOVE_LARGEBOX_CONTRACT_VERSION,
+        observation_dims=MOVE_SUITCASE_OBSERVATION_DIMS,
+        network=HDMINetworkContract(privileged_encoder_input_dim=1724, **_COMMON_NETWORK),
+        action_joint_names=HDMI_ACTION_JOINT_NAMES,
+        action_scale=HDMI_ACTION_SCALE,
+        reference_joint_names=HDMI_REFERENCE_JOINT_NAMES,
+        object_kind="rigid_object",
+        object_asset_name="largebox",
+        object_asset_file="largebox.urdf",
+        object_body_name="largebox_link",
+        contact_target_offsets=(
+            (-0.027635, 0.244158, 0.099234),
+            (0.198793, -0.151816, 0.149164),
+        ),
+        contact_eef_names=("left_wrist_yaw_link", "right_wrist_yaw_link"),
+        contact_eef_offsets=((0.05, 0.0, 0.0), (0.05, 0.0, 0.0)),
+        robot_initial_joint_overrides={
+            "left_wrist_yaw_joint": -0.4,
+            "right_wrist_yaw_joint": 0.4,
+        },
+        nominal_object_mass=1.0,
+        training_mass_range=(0.8, 1.2),
     ),
 }
 
@@ -315,6 +351,9 @@ def task_spec_from_manifest(manifest: Mapping[str, object]) -> HDMITaskSpec:
         object_asset_name=str(
             task_data.get("object_asset_name", base.object_asset_name)
         ),
+        object_asset_file=str(
+            task_data.get("object_asset_file", base.object_asset_file)
+        ),
         object_body_name=str(task_data.get("object_body_name", base.object_body_name)),
         contact_target_offsets=tuple3s(
             "contact_target_offsets", base.contact_target_offsets
@@ -337,6 +376,16 @@ def task_spec_from_manifest(manifest: Mapping[str, object]) -> HDMITaskSpec:
             None
             if task_data.get("nominal_object_mass", base.nominal_object_mass) is None
             else float(task_data.get("nominal_object_mass", base.nominal_object_mass))
+        ),
+        training_mass_range=(
+            None
+            if task_data.get("training_mass_range", base.training_mass_range) is None
+            else tuple(
+                float(value)
+                for value in task_data.get(
+                    "training_mass_range", base.training_mass_range
+                )
+            )
         ),
     )
     if len(spec.action_joint_names) != network.action_dim:
