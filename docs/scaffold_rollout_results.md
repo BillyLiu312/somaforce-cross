@@ -12,8 +12,9 @@ deployable policies.
 
 The report treats `nominal` as the normal operating condition. Other cases
 introduce physical mismatch without changing the frozen scaffold policy. The
-embedded HTML5 players use repository-relative Git LFS videos and load metadata
-only until playback starts.
+embedded HTML5 players use repository-relative Git LFS videos. The `?raw=1`
+suffix makes GitHub serve video bytes instead of a repository `blob` page, and
+players load metadata only until playback starts.
 
 ## Result Overview
 
@@ -56,9 +57,9 @@ target is 1.5 rad.
     <th>high_damping</th>
   </tr>
   <tr>
-    <td><video controls preload="metadata" width="320" src="../videos/push_door_hand/nominal.mp4"><a href="../videos/push_door_hand/nominal.mp4">Open MP4</a></video></td>
-    <td><video controls preload="metadata" width="320" src="../videos/push_door_hand/high_friction.mp4"><a href="../videos/push_door_hand/high_friction.mp4">Open MP4</a></video></td>
-    <td><video controls preload="metadata" width="320" src="../videos/push_door_hand/high_damping.mp4"><a href="../videos/push_door_hand/high_damping.mp4">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="320" src="../videos/push_door_hand/nominal.mp4?raw=1"><a href="../videos/push_door_hand/nominal.mp4?raw=1">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="320" src="../videos/push_door_hand/high_friction.mp4?raw=1"><a href="../videos/push_door_hand/high_friction.mp4?raw=1">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="320" src="../videos/push_door_hand/high_damping.mp4?raw=1"><a href="../videos/push_door_hand/high_damping.mp4?raw=1">Open MP4</a></video></td>
   </tr>
 </table>
 
@@ -97,9 +98,9 @@ is the fraction of expected contact steps where both wrists exceed 1 N.
     <th>heavy_friction</th>
   </tr>
   <tr>
-    <td><video controls preload="metadata" width="320" src="../videos/push_box/nominal.mp4"><a href="../videos/push_box/nominal.mp4">Open MP4</a></video></td>
-    <td><video controls preload="metadata" width="320" src="../videos/push_box/light_slippery.mp4"><a href="../videos/push_box/light_slippery.mp4">Open MP4</a></video></td>
-    <td><video controls preload="metadata" width="320" src="../videos/push_box/heavy_friction.mp4"><a href="../videos/push_box/heavy_friction.mp4">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="320" src="../videos/push_box/nominal.mp4?raw=1"><a href="../videos/push_box/nominal.mp4?raw=1">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="320" src="../videos/push_box/light_slippery.mp4?raw=1"><a href="../videos/push_box/light_slippery.mp4?raw=1">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="320" src="../videos/push_box/heavy_friction.mp4?raw=1"><a href="../videos/push_box/heavy_friction.mp4?raw=1">Open MP4</a></video></td>
   </tr>
 </table>
 
@@ -138,16 +139,16 @@ fraction are part of the failure result.
     <th>light</th>
   </tr>
   <tr>
-    <td><video controls preload="metadata" width="420" src="../videos/move_suitcase/nominal.mp4"><a href="../videos/move_suitcase/nominal.mp4">Open MP4</a></video></td>
-    <td><video controls preload="metadata" width="420" src="../videos/move_suitcase/light.mp4"><a href="../videos/move_suitcase/light.mp4">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="420" src="../videos/move_suitcase/nominal.mp4?raw=1"><a href="../videos/move_suitcase/nominal.mp4?raw=1">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="420" src="../videos/move_suitcase/light.mp4?raw=1"><a href="../videos/move_suitcase/light.mp4?raw=1">Open MP4</a></video></td>
   </tr>
   <tr>
     <th>heavy</th>
     <th>stress</th>
   </tr>
   <tr>
-    <td><video controls preload="metadata" width="420" src="../videos/move_suitcase/heavy.mp4"><a href="../videos/move_suitcase/heavy.mp4">Open MP4</a></video></td>
-    <td><video controls preload="metadata" width="420" src="../videos/move_suitcase/stress.mp4"><a href="../videos/move_suitcase/stress.mp4">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="420" src="../videos/move_suitcase/heavy.mp4?raw=1"><a href="../videos/move_suitcase/heavy.mp4?raw=1">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="420" src="../videos/move_suitcase/stress.mp4?raw=1"><a href="../videos/move_suitcase/stress.mp4?raw=1">Open MP4</a></video></td>
   </tr>
 </table>
 
@@ -189,16 +190,16 @@ continuous lift/tracking errors rather than termination.
     <th>light</th>
   </tr>
   <tr>
-    <td><video controls preload="metadata" width="420" src="../videos/move_largebox/nominal.mp4"><a href="../videos/move_largebox/nominal.mp4">Open MP4</a></video></td>
-    <td><video controls preload="metadata" width="420" src="../videos/move_largebox/light.mp4"><a href="../videos/move_largebox/light.mp4">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="420" src="../videos/move_largebox/nominal.mp4?raw=1"><a href="../videos/move_largebox/nominal.mp4?raw=1">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="420" src="../videos/move_largebox/light.mp4?raw=1"><a href="../videos/move_largebox/light.mp4?raw=1">Open MP4</a></video></td>
   </tr>
   <tr>
     <th>heavy</th>
     <th>stress</th>
   </tr>
   <tr>
-    <td><video controls preload="metadata" width="420" src="../videos/move_largebox/heavy.mp4"><a href="../videos/move_largebox/heavy.mp4">Open MP4</a></video></td>
-    <td><video controls preload="metadata" width="420" src="../videos/move_largebox/stress.mp4"><a href="../videos/move_largebox/stress.mp4">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="420" src="../videos/move_largebox/heavy.mp4?raw=1"><a href="../videos/move_largebox/heavy.mp4?raw=1">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="420" src="../videos/move_largebox/stress.mp4?raw=1"><a href="../videos/move_largebox/stress.mp4?raw=1">Open MP4</a></video></td>
   </tr>
 </table>
 
