@@ -140,6 +140,71 @@ tests/
   test_pretrained_hdmi_scaffold.py
 ```
 
+## Git and Git LFS CLI
+
+This repository stores policy weights, simulator assets, reference arrays, and
+rollout videos in Git LFS. Install both Git and Git LFS before cloning, then
+enable the LFS filters for the current user:
+
+```bash
+git --version
+git lfs version
+git lfs install
+```
+
+Clone the active development branch and materialize all LFS objects:
+
+```bash
+git clone --branch dev https://github.com/BillyLiu312/somaforce-cross.git
+cd somaforce-cross
+git lfs pull
+git lfs fsck
+git lfs ls-files
+```
+
+For a routine update of an existing clean checkout:
+
+```bash
+git switch dev
+git pull --ff-only origin dev
+git lfs pull
+git status --short --branch
+```
+
+The `dev` branch history was rewritten on 2026-07-23 to correct inherited
+author metadata. A checkout that still follows the old history must create a
+backup and realign once instead of using `git pull`. Commit or stash local work
+before the reset because `reset --hard` discards uncommitted tracked changes:
+
+```bash
+git switch dev
+git branch backup/dev-before-author-rewrite
+git fetch origin
+git reset --hard origin/dev
+git lfs pull
+```
+
+When publishing a scoped change, inspect both ordinary Git state and LFS state.
+The normal `git push` runs the Git LFS pre-push hook and uploads referenced LFS
+objects before updating the branch:
+
+```bash
+git add <paths>
+git status --short
+git lfs status
+git commit -m "Describe the change"
+git push origin dev
+git lfs push --dry-run origin dev
+```
+
+The final dry run should report no pending objects. If an earlier push bypassed
+the LFS hook, upload the objects explicitly and then push the Git ref again:
+
+```bash
+git lfs push origin dev
+git push origin dev
+```
+
 ## Reference Conversion
 
 HDMI door reference:
@@ -266,10 +331,11 @@ increase the rate or omit `--realtime` for faster visualization.
 ## Artifact Versioning
 
 The complete `artifacts/` tree is visible to Git. Large runtime files use Git
-LFS according to `.gitattributes`, including `.pt`, `.usd`, `.npz`, `.npy`, and
-`.onnx`. Training `checkpoints/`, `*.ckpt`, and `checkpoint_*.pt/.pth` remain
-ignored. Before committing artifacts, verify redistribution permission in
-`THIRD_PARTY.md`; LFS changes storage mechanics, not licensing rights.
+LFS according to `.gitattributes`, including `.pt`, `.pth`, `.onnx`, `.npz`,
+`.npy`, `.usd`, `.usda`, `.obj`, and `.mp4`. Training `checkpoints/`, `*.ckpt`,
+and `checkpoint_*.pt/.pth` remain ignored. Before committing artifacts, verify
+redistribution permission in `THIRD_PARTY.md`; LFS changes storage mechanics,
+not licensing rights.
 
 ## Boundary After This Round
 
