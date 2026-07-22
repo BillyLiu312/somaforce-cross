@@ -11,8 +11,9 @@ same task-specific indicators. All videos were verified as H.264, 1280x720,
 deployable policies.
 
 The report treats `nominal` as the normal operating condition. Other cases
-introduce physical mismatch without changing the frozen scaffold policy. Video
-links are repository-relative and are tracked through Git LFS.
+introduce physical mismatch without changing the frozen scaffold policy. The
+embedded HTML5 players use repository-relative Git LFS videos and load metadata
+only until playback starts.
 
 ## Result Overview
 
@@ -29,11 +30,11 @@ Indicators: door progress and root height are in meters/radians as labeled;
 `wrist max` is the maximum measured wrist contact force. The reference task
 target is 1.5 rad.
 
-| Case | Friction | Damping | Steps | Door progress (rad) | Progress vs nominal | Wrist max (N) | Wrist max vs nominal | Min root height (m) | Evidence |
+| Case | Friction | Damping | Steps | Door progress (rad) | Progress vs nominal | Wrist max (N) | Wrist max vs nominal | Min root height (m) | Metrics |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| `nominal` | 0.3 | 0.55 | 540 | 2.618 | 100.0% | 19.43 | 100.0% | 0.713 | [JSON](../artifacts/scaffolds/hdmi_push_door_hand/v1/rollout_metrics_nominal.json) / [MP4](../videos/push_door_hand/nominal.mp4) |
-| `high_friction` | 10.0 | 0.55 | 540 | 1.103 | 42.1% | 33.88 | 174.4% | 0.685 | [JSON](../artifacts/scaffolds/hdmi_push_door_hand/v1/rollout_metrics_high_friction.json) / [MP4](../videos/push_door_hand/high_friction.mp4) |
-| `high_damping` | 0.3 | 10.0 | 540 | 1.825 | 69.7% | 61.31 | 315.6% | 0.727 | [JSON](../artifacts/scaffolds/hdmi_push_door_hand/v1/rollout_metrics_high_damping.json) / [MP4](../videos/push_door_hand/high_damping.mp4) |
+| `nominal` | 0.3 | 0.55 | 540 | 2.618 | 100.0% | 19.43 | 100.0% | 0.713 | [JSON](../artifacts/scaffolds/hdmi_push_door_hand/v1/rollout_metrics_nominal.json) |
+| `high_friction` | 10.0 | 0.55 | 540 | 1.103 | 42.1% | 33.88 | 174.4% | 0.685 | [JSON](../artifacts/scaffolds/hdmi_push_door_hand/v1/rollout_metrics_high_friction.json) |
+| `high_damping` | 0.3 | 10.0 | 540 | 1.825 | 69.7% | 61.31 | 315.6% | 0.727 | [JSON](../artifacts/scaffolds/hdmi_push_door_hand/v1/rollout_metrics_high_damping.json) |
 
 ### Analysis
 
@@ -46,17 +47,32 @@ target is 1.5 rad.
   mechanism resistance. The endpoint door angle separates `high_friction`,
   while `high_damping` is better distinguished by force and progress metrics.
 
+### Videos
+
+<table>
+  <tr>
+    <th>nominal</th>
+    <th>high_friction</th>
+    <th>high_damping</th>
+  </tr>
+  <tr>
+    <td><video controls preload="metadata" width="320" src="../videos/push_door_hand/nominal.mp4"><a href="../videos/push_door_hand/nominal.mp4">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="320" src="../videos/push_door_hand/high_friction.mp4"><a href="../videos/push_door_hand/high_friction.mp4">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="320" src="../videos/push_door_hand/high_damping.mp4"><a href="../videos/push_door_hand/high_damping.mp4">Open MP4</a></video></td>
+  </tr>
+</table>
+
 ## Push Box
 
 Indicators: `progress` is maximum displacement along the reference direction;
 `final error` is physical box-to-reference position error; `two-hand contact`
 is the fraction of expected contact steps where both wrists exceed 1 N.
 
-| Case | Mass (kg) | Friction | Steps | Progress (m) | Progress vs nominal | Final error (m) | Two-hand contact | Wrist max (N) | Min root height (m) | Stable | Evidence |
+| Case | Mass (kg) | Friction | Steps | Progress (m) | Progress vs nominal | Final error (m) | Two-hand contact | Wrist max (N) | Min root height (m) | Stable | Metrics |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
-| `nominal` | 8.0 | 0.5 | 792 | 1.467 | 100.0% | 0.062 | 100.0% | 55.10 | 0.718 | yes | [JSON](../artifacts/scaffolds/hdmi_push_box/v1/rollout_metrics_nominal.json) / [MP4](../videos/push_box/nominal.mp4) |
-| `light_slippery` | 1.0 | 0.1 | 792 | 2.110 | 143.8% | 1.066 | 69.0% | 46.81 | 0.745 | yes | [JSON](../artifacts/scaffolds/hdmi_push_box/v1/rollout_metrics_light_slippery.json) / [MP4](../videos/push_box/light_slippery.mp4) |
-| `heavy_friction` | 16.0 | 0.6 | 792 | 1.006 | 68.5% | 0.440 | 97.1% | 84.74 | 0.688 | yes | [JSON](../artifacts/scaffolds/hdmi_push_box/v1/rollout_metrics_heavy_friction.json) / [MP4](../videos/push_box/heavy_friction.mp4) |
+| `nominal` | 8.0 | 0.5 | 792 | 1.467 | 100.0% | 0.062 | 100.0% | 55.10 | 0.718 | yes | [JSON](../artifacts/scaffolds/hdmi_push_box/v1/rollout_metrics_nominal.json) |
+| `light_slippery` | 1.0 | 0.1 | 792 | 2.110 | 143.8% | 1.066 | 69.0% | 46.81 | 0.745 | yes | [JSON](../artifacts/scaffolds/hdmi_push_box/v1/rollout_metrics_light_slippery.json) |
+| `heavy_friction` | 16.0 | 0.6 | 792 | 1.006 | 68.5% | 0.440 | 97.1% | 84.74 | 0.688 | yes | [JSON](../artifacts/scaffolds/hdmi_push_box/v1/rollout_metrics_heavy_friction.json) |
 
 ### Analysis
 
@@ -72,6 +88,21 @@ is the fraction of expected contact steps where both wrists exceed 1 N.
   reduce/extract force under low resistance, and mobilize force without losing
   tracking under high resistance.
 
+### Videos
+
+<table>
+  <tr>
+    <th>nominal</th>
+    <th>light_slippery</th>
+    <th>heavy_friction</th>
+  </tr>
+  <tr>
+    <td><video controls preload="metadata" width="320" src="../videos/push_box/nominal.mp4"><a href="../videos/push_box/nominal.mp4">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="320" src="../videos/push_box/light_slippery.mp4"><a href="../videos/push_box/light_slippery.mp4">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="320" src="../videos/push_box/heavy_friction.mp4"><a href="../videos/push_box/heavy_friction.mp4">Open MP4</a></video></td>
+  </tr>
+</table>
+
 ## Move Suitcase
 
 Indicators are identical across all suitcase cases. `Carry pos/orient error`
@@ -79,12 +110,12 @@ are means over the carry window; `set-down error` is final object-position
 error. The stress rollout terminates early, so its 279 steps and 47.7% contact
 fraction are part of the failure result.
 
-| Case | Mass (kg) | Steps | Max lift (m) | XY displacement (m) | Carry pos error (m) | Carry orient error (rad) | Set-down error (m) | Set-down | Two-hand contact | Wrist max (N) | Min root height (m) | Stable | Evidence |
+| Case | Mass (kg) | Steps | Max lift (m) | XY displacement (m) | Carry pos error (m) | Carry orient error (rad) | Set-down error (m) | Set-down | Two-hand contact | Wrist max (N) | Min root height (m) | Stable | Metrics |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
-| `nominal` | 1.5 | 472 | 0.648 | 1.832 | 0.201 | 0.186 | 0.206 | yes | 99.4% | 72.88 | 0.281 | yes | [JSON](../artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics_nominal.json) / [MP4](../videos/move_suitcase/nominal.mp4) |
-| `light` | 0.5 | 472 | 0.715 | 1.834 | 0.147 | 0.207 | 0.188 | yes | 99.4% | 77.97 | 0.281 | yes | [JSON](../artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics_light.json) / [MP4](../videos/move_suitcase/light.mp4) |
-| `heavy` | 3.0 | 472 | 0.530 | 1.712 | 0.286 | 0.194 | 0.312 | no | 100.0% | 69.50 | 0.281 | yes | [JSON](../artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics_heavy.json) / [MP4](../videos/move_suitcase/heavy.mp4) |
-| `stress` | 5.5 | 279 | 0.135 | 1.110 | 0.617 | 0.996 | 0.852 | no | 47.7% | 121.62 | 0.190 | no | [JSON](../artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics_stress.json) / [MP4](../videos/move_suitcase/stress.mp4) |
+| `nominal` | 1.5 | 472 | 0.648 | 1.832 | 0.201 | 0.186 | 0.206 | yes | 99.4% | 72.88 | 0.281 | yes | [JSON](../artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics_nominal.json) |
+| `light` | 0.5 | 472 | 0.715 | 1.834 | 0.147 | 0.207 | 0.188 | yes | 99.4% | 77.97 | 0.281 | yes | [JSON](../artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics_light.json) |
+| `heavy` | 3.0 | 472 | 0.530 | 1.712 | 0.286 | 0.194 | 0.312 | no | 100.0% | 69.50 | 0.281 | yes | [JSON](../artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics_heavy.json) |
+| `stress` | 5.5 | 279 | 0.135 | 1.110 | 0.617 | 0.996 | 0.852 | no | 47.7% | 121.62 | 0.190 | no | [JSON](../artifacts/scaffolds/hdmi_move_suitcase/v1/rollout_metrics_stress.json) |
 
 ### Analysis
 
@@ -99,18 +130,39 @@ fraction are part of the failure result.
   the rollout stops at step 279 because root height falls below 0.25 m. The
   video clearly shows the carry sequence collapse and object/robot instability.
 
+### Videos
+
+<table>
+  <tr>
+    <th>nominal</th>
+    <th>light</th>
+  </tr>
+  <tr>
+    <td><video controls preload="metadata" width="420" src="../videos/move_suitcase/nominal.mp4"><a href="../videos/move_suitcase/nominal.mp4">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="420" src="../videos/move_suitcase/light.mp4"><a href="../videos/move_suitcase/light.mp4">Open MP4</a></video></td>
+  </tr>
+  <tr>
+    <th>heavy</th>
+    <th>stress</th>
+  </tr>
+  <tr>
+    <td><video controls preload="metadata" width="420" src="../videos/move_suitcase/heavy.mp4"><a href="../videos/move_suitcase/heavy.mp4">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="420" src="../videos/move_suitcase/stress.mp4"><a href="../videos/move_suitcase/stress.mp4">Open MP4</a></video></td>
+  </tr>
+</table>
+
 ## Move Large Box
 
 The large-box table uses the same indicator set as the suitcase table. All
 cases complete 199 steps and remain stable, so the important differences are
 continuous lift/tracking errors rather than termination.
 
-| Case | Mass (kg) | Steps | Max lift (m) | XY displacement (m) | Carry pos error (m) | Carry orient error (rad) | Set-down error (m) | Set-down | Two-hand contact | Wrist max (N) | Min root height (m) | Stable | Evidence |
+| Case | Mass (kg) | Steps | Max lift (m) | XY displacement (m) | Carry pos error (m) | Carry orient error (rad) | Set-down error (m) | Set-down | Two-hand contact | Wrist max (N) | Min root height (m) | Stable | Metrics |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |
-| `nominal` | 1.0 | 199 | 0.276 | 1.511 | 0.102 | 0.225 | 0.182 | yes | 100.0% | 92.93 | 0.542 | yes | [JSON](../artifacts/scaffolds/hdmi_move_largebox/v1/rollout_metrics_nominal.json) / [MP4](../videos/move_largebox/nominal.mp4) |
-| `light` | 0.8 | 199 | 0.280 | 1.543 | 0.088 | 0.177 | 0.151 | yes | 100.0% | 175.75 | 0.546 | yes | [JSON](../artifacts/scaffolds/hdmi_move_largebox/v1/rollout_metrics_light.json) / [MP4](../videos/move_largebox/light.mp4) |
-| `heavy` | 1.2 | 199 | 0.176 | 1.502 | 0.126 | 0.180 | 0.194 | yes | 100.0% | 81.72 | 0.554 | yes | [JSON](../artifacts/scaffolds/hdmi_move_largebox/v1/rollout_metrics_heavy.json) / [MP4](../videos/move_largebox/heavy.mp4) |
-| `stress` | 2.0 | 199 | 0.129 | 1.449 | 0.196 | 0.348 | 0.232 | yes | 100.0% | 78.72 | 0.538 | yes | [JSON](../artifacts/scaffolds/hdmi_move_largebox/v1/rollout_metrics_stress.json) / [MP4](../videos/move_largebox/stress.mp4) |
+| `nominal` | 1.0 | 199 | 0.276 | 1.511 | 0.102 | 0.225 | 0.182 | yes | 100.0% | 92.93 | 0.542 | yes | [JSON](../artifacts/scaffolds/hdmi_move_largebox/v1/rollout_metrics_nominal.json) |
+| `light` | 0.8 | 199 | 0.280 | 1.543 | 0.088 | 0.177 | 0.151 | yes | 100.0% | 175.75 | 0.546 | yes | [JSON](../artifacts/scaffolds/hdmi_move_largebox/v1/rollout_metrics_light.json) |
+| `heavy` | 1.2 | 199 | 0.176 | 1.502 | 0.126 | 0.180 | 0.194 | yes | 100.0% | 81.72 | 0.554 | yes | [JSON](../artifacts/scaffolds/hdmi_move_largebox/v1/rollout_metrics_heavy.json) |
+| `stress` | 2.0 | 199 | 0.129 | 1.449 | 0.196 | 0.348 | 0.232 | yes | 100.0% | 78.72 | 0.538 | yes | [JSON](../artifacts/scaffolds/hdmi_move_largebox/v1/rollout_metrics_stress.json) |
 
 ### Analysis
 
@@ -128,6 +180,27 @@ continuous lift/tracking errors rather than termination.
 - The videos show similar high-level phases across all four cases; mass mismatch
   primarily changes object height, posture, and tracking quality rather than
   causing an immediate fall.
+
+### Videos
+
+<table>
+  <tr>
+    <th>nominal</th>
+    <th>light</th>
+  </tr>
+  <tr>
+    <td><video controls preload="metadata" width="420" src="../videos/move_largebox/nominal.mp4"><a href="../videos/move_largebox/nominal.mp4">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="420" src="../videos/move_largebox/light.mp4"><a href="../videos/move_largebox/light.mp4">Open MP4</a></video></td>
+  </tr>
+  <tr>
+    <th>heavy</th>
+    <th>stress</th>
+  </tr>
+  <tr>
+    <td><video controls preload="metadata" width="420" src="../videos/move_largebox/heavy.mp4"><a href="../videos/move_largebox/heavy.mp4">Open MP4</a></video></td>
+    <td><video controls preload="metadata" width="420" src="../videos/move_largebox/stress.mp4"><a href="../videos/move_largebox/stress.mp4">Open MP4</a></video></td>
+  </tr>
+</table>
 
 ## Cross-Task Interpretation
 
