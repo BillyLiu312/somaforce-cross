@@ -1,7 +1,7 @@
 # SomaForce-Cross V1 Force Residual Plan
 
 Date: 2026-07-25
-Status: frozen design baseline for implementation review
+Status: authoritative frozen V1 design baseline
 
 ## 1. Goal
 
@@ -51,6 +51,12 @@ contact_probability:  1
 sensor_quality:       1
 ```
 
+Wrist order is always left then right. History is oldest-to-newest and the
+last temporal index is the current frame. At reset, a supplied initial frame is
+broadcast across the history; otherwise the history is zero-filled. Both wrist
+tokens exist for every task, including tasks such as door pushing where only
+one wrist is expected to make primary contact.
+
 The wrench frame is gravity-aligned robot-base-yaw: origin at the wrist sensor
 origin, x/y aligned with pelvis yaw, and z aligned with world-up. Only a learned
 left/right side embedding is retained; `contact_role` is not a V1 input.
@@ -66,6 +72,12 @@ raw wrench -> calibration/frame transform -> force/torque normalization
 Contact probability comes from an independent calibrated detector with
 hysteresis and temporal smoothing. Sensor quality combines validity,
 saturation, dropout and calibration health.
+
+The pure PyTorch semantic core does not implement that detector. It receives
+already computed contact probability and sensor quality and applies only the
+stateless two-wrist aggregation rule. Detector hysteresis/smoothing belongs to
+the virtual F/T sensor stage, while authority attack/release state belongs to
+action composition.
 
 ## 4. Force Semantics
 
@@ -83,6 +95,11 @@ neutral/mixed
 ```text
 p_dir = softmax(E_dir(wrist_history))
 ```
+
+Each wrist is encoded by the same causal TCN. An 8-D side embedding is added to
+each per-wrist feature, and the left/right features are concatenated in fixed
+order before the global semantic heads. V1 therefore produces one task-agnostic
+`p_dir [B,13]` and one `p_mag [B,5]` from the two-wrist history.
 
 The continuous normalized force/torque vectors remain encoder inputs and a
 continuous ablation, but are not the V1 semantic latent.
@@ -107,6 +124,11 @@ y_k = softmax(-(r_mag - centers[k])^2 / (2 * sigma_mag^2))
 
 The initial direction target temperature is `tau_dir=0.15`; it may be calibrated
 after target-distribution diagnostics without changing the V1 architecture.
+The exact clean-wrench direction-target mapping and calibrated `F_scale` /
+`M_scale` values are owned by the virtual F/T sensor stage; the pure PyTorch
+core must not invent them. The magnitude soft-target helper may operate on any
+leading dimensions and therefore can generate per-wrist targets before later
+aggregation is finalized.
 
 ### 4.3 Cross
 
@@ -242,4 +264,3 @@ weights, semantic bins or authority.
 Required evidence includes task progress/success, nominal retention, p95/p99
 force, impulse, force-rate, contact fraction/loss, residual norms by group,
 action saturation, stability, semantic entropy/KL and `P_cross(t)`.
-

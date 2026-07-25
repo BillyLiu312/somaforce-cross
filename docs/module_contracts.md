@@ -1,252 +1,118 @@
 # SomaForce-Cross Module Contracts
 
-Date: 2026-07-01
+Updated: 2026-07-25
+Status: V1 compatibility summary
 
-This file records the expected module contracts before implementation code is added.
+Detailed values and acceptance gates live in
+`docs/v1_force_residual_plan.md` and
+`docs/v1_force_residual_implementation_plan.md`. This document only fixes the
+boundaries shared across modules.
 
-## 1. Pretrained HDMI Door Scaffold
+## 1. Frozen Task Scaffold
 
-Purpose:
-
-```text
-standalone frozen learned policy -> nominal normalized action a_nom
-```
-
-Inputs:
-
-- versioned deployable observation tensors and declared task/reference priors;
-- frozen observation-normalization state;
-- frozen exported policy artifact;
-- explicit mapping from the canonical 29-joint reference to the 23 controlled
-  action joints.
-
-Outputs:
-
-- nominal normalized action `a_nom [B, 23]`;
-- exact action joint order and action-space metadata;
-- scaffold confidence or health flag where available.
-
-Rules:
-
-- Runtime code must not import HDMI/`active_adaptation` or require an HDMI
-  checkout.
-- The primary scaffold is frozen and runs in evaluation mode.
-- The current `phase=train` HDMI teacher is privileged and is not a production
-  scaffold. Export and validate a non-privileged `actor_adapt`/finetune path.
-- `a_nom` is not a raw 29-DOF joint target. Compose the Cross residual in the
-  same 23-D normalized coordinates and apply action scaling once.
-- Follow `docs/pretrained_hdmi_scaffold_rules.md` for the complete contract,
-  provenance, licensing, and parity gates.
-
-Non-goal:
-
-- The scaffold does not solve force adaptation. It provides the base
-  robot-object motion that SomaForce-Cross corrects.
-- Wrist control is not silently added to the current 23-D policy.
-- The scaffold artifact and HDMI training method are not claimed as a
-  SomaForce-Cross contribution.
-
-## 1A. Canonical HDMI + OMOMO Reference Boundary
-
-Purpose:
+Input and internal observation contracts are artifact-specific. The public
+output is:
 
 ```text
-canonicalize HDMI/OMOMO robot-object references for replay and future tasks
+a_nom: float32 [B,23], normalized joint-position coordinates
 ```
 
-Inputs:
+The current HDMI `phase=train` artifacts are privileged simulation baselines,
+not deployable policies. They remain frozen and HDMI-free at SomaForce-Cross
+runtime. A deployable end-to-end system still requires a separately validated
+sensor-realizable base scaffold.
 
-- HDMI door `motion.npz` or jointly retargeted OMOMO payload result;
-- source provenance, task identity, contact mapping, and retarget metadata.
-
-Outputs:
-
-- canonical 29-joint G1/object/contact reference;
-- nominal hand reference;
-- nominal body reference;
-- nominal object reference;
-- contact intent, object-frame target, and confidence;
-- source provenance and per-frame validity mask.
-
-Non-goal:
-
-- Canonical reference conversion is not the frozen learned policy scaffold.
-- OMOMO must already be jointly retargeted to G1 before ingestion.
-- Physical force, payload mass, inertia, CoM, and load share must not be inferred from OMOMO kinematics.
-
-## 2. Virtual Wrist F/T Sensor Model
-
-Purpose:
+## 2. Wrist Observation
 
 ```text
-simulate the deployable wrist/end-effector F/T sensor used by the student
+wrist_tokens: float32 [B,2,16,14]
+
+per wrist:
+  wrench_base_yaw       6
+  wrist_twist_base      6
+  contact_probability  1
+  sensor_quality        1
 ```
 
-Inputs:
+The wrist order is left then right. History is oldest-to-newest and the last
+index is current. Both wrists are present for every task even when only one is
+expected to contact. The actor receives the corrupted deployable signal, never
+simulator contact truth or clean target wrench.
 
-- clean simulated wrist or joint wrench;
-- sensor frame transform;
-- compensation settings;
-- degradation settings.
+## 3. Force Semantic Core
 
-Outputs:
-
-- deployable F/T observation `w_ft_obs`;
-- force norm and force-rate diagnostics;
-- sensor health flag.
-
-Required modeling factors:
-
-- frame transform;
-- zero bias;
-- hand/tool gravity compensation if needed;
-- low-pass filtering;
-- delay;
-- noise;
-- drift;
-- saturation.
-
-Non-goal:
-
-- Do not expose object-side contact truth as actor input.
-
-## 3. Privileged Force Semantics
-
-Purpose:
+The shared causal wrist encoder processes each wrist independently, adds an
+8-D side embedding, then concatenates left and right features in fixed order.
+The global semantic outputs are:
 
 ```text
-produce teacher-side force semantic targets
+p_dir:   float32 [B,13]
+p_mag:   float32 [B,5]
+P_cross: float32 [B,13,5]
+z_cross: float32 [B,64]
 ```
-
-Inputs:
-
-- privileged contact truth;
-- object progress;
-- task prior;
-- contact phase;
-- virtual F/T observation.
-
-Outputs:
-
-- direction semantic distribution `p_dir`;
-- magnitude semantic distribution `p_mag`;
-- optional direction/magnitude labels;
-- diagnostic confidence.
-
-## 4. Cross Interaction
-
-Purpose:
 
 ```text
-convert direction and magnitude semantics into the force-semantic policy latent
+P_cross = p_dir.unsqueeze(-1) * p_mag.unsqueeze(-2)
 ```
 
-Selected representation:
+`P_cross` is deterministic and has no independent V1 loss. Clean simulated
+wrench may generate direction and magnitude auxiliary targets but is not an
+actor input.
+
+## 4. Contact Gate
+
+The stateless semantic-core gate consumes deployable values:
 
 ```text
-P_cross = p_dir outer p_mag
-z_joint = flatten(P_cross)
-z_cross = CrossEncoder(z_joint)
+g_left  = p_left  * quality_left
+g_right = p_right * quality_right
+g_contact = 1 - (1 - g_left) * (1 - g_right)
 ```
 
-Outputs:
+Contact detection, hysteresis, smoothing, and sensor corruption belong to the
+virtual F/T sensing path. Authority attack/release behavior and per-joint
+limits belong to residual action composition.
 
-- `P_cross`;
-- `z_joint`;
-- `z_cross`.
+## 5. Residual Actor and Action Composition
 
-Actor rule:
+Allowed actor inputs are wrist-token history, `z_cross`, deployable whole-body
+proprioception, `a_nom` and its short history, optional `Delta a_nom`, and
+previous executed `a_total`.
+
+Forbidden actor inputs include object pose/type/velocity, mass, CoM,
+hinge/slider state, simulator contact truth, foot wrench, task ID, HDMI
+`command[356]`, and other critic-only state.
 
 ```text
-actor receives z_cross only
+delta_bounded = authority * tanh(raw_delta)
+delta_gated   = contact_gain * sensor_quality * delta_bounded
+a_total       = clip(a_nom + delta_gated)
 ```
 
-Logging rule:
+`a_nom` and the residual share normalized 23-D coordinates. Joint-position
+scaling is applied once after composition. Previous-action history records
+executed `a_total`.
+
+## 6. Asymmetric Learning
+
+V1 has no privileged residual teacher actor in the primary route.
 
 ```text
-log p_dir, p_mag, P_cross, z_cross
+actor: noisy deployable wrist F/T and declared proprioceptive/action inputs
+critic: actor observations plus simulator progress, object, mismatch,
+        contact, and stability state
+targets: clean-wrench p_dir and p_mag distributions
 ```
 
-## 5. Residual Teacher
+The auxiliary weights start at `lambda_dir=0.05` and `lambda_mag=0.05`.
+A clean-wrench privileged actor is only a later upper-bound/bootstrap
+experiment and must not replace the primary V1 result.
 
-Purpose:
+## 7. Runtime Safety and Logging
 
-```text
-learn force-conditioned residuals over the scaffold
-```
-
-Inputs:
-
-- proprioception;
-- `cmd_6d`;
-- `a_nom`;
-- previous action;
-- `z_cross`;
-- optional critic-only privileged state.
-
-Outputs:
-
-- bounded residual `Delta a_force`;
-- teacher action `a_teacher = a_nom + clip(Delta a_force)`;
-- value estimate for RL training.
-
-## 6. Student Contact Encoder
-
-Purpose:
-
-```text
-replace privileged force semantics with deployable histories
-```
-
-Inputs:
-
-- wrist F/T history;
-- joint torque / velocity history;
-- end-effector motion history;
-- proprioception history;
-- `cmd_6d` history.
-
-Outputs:
-
-- `p_hat_dir`;
-- `p_hat_mag`;
-- `P_hat_cross`;
-- `z_hat_cross`;
-- confidence estimate.
-
-## 7. Runtime Safety Gate
-
-Purpose:
-
-```text
-bound or stop residual deployment
-```
-
-Inputs:
-
-- F/T observation;
-- force rate;
-- posture/stability margins;
-- contact state;
-- confidence.
-
-Outputs:
-
-- residual gain scale;
-- safe probing flag;
-- fallback/stop signal.
-
-## 8. Logging Contract
-
-Minimum logged variables:
-
-- `a_nom`;
-- `Delta a_force`;
-- `w_ft_obs`;
-- privileged force labels if available;
-- `p_dir`, `p_mag`, `P_cross`, `z_cross`;
-- student predictions;
-- contact phase;
-- object progress;
-- force and constrained-force metrics;
-- safety events.
+Per-joint authority is further clipped by joint margin, velocity, torque/current,
+posture, and stability limits. Minimum logs include `a_nom`, raw/bounded/gated
+residual, `a_total`, wrist observations and clean targets, contact/quality,
+`p_dir`, `p_mag`, `P_cross`, `z_cross`, force statistics, task progress,
+stability, saturation, reset, termination, and curriculum state.

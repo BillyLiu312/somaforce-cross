@@ -32,9 +32,10 @@ Repository documentation, paper text, artifacts, and experiment tables must
 describe it as a frozen policy trained with the official HDMI implementation
 and cite HDMI.
 
-Software independence does not erase provenance. The research contribution is
-the force-semantic representation, bounded residual adaptation, virtual wrist
-F/T model, and teacher-to-student distillation built on top of the scaffold.
+Software independence does not erase provenance. The V1 research contribution
+is the force-semantic representation, bounded residual adaptation, virtual
+wrist F/T model, and asymmetric deployable-input learning built on top of the
+scaffold.
 
 Use wording equivalent to:
 
@@ -276,11 +277,12 @@ SomaForce-Cross wrapper, but it must not change `a_nom` silently.
 ## Action Composition Rule
 
 The Cross residual and `a_nom` must share the same 23-dimensional normalized
-action coordinates for the first baseline:
+action coordinates for V1:
 
 ```text
-delta_bounded = clip(Delta a_force, -residual_limit, residual_limit)
-a_total = clip(a_nom + safety_gain * delta_bounded, action_low, action_high)
+delta_bounded = authority(t) * tanh(raw_delta)
+delta_gated = contact_gain * sensor_quality * delta_bounded
+a_total = clip(a_nom + delta_gated, action_low, action_high)
 ```
 
 Apply the HDMI-compatible joint-position scaling exactly once after this sum.
@@ -386,8 +388,8 @@ The migration is incomplete until all applicable gates pass:
 10. Provenance gate: every distributed artifact has source, checksum, citation,
     and permission status.
 
-Do not begin full Cross teacher training before gates 1-8 pass. Privileged
-force-label collection may be prototyped earlier, but it must not conceal a
+Do not begin full Cross residual PPO training before gates 1-8 pass. Clean
+wrench target collection may be prototyped earlier, but it must not conceal a
 broken scaffold migration.
 
 ## Relationship to Existing Modules
@@ -399,7 +401,7 @@ CanonicalReferenceEpisode / ReferenceLibrary:
   29-joint reference data, replay, metadata, diagnostics
 
 PretrainedHDMIScaffold:
-  frozen learned policy, versioned deployable inputs, 23-D a_nom
+  frozen learned policy, versioned artifact-specific inputs, 23-D a_nom
 
 SomaForce-Cross residual:
   learned bounded correction in the same 23-D action coordinates

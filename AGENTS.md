@@ -16,7 +16,8 @@ The method should help a humanoid answer, during contact:
 - Which direction appears constrained or force-wasting?
 - How much force resistance is present?
 - Is hand-level compliance enough, or should the torso/body posture be mobilized?
-- Can a deployable wrist F/T history recover the same force semantics learned from privileged simulation signals?
+- Can deployable wrist F/T history support the same force-semantic adaptation
+  across tasks and physical mismatch conditions?
 
 ## Current Method Identity
 
@@ -28,31 +29,38 @@ SomaForce-Cross
 
 Interpretation:
 
-> Scaffolded humanoid force adaptation via cross semantic force distillation.
+> Scaffolded humanoid force adaptation via cross-semantic force conditioning.
 
-The name emphasizes the actual current innovation: privileged force is factorized into direction and magnitude semantic distributions, combined through an outer-product cross representation, and distilled into a deployable student that uses real wrist F/T histories.
+For V1, read this as cross-semantic force adaptation rather than a mandatory
+teacher-to-student training route. The deployable-input actor directly encodes
+noisy wrist F/T history into direction and magnitude semantic distributions,
+combines them through an outer-product representation, and learns a bounded
+residual with asymmetric PPO. Clean simulated wrench supplies auxiliary
+semantic targets; privileged simulator state is critic-only.
 
 Do not revert the method name to `SomaForce-RLD-S` as the main identity. That older label described the training route, but it did not capture the core innovation as clearly.
 
 ## Selected Pipeline
 
-The current door baseline pipeline is:
+The current V1 pipeline is:
 
 ```text
 frozen policy trained with the official HDMI implementation
   -> standalone exported artifact (no HDMI runtime dependency)
   -> versioned observation/action adapter
   -> nominal normalized action a_nom [B, 23]
-  -> virtual wrist F/T observation model
-  -> privileged direction/magnitude force semantics
+  -> deployable virtual wrist F/T histories
+  -> predicted direction/magnitude force semantics
   -> p_dir outer p_mag
   -> P_cross
   -> flatten(P_cross)
   -> CrossEncoder
   -> z_cross
-  -> bounded residual actor
-  -> a = a_nom + clip(Delta a_force)
-  -> student distillation from real wrist F/T histories
+  -> contact-gated bounded residual actor
+  -> a_total in normalized 23-D action coordinates
+
+clean simulated wrench -> p_dir/p_mag auxiliary targets
+privileged simulator state -> critic only
 ```
 
 The canonical HDMI/OMOMO reference library remains part of the broader task
@@ -60,16 +68,24 @@ pipeline for replay, diagnostics, and future payload scaffolds. It is separate
 from the first learned door-policy artifact: canonical G1 references have 29
 joints, while the audited pretrained door policy currently controls 23 joints.
 
-Follow `docs/pretrained_hdmi_scaffold_rules.md`; use
-`docs/hdmi_omomo_scaffold_pipeline.md` only for canonical reference construction
-and future reference-driven tasks.
+The current method and implementation sources of truth are:
+
+```text
+docs/v1_force_residual_plan.md
+docs/v1_force_residual_implementation_plan.md
+```
+
+Follow `docs/pretrained_hdmi_scaffold_rules.md` for frozen scaffold provenance,
+contracts, and deployment gates. Use `docs/hdmi_omomo_scaffold_pipeline.md` only
+for canonical reference construction and future reference-driven tasks.
 
 ## Current Pretrained Scaffold Decision
 
-The first door scaffold is a frozen pretrained HDMI policy migrated as a
-standalone artifact. Users of SomaForce-Cross must not need to clone or install
+The current four scaffolds are frozen pretrained HDMI policies migrated as
+standalone artifacts for `push_door_hand`, `push_box`, `move_suitcase`, and
+`move_largebox`. Users of SomaForce-Cross must not need to clone or install
 HDMI. The HDMI checkout is allowed only in a separate export/oracle environment
-for producing the artifact and deterministic parity traces.
+for producing artifacts and deterministic parity traces.
 
 Read and follow:
 
@@ -101,7 +117,8 @@ The following decisions are already selected and should not be contradicted unle
 - The deployed hardware assumption is a **real wrist/end-effector F/T sensor**.
 - Simulation should include a **virtual wrist F/T sensor model** that mimics deployable sensing.
 - The actor must not receive perfect object-side contact truth, true hinge/slider state, or simulator-only privileged labels at deployment.
-- Privileged force information is used for teacher supervision, critic inputs, auxiliary labels, and diagnostics.
+- Clean simulated wrench is used for auxiliary semantic targets and diagnostics.
+- Other privileged simulator state is critic-only and must not enter the residual actor.
 - Direction and magnitude are represented as **soft semantic distributions**, not as raw uninterpreted force vectors only.
 - The selected cross interaction is:
 
@@ -114,8 +131,10 @@ z_cross = CrossEncoder(z_joint)
 ```
 
 - The residual actor receives **only `z_cross`** as the force-semantic latent.
-- `p_dir`, `p_mag`, and `P_cross` are retained for auxiliary supervision, student distillation, logging, and visualization.
-- Student distillation should respect the coupling among `p_dir`, `p_mag`, and `P_cross`; do not treat them as three unrelated equal-weight latent targets.
+- `p_dir`, `p_mag`, and `P_cross` are retained for auxiliary supervision,
+  logging, visualization, and ablations.
+- `P_cross` is deterministic from `p_dir` and `p_mag`; V1 has no independent
+  `lambda_cross` loss.
 
 ## Why a Pretrained HDMI Scaffold
 
@@ -157,7 +176,8 @@ The ideal scaffold behavior is:
 
 The real deployment assumption is a wrist/end-effector F/T sensor.
 
-In simulation, do not model the student input as perfect contact truth. Model a virtual F/T sensor signal:
+In simulation, do not model the actor input as perfect contact truth. Model a
+virtual F/T sensor signal:
 
 ```text
 clean simulated wrist/joint wrench
@@ -171,13 +191,13 @@ Keep three concepts separate:
 
 ```text
 privileged contact truth:
-  simulation-only teacher labels, critic inputs, metrics
+  simulation-only semantic targets, critic inputs, metrics
 
 virtual wrist F/T observation:
   simulation version of what the real sensor would provide
 
 real wrist F/T history:
-  deployment-side student input
+  deployment-side residual actor input
 ```
 
 This distinction is central to the sim-to-real story.
@@ -190,7 +210,7 @@ If:
 
 ```text
 p_dir: direction semantic distribution
-p_mag: magnitude / mobilization semantic distribution
+p_mag: magnitude / recovery-level semantic distribution
 ```
 
 then:
@@ -202,11 +222,11 @@ P_cross(i, j) = p_dir(i) * p_mag(j)
 Examples of joint semantic cells:
 
 ```text
-pull x hand-level
-pull x torso-level
-slide x low-force
-reorient x high-force
-recover x fallback
++Fx x low
+-Fy x medium
++Fz x high
+-Mz x critical/recover
+neutral/mixed x release/none
 ```
 
 Flattening `P_cross` gives a one-dimensional semantic vector:
@@ -225,49 +245,47 @@ z_cross
 
 Cross attention is conceptually related but is not the selected first baseline. With only one vector or distribution per branch, standard cross attention can collapse into a trivial interaction. Cross attention may become relevant later only if direction and magnitude are represented as token sets.
 
-## Student Distillation Semantics
+## V1 Asymmetric Learning Semantics
 
-The student replaces privileged force semantics with deployable histories:
-
-```text
-wrist F/T history
-joint torque / velocity history
-end-effector motion history
-proprioception history
-cmd_6d history
-  -> p_hat_dir
-  -> p_hat_mag
-  -> P_hat_cross
-  -> z_hat_cross
-```
-
-The intended staged supervision is:
+V1 does not train a privileged residual teacher actor. The residual actor uses
+only deployable inputs:
 
 ```text
-Stage 1:
-  align p_hat_dir with p_dir
-  align p_hat_mag with p_mag
-
-Stage 2:
-  align P_hat_cross with P_cross
-  align z_hat_cross with z_cross
-  match teacher residual/action behavior
-
-Stage 3:
-  joint fine-tuning with smaller direction/magnitude auxiliary losses
+two-wrist noisy F/T history
+wrist twist
+contact probability and sensor quality
+whole-body proprioception
+a_nom history and previous executed a_total
+  -> p_dir, p_mag
+  -> P_cross
+  -> z_cross
+  -> bounded residual
 ```
 
-This preserves the factorized semantics without pretending that `p_dir`, `p_mag`, and `P_cross` are independent targets.
+The critic may additionally consume simulator object, mismatch, progress,
+contact, and stability state. Clean simulated wrench generates `p_dir` and
+`p_mag` targets for the two auxiliary KL losses. A clean-wrench privileged
+actor is permitted only as a later upper-bound/bootstrap experiment after the
+primary V1 route has been evaluated.
 
 ## Research Scope
 
-The first research targets are:
+The V1 residual training targets are:
 
-- hinged doors;
-- heavy-object lift/carry/place;
-- asymmetric or offset-CoM payload transport.
+- `push_door-hand`;
+- `push_box`;
+- `move_suitcase`;
+- `move_largebox`;
+- `open_foldchair-sit`;
+- `topple_wood_board_and_cross`;
+- `roll_ball-hand`.
 
-Cart pulling/pushing is the preferred next task. Drawers, sliders, and valves remain later constraint-generalization tasks.
+The first four have current frozen artifacts. The remaining three join training
+only after independent audit, export, parity, rollout, and zero-residual gates.
+Held-out zero-shot candidates are `carry_and_place_bread_box`,
+`carry_box_over_shoulder`, `move_foam`, `move_stool-climb`, and `truman`.
+Held-out evaluation freezes residual weights, semantic bins, sensor contract,
+and authority limits.
 
 The main mismatch sources are:
 
@@ -285,7 +303,7 @@ The minimum evidence chain should show:
 - interpretable `p_dir`, `p_mag`, and `P_cross(t)` traces;
 - reduced constrained or wasted force from the residual;
 - improvement over local compliance or raw force baselines;
-- student recovery of teacher force semantics from deployable F/T histories.
+- retention of nominal scaffold behavior while using deployable F/T histories.
 
 ## What This Method Is Not
 
@@ -301,7 +319,12 @@ Do not frame SomaForce-Cross as:
 
 The current contribution is narrower and cleaner:
 
-> A frozen, explicitly attributed pretrained HDMI door policy provides nominal humanoid-object motion through a standalone artifact; privileged force teaches task-conditioned constraint/load and magnitude semantics; their outer-product cross representation becomes `z_cross`; a bounded residual actor uses `z_cross`; a student distills the same semantics from deployable wrist F/T histories.
+> Frozen, explicitly attributed task scaffolds provide nominal humanoid-object
+> motion through standalone artifacts. A deployable-input residual actor maps
+> noisy two-wrist F/T histories into direction and magnitude semantic
+> distributions, forms their outer-product `P_cross`, and uses `z_cross` to
+> produce a contact-gated bounded whole-body residual. Clean simulated wrench
+> supplies auxiliary semantic targets and privileged state remains critic-only.
 
 ## Baselines and Ablations to Keep in Mind
 
@@ -316,8 +339,8 @@ Future experiments should be interpretable against these comparison families:
 - outer-product cross residual;
 - hand-only residual;
 - full hand/body residual;
-- privileged teacher;
-- deployable student.
+- deployable noisy-F/T actor versus clean-F/T upper bound;
+- symmetric critic versus privileged asymmetric critic.
 
 The most important diagnostic signal is:
 
