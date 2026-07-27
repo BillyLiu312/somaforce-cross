@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import inspect
 from pathlib import Path
+import subprocess
+import sys
 
 import torch
 from torch import nn
@@ -53,7 +55,15 @@ def test_envs_package_level_public_imports() -> None:
 def test_envs_ast_has_no_forbidden_runtime_imports() -> None:
     envs_dir = Path(__file__).resolve().parents[1] / "somaforce_cross" / "envs"
     forbidden = ("isaac", "hdmi", "active_adaptation", "rsl_rl")
-    paths = sorted(envs_dir.rglob("*.py"))
+    paths = [
+        envs_dir / "__init__.py",
+        envs_dir / "action_history.py",
+        envs_dir / "mismatch.py",
+        envs_dir / "observations.py",
+        envs_dir / "reset.py",
+        envs_dir / "task_adapter.py",
+        envs_dir / "task_adapters/__init__.py",
+    ]
     assert paths
     for path in paths:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -189,7 +199,13 @@ def test_phase4b2_has_no_task_reward_termination_or_distribution_logic() -> None
     }
     identifiers: set[str] = set()
     string_values: set[str] = set()
-    for path in sorted(envs_dir.rglob("*.py")):
+    pure_phase4b2_paths = (
+        envs_dir / "action_history.py",
+        envs_dir / "mismatch.py",
+        envs_dir / "observations.py",
+        envs_dir / "reset.py",
+    )
+    for path in pure_phase4b2_paths:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Name):
@@ -200,6 +216,33 @@ def test_phase4b2_has_no_task_reward_termination_or_distribution_logic() -> None
                 string_values.add(node.value.lower())
     assert identifiers.isdisjoint(forbidden_identifiers)
     assert string_values.isdisjoint(task_names)
+
+
+def test_isaac_environment_modules_are_not_imported_by_package_init() -> None:
+    init_path = Path(envs_api.__file__).resolve()
+    source = init_path.read_text(encoding="utf-8")
+    assert "residual_env" not in source
+    assert "task_adapters" not in source
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import sys; import somaforce_cross.envs; "
+            "assert not any(name.startswith('isaaclab') or name.startswith('omni') "
+            "for name in sys.modules)"
+        ),
+    ]
+    subprocess.run(command, cwd=init_path.parents[2], check=True)
+
+
+def test_runner_launches_app_before_delayed_isaac_environment_imports() -> None:
+    runner = Path(__file__).resolve().parents[1] / "scripts/smoke_phase4_door_env.py"
+    source = runner.read_text(encoding="utf-8")
+    launch_index = source.index("app_launcher = AppLauncher(args)")
+    dispatch_index = source.index("_run_residual(args, simulation_app)")
+    assert launch_index < dispatch_index
+    assert "from somaforce_cross.envs.residual_env import" in source
+    assert "def _run_residual" in source
 
 
 def test_residual_actor_boundary_width_has_one_semantic_latent() -> None:
