@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Iterable, NamedTuple
 
 import torch
@@ -17,6 +18,221 @@ class VirtualFTOutput(NamedTuple):
     sensor_quality: torch.Tensor
     saturation_mask: torch.Tensor
     dropout_mask: torch.Tensor
+
+
+@dataclass(frozen=True)
+class VirtualFTSensorParameters:
+    """Explicit selected rows in the approved 90-D sensor mismatch schema."""
+
+    axis_misalignment_quat: torch.Tensor
+    scale_error: torch.Tensor
+    additive_bias: torch.Tensor
+    drift_rate: torch.Tensor
+    drift_noise_std: torch.Tensor
+    white_noise_std: torch.Tensor
+    delay_steps: torch.Tensor
+    filter_alpha: torch.Tensor
+    force_saturation: torch.Tensor
+    torque_saturation: torch.Tensor
+    dropout_probability: torch.Tensor
+    F_scale: torch.Tensor
+    M_scale: torch.Tensor
+
+    @classmethod
+    def from_flat(cls, rows: torch.Tensor) -> VirtualFTSensorParameters:
+        """Split explicit ``[K,90]`` rows in the frozen Phase 4A field order."""
+        if not isinstance(rows, torch.Tensor):
+            raise TypeError("sensor_mismatch must be a torch.Tensor")
+        if not rows.is_floating_point():
+            raise TypeError("sensor_mismatch must have a floating-point dtype")
+        if rows.ndim != 2 or rows.shape[1] != 90:
+            raise ValueError("sensor_mismatch must have shape [K, 90]")
+        if not torch.isfinite(rows).all():
+            raise ValueError("sensor_mismatch must contain only finite values")
+        count = rows.shape[0]
+        delay_values = rows[:, 68:70]
+        if torch.any(delay_values != torch.round(delay_values)):
+            raise ValueError("sensor mismatch delay rows must contain integers")
+        return cls(
+            axis_misalignment_quat=rows[:, 0:8].reshape(count, 2, 4),
+            scale_error=rows[:, 8:20].reshape(count, 2, 6),
+            additive_bias=rows[:, 20:32].reshape(count, 2, 6),
+            drift_rate=rows[:, 32:44].reshape(count, 2, 6),
+            drift_noise_std=rows[:, 44:56].reshape(count, 2, 6),
+            white_noise_std=rows[:, 56:68].reshape(count, 2, 6),
+            delay_steps=delay_values.to(dtype=torch.long),
+            filter_alpha=rows[:, 70:72].reshape(count, 2),
+            force_saturation=rows[:, 72:78].reshape(count, 2, 3),
+            torque_saturation=rows[:, 78:84].reshape(count, 2, 3),
+            dropout_probability=rows[:, 84:86].reshape(count, 2),
+            F_scale=rows[:, 86:88].reshape(count, 2),
+            M_scale=rows[:, 88:90].reshape(count, 2),
+        )
+
+    def flatten(self) -> torch.Tensor:
+        """Return rows in axis/scale/bias/drift/noise/delay/filter/limit order."""
+        count = self.axis_misalignment_quat.shape[0]
+        return torch.cat(
+            (
+                self.axis_misalignment_quat.reshape(count, 8),
+                self.scale_error.reshape(count, 12),
+                self.additive_bias.reshape(count, 12),
+                self.drift_rate.reshape(count, 12),
+                self.drift_noise_std.reshape(count, 12),
+                self.white_noise_std.reshape(count, 12),
+                self.delay_steps.to(dtype=self.axis_misalignment_quat.dtype),
+                self.filter_alpha.reshape(count, 2),
+                self.force_saturation.reshape(count, 6),
+                self.torque_saturation.reshape(count, 6),
+                self.dropout_probability.reshape(count, 2),
+                self.F_scale.reshape(count, 2),
+                self.M_scale.reshape(count, 2),
+            ),
+            dim=-1,
+        )
+
+    @classmethod
+    def canonicalize(
+        cls,
+        parameters: VirtualFTSensorParameters,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+        max_delay_steps: int = 3,
+    ) -> VirtualFTSensorParameters:
+        """Validate all fields and return the exact values used by the sensor."""
+        if not isinstance(parameters, cls):
+            raise TypeError("parameters must be VirtualFTSensorParameters")
+        if not isinstance(parameters.axis_misalignment_quat, torch.Tensor):
+            raise TypeError("axis_misalignment_quat must be a torch.Tensor")
+        if parameters.axis_misalignment_quat.ndim == 0:
+            raise ValueError("axis_misalignment_quat must have shape [K, 2, 4]")
+        count = parameters.axis_misalignment_quat.shape[0]
+        axis = _selected_parameter(
+            parameters.axis_misalignment_quat,
+            "axis_misalignment_quat",
+            (count, 2, 4),
+            device=device,
+            dtype=dtype,
+        )
+        scale = _selected_parameter(
+            parameters.scale_error,
+            "scale_error",
+            (count, 2, 6),
+            device=device,
+            dtype=dtype,
+        )
+        bias = _selected_parameter(
+            parameters.additive_bias,
+            "additive_bias",
+            (count, 2, 6),
+            device=device,
+            dtype=dtype,
+        )
+        drift_rate = _selected_parameter(
+            parameters.drift_rate,
+            "drift_rate",
+            (count, 2, 6),
+            device=device,
+            dtype=dtype,
+        )
+        drift_noise = _selected_parameter(
+            parameters.drift_noise_std,
+            "drift_noise_std",
+            (count, 2, 6),
+            device=device,
+            dtype=dtype,
+        )
+        white_noise = _selected_parameter(
+            parameters.white_noise_std,
+            "white_noise_std",
+            (count, 2, 6),
+            device=device,
+            dtype=dtype,
+        )
+        delay = _selected_parameter(
+            parameters.delay_steps,
+            "delay_steps",
+            (count, 2),
+            device=device,
+            dtype=dtype,
+            integer=True,
+        )
+        alpha = _selected_parameter(
+            parameters.filter_alpha,
+            "filter_alpha",
+            (count, 2),
+            device=device,
+            dtype=dtype,
+        )
+        force_limit = _selected_parameter(
+            parameters.force_saturation,
+            "force_saturation",
+            (count, 2, 3),
+            device=device,
+            dtype=dtype,
+        )
+        torque_limit = _selected_parameter(
+            parameters.torque_saturation,
+            "torque_saturation",
+            (count, 2, 3),
+            device=device,
+            dtype=dtype,
+        )
+        dropout = _selected_parameter(
+            parameters.dropout_probability,
+            "dropout_probability",
+            (count, 2),
+            device=device,
+            dtype=dtype,
+        )
+        force_scale = _selected_parameter(
+            parameters.F_scale,
+            "F_scale",
+            (count, 2),
+            device=device,
+            dtype=dtype,
+        )
+        torque_scale = _selected_parameter(
+            parameters.M_scale,
+            "M_scale",
+            (count, 2),
+            device=device,
+            dtype=dtype,
+        )
+
+        norm = torch.linalg.vector_norm(axis, dim=-1, keepdim=True)
+        if torch.any(norm == 0):
+            raise ValueError("axis_misalignment_quat must contain non-zero quaternions")
+        if torch.any(1.0 + scale <= 0):
+            raise ValueError("1 + scale_error must be positive")
+        if torch.any(drift_noise < 0) or torch.any(white_noise < 0):
+            raise ValueError("noise standard deviations must be nonnegative")
+        if torch.any((delay < 0) | (delay > max_delay_steps)):
+            raise ValueError(f"delay_steps must be within [0, {max_delay_steps}]")
+        if torch.any((alpha < 0) | (alpha > 1)):
+            raise ValueError("filter_alpha must be within [0, 1]")
+        if torch.any(force_limit <= 0) or torch.any(torque_limit <= 0):
+            raise ValueError("saturation limits must be positive")
+        if torch.any((dropout < 0) | (dropout > 1)):
+            raise ValueError("dropout_probability must be within [0, 1]")
+        if torch.any(force_scale <= 0) or torch.any(torque_scale <= 0):
+            raise ValueError("F_scale and M_scale must be positive")
+        return cls(
+            axis_misalignment_quat=axis / norm,
+            scale_error=scale,
+            additive_bias=bias,
+            drift_rate=drift_rate,
+            drift_noise_std=drift_noise,
+            white_noise_std=white_noise,
+            delay_steps=delay,
+            filter_alpha=alpha,
+            force_saturation=force_limit,
+            torque_saturation=torque_limit,
+            dropout_probability=dropout,
+            F_scale=force_scale,
+            M_scale=torque_scale,
+        )
 
 
 def _expand_parameter(
@@ -43,6 +259,38 @@ def _expand_parameter(
     if nonnegative and torch.any(result < 0):
         raise ValueError(f"{name} must be nonnegative")
     return result
+
+
+def _selected_parameter(
+    value: object,
+    name: str,
+    shape: tuple[int, ...],
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    integer: bool = False,
+) -> torch.Tensor:
+    if not isinstance(value, torch.Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor")
+    if value.shape != shape:
+        raise ValueError(f"{name} must have shape {list(shape)}")
+    if value.device != device:
+        raise ValueError(f"{name} must be on {device}, got {value.device}")
+    if integer:
+        if value.dtype not in (
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+            torch.uint8,
+        ):
+            raise TypeError(f"{name} must have an integer dtype")
+        return value.to(dtype=torch.long).clone()
+    if value.dtype != dtype:
+        raise TypeError(f"{name} must have dtype {dtype}")
+    if not torch.isfinite(value).all():
+        raise ValueError(f"{name} must contain only finite values")
+    return value.clone()
 
 
 def _quat_apply(q: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
@@ -245,6 +493,56 @@ class VirtualFTSensor:
             self.drift_state[ids] = 0
             self.delay_buffer[ids] = 0
             self.filter_state[ids] = 0
+
+    def validate_parameters(
+        self,
+        env_ids: int | Iterable[int] | torch.Tensor,
+        parameters: VirtualFTSensorParameters,
+    ) -> tuple[torch.Tensor, VirtualFTSensorParameters]:
+        """Validate and normalize selected rows without changing sensor state."""
+        ids = _env_ids(env_ids, batch_size=self.batch_size, device=self.device)
+        prepared = VirtualFTSensorParameters.canonicalize(
+            parameters,
+            device=self.device,
+            dtype=self.dtype,
+            max_delay_steps=self.max_delay_steps,
+        )
+        if prepared.axis_misalignment_quat.shape[0] != ids.numel():
+            raise ValueError(
+                f"parameters must contain exactly {ids.numel()} selected rows"
+            )
+        return ids, prepared
+
+    def _apply_validated_parameters(
+        self, ids: torch.Tensor, parameters: VirtualFTSensorParameters
+    ) -> None:
+        force_scale = parameters.F_scale[..., None].expand(-1, -1, 3)
+        torque_scale = parameters.M_scale[..., None].expand(-1, -1, 3)
+        with torch.no_grad():
+            self.axis_misalignment_quat[ids] = parameters.axis_misalignment_quat
+            self.scale_error[ids] = parameters.scale_error
+            self.additive_bias[ids] = parameters.additive_bias
+            self.drift_rate[ids] = parameters.drift_rate
+            self.drift_noise_std[ids] = parameters.drift_noise_std
+            self.white_noise_std[ids] = parameters.white_noise_std
+            self.delay_steps[ids] = parameters.delay_steps
+            self.filter_alpha[ids] = parameters.filter_alpha
+            self.saturation_limit[ids] = torch.cat(
+                (parameters.force_saturation, parameters.torque_saturation), dim=-1
+            )
+            self.dropout_probability[ids] = parameters.dropout_probability
+            self.normalization_scale[ids] = torch.cat(
+                (force_scale, torque_scale), dim=-1
+            )
+
+    def apply_parameters(
+        self,
+        env_ids: int | Iterable[int] | torch.Tensor,
+        parameters: VirtualFTSensorParameters,
+    ) -> None:
+        """Atomically apply parameters without resetting any dynamic state."""
+        ids, prepared = self.validate_parameters(env_ids, parameters)
+        self._apply_validated_parameters(ids, prepared)
 
     def _wrench(self, value: object, name: str) -> torch.Tensor:
         if not isinstance(value, torch.Tensor):

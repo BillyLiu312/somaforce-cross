@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from somaforce_cross.sensing import (
     WristTareCalibrator,
     WristWrenchTransform,
 )
+from somaforce_cross.sensing.virtual_ft import VirtualFTSensorParameters
 
 
 def _quat_z(angle: float, *, dtype: torch.dtype = torch.float64) -> torch.Tensor:
@@ -128,6 +130,31 @@ def _run(
         valid,
         **kwargs,  # type: ignore[arg-type]
     )
+
+
+def _selected_sensor_parameters(
+    count: int,
+    *,
+    device: torch.device | str = "cpu",
+    dtype: torch.dtype = torch.float64,
+) -> VirtualFTSensorParameters:
+    rows = torch.zeros(count, 90, device=device, dtype=dtype)
+    rows[:, 0:8] = torch.tensor(
+        [2.0, 0.0, 0.0, 0.0], device=device, dtype=dtype
+    ).repeat(2)
+    rows[:, 8:20] = 0.1
+    rows[:, 20:32] = 0.2
+    rows[:, 32:44] = 0.01
+    rows[:, 44:56] = 0.02
+    rows[:, 56:68] = 0.03
+    rows[:, 68:70] = torch.tensor([1.0, 3.0], device=device, dtype=dtype)
+    rows[:, 70:72] = 0.4
+    rows[:, 72:78] = 100.0
+    rows[:, 78:84] = 10.0
+    rows[:, 84:86] = 0.2
+    rows[:, 86:88] = 20.0
+    rows[:, 88:90] = 2.0
+    return VirtualFTSensorParameters.from_flat(rows)
 
 
 def test_wrench_transform_sign_rotation_moment_shift_and_wrist_order() -> None:
@@ -473,6 +500,153 @@ def test_virtual_ft_scientific_parameters_are_explicit_and_errors_are_rejected()
         _run(sensor, torch.zeros(1, 1, 6, dtype=torch.float64))
 
 
+def test_virtual_ft_selected_parameter_application_is_atomic_and_state_free() -> None:
+    sensor = _sensor(3)
+    sensor.drift_state.fill_(3.0)
+    sensor.delay_buffer.fill_(4.0)
+    sensor.filter_state.fill_(5.0)
+    dynamic_before = (
+        sensor.drift_state.clone(),
+        sensor.delay_buffer.clone(),
+        sensor.filter_state.clone(),
+    )
+    unselected_before = (
+        sensor.axis_misalignment_quat[1].clone(),
+        sensor.scale_error[1].clone(),
+        sensor.additive_bias[1].clone(),
+        sensor.drift_rate[1].clone(),
+        sensor.drift_noise_std[1].clone(),
+        sensor.white_noise_std[1].clone(),
+        sensor.delay_steps[1].clone(),
+        sensor.filter_alpha[1].clone(),
+        sensor.saturation_limit[1].clone(),
+        sensor.dropout_probability[1].clone(),
+        sensor.normalization_scale[1].clone(),
+    )
+    parameters = _selected_sensor_parameters(2)
+    sensor.apply_parameters([2, 0], parameters)
+
+    assert torch.equal(
+        sensor.axis_misalignment_quat[[2, 0], :, 0],
+        torch.ones(2, 2, dtype=torch.float64),
+    )
+    assert torch.equal(sensor.scale_error[[2, 0]], parameters.scale_error)
+    assert torch.equal(sensor.delay_steps[[2, 0]], parameters.delay_steps)
+    assert torch.equal(
+        sensor.saturation_limit[[2, 0]],
+        torch.cat((parameters.force_saturation, parameters.torque_saturation), dim=-1),
+    )
+    expected_scale = torch.cat(
+        (
+            parameters.F_scale[..., None].expand(-1, -1, 3),
+            parameters.M_scale[..., None].expand(-1, -1, 3),
+        ),
+        dim=-1,
+    )
+    assert torch.equal(sensor.normalization_scale[[2, 0]], expected_scale)
+    assert all(
+        torch.equal(actual, expected)
+        for actual, expected in zip(
+            (
+                sensor.axis_misalignment_quat[1],
+                sensor.scale_error[1],
+                sensor.additive_bias[1],
+                sensor.drift_rate[1],
+                sensor.drift_noise_std[1],
+                sensor.white_noise_std[1],
+                sensor.delay_steps[1],
+                sensor.filter_alpha[1],
+                sensor.saturation_limit[1],
+                sensor.dropout_probability[1],
+                sensor.normalization_scale[1],
+            ),
+            unselected_before,
+            strict=True,
+        )
+    )
+    assert all(
+        torch.equal(actual, expected)
+        for actual, expected in zip(
+            (sensor.drift_state, sensor.delay_buffer, sensor.filter_state),
+            dynamic_before,
+            strict=True,
+        )
+    )
+
+    parameter_tensors = (
+        sensor.axis_misalignment_quat,
+        sensor.scale_error,
+        sensor.additive_bias,
+        sensor.drift_rate,
+        sensor.drift_noise_std,
+        sensor.white_noise_std,
+        sensor.delay_steps,
+        sensor.filter_alpha,
+        sensor.saturation_limit,
+        sensor.dropout_probability,
+        sensor.normalization_scale,
+    )
+    invalid_parameters = (
+        replace(
+            parameters,
+            scale_error=torch.full((2, 2, 6), -1.0, dtype=torch.float64),
+        ),
+        replace(
+            parameters,
+            drift_noise_std=torch.full((2, 2, 6), -0.1, dtype=torch.float64),
+        ),
+        replace(parameters, delay_steps=torch.full((2, 2), 4, dtype=torch.long)),
+        replace(
+            parameters,
+            filter_alpha=torch.full((2, 2), 1.1, dtype=torch.float64),
+        ),
+        replace(
+            parameters,
+            force_saturation=torch.zeros(2, 2, 3, dtype=torch.float64),
+        ),
+        replace(
+            parameters,
+            dropout_probability=torch.full((2, 2), -0.1, dtype=torch.float64),
+        ),
+        replace(parameters, F_scale=torch.zeros(2, 2, dtype=torch.float64)),
+        replace(
+            parameters,
+            axis_misalignment_quat=torch.zeros(2, 2, 4, dtype=torch.float64),
+        ),
+        replace(
+            parameters,
+            additive_bias=torch.full((2, 2, 6), torch.nan, dtype=torch.float64),
+        ),
+        replace(
+            parameters,
+            white_noise_std=torch.zeros(2, 2, 5, dtype=torch.float64),
+        ),
+        replace(
+            parameters,
+            torque_saturation=parameters.torque_saturation.float(),
+        ),
+        replace(
+            parameters,
+            delay_steps=parameters.delay_steps.to(dtype=torch.float64),
+        ),
+    )
+    for invalid in invalid_parameters:
+        before = tuple(tensor.clone() for tensor in parameter_tensors)
+        with pytest.raises((TypeError, ValueError)):
+            sensor.apply_parameters([2, 0], invalid)
+        assert all(
+            torch.equal(actual, expected)
+            for actual, expected in zip(parameter_tensors, before, strict=True)
+        )
+
+
+def test_virtual_ft_flat_parameters_reject_fractional_delay() -> None:
+    rows = _selected_sensor_parameters(1).flatten()
+    rows[:, 68] = 1.5
+    with pytest.raises(ValueError, match="delay.*integers"):
+        VirtualFTSensorParameters.from_flat(rows)
+
+
 def test_sensing_float64_shapes_and_named_outputs() -> None:
     sensor = _sensor(3, dtype=torch.float64)
     value = torch.randn(3, 2, 6, dtype=torch.float64)
@@ -492,6 +666,13 @@ def test_sensing_float64_shapes_and_named_outputs() -> None:
 def test_sensing_cuda_smoke() -> None:
     device = torch.device("cuda", torch.cuda.current_device())
     sensor = _sensor(2, device=device, dtype=torch.float32)
+    parameters = _selected_sensor_parameters(1, device=device, dtype=torch.float32)
+    sensor.apply_parameters([1], parameters)
+    assert sensor.delay_steps[1].tolist() == [1, 3]
+    with pytest.raises(ValueError, match="must be on"):
+        sensor.apply_parameters(
+            [1], _selected_sensor_parameters(1, dtype=torch.float32)
+        )
     value = torch.randn(2, 2, 6, device=device)
     output = _run(sensor, value)
     assert output.normalized_wrench.device == device

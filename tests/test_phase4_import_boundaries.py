@@ -10,24 +10,40 @@ from torch import nn
 import somaforce_cross.envs as envs_api
 from somaforce_cross.envs import (
     CriticObservationBundle,
+    EpisodeParameterStore,
+    EpisodeResetCoordinator,
     ForceSemanticOutput,
     ForceSemanticPipeline,
+    NominalActionHistory,
+    PerEnvRandomStream,
     PolicyObservationAssembly,
     PolicyObservationBundle,
+    SelectedResetHook,
     SemanticTargetBundle,
+    VirtualFTDraws,
+    VirtualFTSensorParameters,
     build_semantic_target_bundle,
+    validate_env_ids,
 )
 
 
 def test_envs_package_level_public_imports() -> None:
     expected = {
         "CriticObservationBundle": CriticObservationBundle,
+        "EpisodeParameterStore": EpisodeParameterStore,
+        "EpisodeResetCoordinator": EpisodeResetCoordinator,
         "ForceSemanticOutput": ForceSemanticOutput,
         "ForceSemanticPipeline": ForceSemanticPipeline,
+        "NominalActionHistory": NominalActionHistory,
+        "PerEnvRandomStream": PerEnvRandomStream,
         "PolicyObservationAssembly": PolicyObservationAssembly,
         "PolicyObservationBundle": PolicyObservationBundle,
+        "SelectedResetHook": SelectedResetHook,
         "SemanticTargetBundle": SemanticTargetBundle,
+        "VirtualFTDraws": VirtualFTDraws,
+        "VirtualFTSensorParameters": VirtualFTSensorParameters,
         "build_semantic_target_bundle": build_semantic_target_bundle,
+        "validate_env_ids": validate_env_ids,
     }
     assert set(expected) == set(envs_api.__all__)
     for name, value in expected.items():
@@ -51,6 +67,26 @@ def test_envs_ast_has_no_forbidden_runtime_imports() -> None:
         assert not any(
             token in imported.lower() for imported in imports for token in forbidden
         ), f"forbidden import in {path}: {imports}"
+
+
+def test_sensing_ast_has_no_environment_layer_dependency() -> None:
+    sensing_dir = Path(__file__).resolve().parents[1] / "somaforce_cross" / "sensing"
+    paths = sorted(sensing_dir.rglob("*.py"))
+    assert paths
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        imports: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imports.append(node.module or "")
+                imports.extend(alias.name for alias in node.names)
+        assert not any(
+            imported == "somaforce_cross.envs"
+            or imported.startswith("somaforce_cross.envs.")
+            for imported in imports
+        ), f"sensing layer imports envs in {path}: {imports}"
 
 
 def test_policy_api_exposes_only_approved_deployable_inputs() -> None:
@@ -128,6 +164,42 @@ def test_no_actor_critic_network_or_cross_loss_is_implemented() -> None:
     assert issubclass(ForceSemanticPipeline, nn.Module)
     assert not issubclass(PolicyObservationBundle, nn.Module)
     assert not issubclass(CriticObservationBundle, nn.Module)
+
+
+def test_phase4b2_has_no_task_reward_termination_or_distribution_logic() -> None:
+    envs_dir = Path(__file__).resolve().parents[1] / "somaforce_cross" / "envs"
+    forbidden_identifiers = {
+        "directrlenv",
+        "reward",
+        "rewards",
+        "terminated",
+        "termination",
+        "terminations",
+        "timeout",
+        "timeouts",
+        "residualactor",
+        "privilegedcritic",
+    }
+    task_names = {
+        "push_door_hand",
+        "push_door-hand",
+        "push_box",
+        "move_suitcase",
+        "move_largebox",
+    }
+    identifiers: set[str] = set()
+    string_values: set[str] = set()
+    for path in sorted(envs_dir.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                identifiers.add(node.id.lower())
+            elif isinstance(node, ast.Attribute):
+                identifiers.add(node.attr.lower())
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                string_values.add(node.value.lower())
+    assert identifiers.isdisjoint(forbidden_identifiers)
+    assert string_values.isdisjoint(task_names)
 
 
 def test_residual_actor_boundary_width_has_one_semantic_latent() -> None:
