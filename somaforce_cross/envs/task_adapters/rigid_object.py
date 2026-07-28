@@ -1,16 +1,16 @@
-"""Door-only Isaac adapter for the frozen HDMI simulation scaffold."""
+"""Shared rigid-object plumbing for the three Phase 4B4 HDMI tasks."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import torch
 
 from somaforce_cross.envs.task_adapter import (
     TaskProgressSignals,
-    door_nominal_physics_mismatch,
-    strict_root_height_failure,
+    rigid_nominal_physics_mismatch,
+    rigid_object_state,
 )
 from somaforce_cross.scaffold.contracts import G1_FULL_JOINT_NAMES
 from somaforce_cross.scaffold.pretrained_hdmi import (
@@ -32,12 +32,10 @@ from somaforce_cross.scaffold.pretrained_hdmi_isaac import (
 )
 
 
-class PushDoorHandTaskAdapter:
-    """Map one articulated door scene into the shared Phase 4 schemas."""
+class RigidObjectTaskAdapter:
+    """Common scene, reference, scaffold, contact, and critic plumbing."""
 
-    task_name = "push_door_hand"
-    object_kind = "articulation"
-    root_height_failure = 0.45
+    object_kind = "rigid_object"
 
     def __init__(
         self,
@@ -45,31 +43,29 @@ class PushDoorHandTaskAdapter:
         artifact_dir: str | Path,
         scene: object,
         robot: object,
-        door: object,
+        rigid_object: object,
         contacts: object,
+        filtered_wrist_contacts: Sequence[object],
         task_spec: HDMITaskSpec,
         scaffold_history: HDMIObservationHistory,
         action_runtime: object,
         source_reset: Callable[[torch.Tensor], None],
-        mechanism_friction: float,
-        mechanism_damping: float,
     ) -> None:
-        if task_spec.task != self.task_name or task_spec.object_kind != "articulation":
-            raise ValueError(
-                "PushDoorHandTaskAdapter requires the door artifact contract"
-            )
+        if task_spec.object_kind != self.object_kind:
+            raise ValueError("RigidObjectTaskAdapter requires a rigid-object contract")
+        if len(filtered_wrist_contacts) != 2:
+            raise ValueError("rigid tasks require left/right filtered contact sensors")
+        self.task_name = task_spec.task
         self.artifact_dir = Path(artifact_dir).expanduser().resolve()
         self.scene = scene
         self.robot = robot
-        self.door = door
-        self.object = door
+        self.object = rigid_object
         self.contacts = contacts
+        self.filtered_wrist_contacts = tuple(filtered_wrist_contacts)
         self.task_spec = task_spec
         self.history = scaffold_history
         self.action_runtime = action_runtime
         self.source_reset = source_reset
-        self.mechanism_friction = float(mechanism_friction)
-        self.mechanism_damping = float(mechanism_damping)
         self.device = self.robot.data.joint_pos.device
         self.num_envs = self.robot.data.joint_pos.shape[0]
         self.reference = HDMIMotionReference(self.artifact_dir, self.device)
@@ -77,15 +73,6 @@ class PushDoorHandTaskAdapter:
             self.num_envs, device=self.device, dtype=torch.long
         )
         self._resolve_indices()
-        initial = float(self.reference.data["joint_pos"][0, self.door_ref_joint_id])
-        final = float(self.reference.data["joint_pos"][-1, self.door_ref_joint_id])
-        self.progress_direction = 1.0 if final >= initial else -1.0
-        self.target_progress = abs(final - initial)
-        self.initial_door_joint = torch.zeros(
-            self.num_envs, device=self.device, dtype=torch.float32
-        )
-        self.previous_progress = torch.zeros_like(self.initial_door_joint)
-        self.current_progress = torch.zeros_like(self.initial_door_joint)
 
     def _resolve_indices(self) -> None:
         shared_joint_names = tuple(
@@ -120,12 +107,15 @@ class PushDoorHandTaskAdapter:
             ],
             device=self.device,
         )
+        if len(set(self.task_spec.action_joint_names)) != len(
+            self.task_spec.action_joint_names
+        ):
+            raise ValueError("artifact action joint names must be unique")
         self.root_ref_body_id = self.reference.body_names.index("pelvis")
-        self.door_ref_body_id = self.reference.body_names.index(
+        self.object_ref_body_id = self.reference.body_names.index(
             self.task_spec.object_asset_name
         )
-        self.door_ref_joint_id = self.reference.joint_names.index("door_joint")
-        self.door_panel_body_id = self.door.body_names.index(
+        self.object_body_id = self.object.body_names.index(
             self.task_spec.object_body_name
         )
         self.contact_eef_body_ids = torch.tensor(
@@ -154,13 +144,6 @@ class PushDoorHandTaskAdapter:
             ],
             device=self.device,
         )
-        self.contact_wrist_ids = torch.tensor(
-            [
-                self.contacts.body_names.index("left_wrist_yaw_link"),
-                self.contacts.body_names.index("right_wrist_yaw_link"),
-            ],
-            device=self.device,
-        )
         self.contact_support_ids = torch.tensor(
             [
                 self.contacts.body_names.index("left_ankle_roll_link"),
@@ -178,11 +161,11 @@ class PushDoorHandTaskAdapter:
     def reset(self, env_ids: torch.Tensor) -> None:
         self.validate_reset(env_ids)
         self.reference_step[env_ids] = 0
-        door_joint = self.door.data.joint_pos[env_ids, 0]
-        self.initial_door_joint[env_ids] = door_joint
-        self.previous_progress[env_ids] = 0.0
-        self.current_progress[env_ids] = 0.0
+        self._reset_progress(env_ids)
         self.source_reset(env_ids)
+
+    def _reset_progress(self, env_ids: torch.Tensor) -> None:
+        raise NotImplementedError
 
     def _reference_robot_joint_state(
         self, key: str, env_ids: torch.Tensor, frame: int = 0
@@ -196,13 +179,12 @@ class PushDoorHandTaskAdapter:
         )
         source = self.reference.data[key][[frame]].float().expand(count, -1)
         result[:, self.robot_shared_joint_ids] = source[:, self.ref_shared_joint_ids]
-        for name, value in self.task_spec.robot_initial_joint_overrides.items():
-            if key == "joint_pos":
+        if key == "joint_pos":
+            for name, value in self.task_spec.robot_initial_joint_overrides.items():
                 result[:, self.robot.joint_names.index(name)] = value
         return result
 
     def write_scene_reset(self, env_ids: torch.Tensor) -> None:
-        """Write the same selected frame-zero state used by the golden runtime."""
         self.validate_reset(env_ids)
         count = env_ids.numel()
         origins = self.scene.env_origins[env_ids]
@@ -237,53 +219,32 @@ class PushDoorHandTaskAdapter:
             env_ids=env_ids,
         )
 
-        door_pose = torch.cat(
+        object_pose = torch.cat(
             (
-                self.reference.data["body_pos_w"][[0], self.door_ref_body_id]
+                self.reference.data["body_pos_w"][[0], self.object_ref_body_id]
                 .float()
                 .expand(count, -1)
                 + origins,
-                self.reference.data["body_quat_w"][[0], self.door_ref_body_id]
+                self.reference.data["body_quat_w"][[0], self.object_ref_body_id]
                 .float()
                 .expand(count, -1),
             ),
             dim=-1,
         )
-        self.door.write_root_link_pose_to_sim(door_pose, env_ids=env_ids)
-        self.door.write_root_com_velocity_to_sim(
+        self.object.write_root_link_pose_to_sim(object_pose, env_ids=env_ids)
+        self.object.write_root_com_velocity_to_sim(
             torch.zeros(count, 6, device=self.device), env_ids=env_ids
         )
-        door_joint = (
-            self.reference.data["joint_pos"][[0], self.door_ref_joint_id]
-            .float()
-            .expand(count, 1)
-            .clone()
-        )
-        door_joint_vel = (
-            self.reference.data["joint_vel"][[0], self.door_ref_joint_id]
-            .float()
-            .expand(count, 1)
-            .clone()
-        )
-        self.door.write_joint_state_to_sim(door_joint, door_joint_vel, env_ids=env_ids)
 
     def advance(self) -> None:
-        self.previous_progress.copy_(self.current_progress)
-        door_joint = self.door.data.joint_pos[:, 0]
-        self.current_progress.copy_(
-            self.progress_direction * (door_joint - self.initial_door_joint)
-        )
+        self._advance_progress()
         self.reference_step.add_(1)
 
+    def _advance_progress(self) -> None:
+        raise NotImplementedError
+
     def apply_object_action(self) -> None:
-        door_velocity = self.door.data.joint_vel[:, 0]
-        friction = (
-            -torch.sign(door_velocity)
-            * (door_velocity.abs() > 0.01)
-            * self.mechanism_friction
-        )
-        effort = friction - door_velocity * self.mechanism_damping
-        self.door.set_joint_effort_target(effort.unsqueeze(1))
+        return None
 
     def _future_reference(self) -> dict[str, torch.Tensor]:
         offsets = torch.tensor(FUTURE_STEPS, device=self.device, dtype=torch.long)
@@ -355,21 +316,21 @@ class PushDoorHandTaskAdapter:
         robot_lin_local = quat_apply_inverse(robot_root_yaw[:, None], robot_body_lin)
         robot_ang_local = quat_apply_inverse(robot_root_yaw[:, None], robot_body_ang)
 
-        door_root_pos = self.door.data.root_link_pos_w
-        door_root_quat = self.door.data.root_link_quat_w
-        door_body_pos = self.door.data.body_link_pos_w[:, self.door_panel_body_id]
-        door_body_quat = self.door.data.body_link_quat_w[:, self.door_panel_body_id]
+        object_root_pos = self.object.data.root_link_pos_w
+        object_root_quat = self.object.data.root_link_quat_w
+        object_body_pos = self.object.data.body_link_pos_w[:, self.object_body_id]
+        object_body_quat = self.object.data.body_link_quat_w[:, self.object_body_id]
         target_offsets = (
             torch.tensor(
                 self.task_spec.contact_target_offsets,
                 device=self.device,
-                dtype=door_body_pos.dtype,
+                dtype=object_body_pos.dtype,
             )
             .unsqueeze(0)
             .expand(self.num_envs, -1, -1)
         )
-        contact_target = door_body_pos[:, None] + quat_apply(
-            door_body_quat[:, None], target_offsets
+        contact_target = object_body_pos[:, None] + quat_apply(
+            object_body_quat[:, None], target_offsets
         )
         wrist_pos = self.robot.data.body_link_pos_w.index_select(
             1, self.contact_eef_body_ids
@@ -387,15 +348,14 @@ class PushDoorHandTaskAdapter:
             .expand(self.num_envs, -1, -1)
         )
         eef_pos = wrist_pos + quat_apply(wrist_quat, eef_offsets)
-        ref_door_pos = (
-            future["body_pos_w"][:, :, self.door_ref_body_id]
+        ref_object_pos = (
+            future["body_pos_w"][:, :, self.object_ref_body_id]
             + self.scene.env_origins[:, None]
         )
-        ref_door_quat = future["body_quat_w"][:, :, self.door_ref_body_id]
+        ref_object_quat = future["body_quat_w"][:, :, self.object_ref_body_id]
         return locals()
 
     def build_scaffold_observation(self) -> HDMIObservationBatch:
-        """Build the unchanged privileged-teacher input for frozen a_nom only."""
         future = self._future_reference()
         g = self._geometry(future)
         ref_joint_future = future["joint_pos"].index_select(
@@ -409,14 +369,14 @@ class PushDoorHandTaskAdapter:
             ),
             dim=-1,
         )
-        door_yaw = yaw_quat(g["door_root_quat"])
-        relative_yaw = quat_mul(quat_conjugate(g["robot_root_yaw"]), door_yaw)
+        object_yaw = yaw_quat(g["object_root_quat"])
+        relative_yaw = quat_mul(quat_conjugate(g["robot_root_yaw"]), object_yaw)
         relative_yaw_angle = 2.0 * torch.atan2(relative_yaw[:, 3], relative_yaw[:, 0])
         object_obs = torch.cat(
             (
                 quat_apply_inverse(
                     g["robot_root_yaw"],
-                    g["door_root_pos"] - g["robot_root_pos"],
+                    g["object_root_pos"] - g["robot_root_pos"],
                 )[:, :2],
                 torch.cos(relative_yaw_angle).unsqueeze(1),
                 torch.sin(relative_yaw_angle).unsqueeze(1),
@@ -449,8 +409,9 @@ class PushDoorHandTaskAdapter:
         heights = self.robot.data.body_link_pos_w.index_select(1, self.height_body_ids)[
             ..., 2
         ]
-        door_quat_diff = quat_mul(
-            quat_conjugate(g["door_root_quat"])[:, None], g["ref_door_quat"]
+        object_quat_diff = quat_mul(
+            quat_conjugate(g["object_root_quat"])[:, None],
+            g["ref_object_quat"],
         )
         privileged = torch.cat(
             (
@@ -479,27 +440,24 @@ class PushDoorHandTaskAdapter:
                 self.robot.data.applied_torque,
                 quat_apply_inverse(
                     g["robot_root_quat"],
-                    g["door_root_pos"] - g["robot_root_pos"],
+                    g["object_root_pos"] - g["robot_root_pos"],
                 ),
                 quat_to_matrix(
                     quat_mul(
                         quat_conjugate(g["robot_root_quat"]),
-                        g["door_root_quat"],
+                        g["object_root_quat"],
                     )
                 ).reshape(self.num_envs, -1),
                 quat_apply_inverse(
-                    g["door_root_quat"][:, None],
-                    g["ref_door_pos"] - g["door_root_pos"][:, None],
+                    g["object_root_quat"][:, None],
+                    g["ref_object_pos"] - g["object_root_pos"][:, None],
                 ).reshape(self.num_envs, -1),
-                quat_to_matrix(door_quat_diff).reshape(self.num_envs, -1),
+                quat_to_matrix(object_quat_diff).reshape(self.num_envs, -1),
                 future["object_contact"].reshape(self.num_envs, -1),
                 quat_apply_inverse(
                     g["robot_root_quat"][:, None],
                     g["contact_target"] - g["eef_pos"],
                 ).reshape(self.num_envs, -1),
-                self.door.data.joint_pos,
-                self.door.data.joint_vel,
-                self.door.data.applied_torque,
             ),
             dim=-1,
         )
@@ -538,16 +496,13 @@ class PushDoorHandTaskAdapter:
         )
 
     def wrist_twist_base_yaw(self) -> torch.Tensor:
-        wrist_ids = torch.tensor(
-            [
-                self.robot.body_names.index("left_wrist_yaw_link"),
-                self.robot.body_names.index("right_wrist_yaw_link"),
-            ],
-            device=self.device,
-        )
         yaw = yaw_quat(self.robot.data.root_link_quat_w)
-        linear = self.robot.data.body_com_lin_vel_w.index_select(1, wrist_ids)
-        angular = self.robot.data.body_com_ang_vel_w.index_select(1, wrist_ids)
+        linear = self.robot.data.body_com_lin_vel_w.index_select(
+            1, self.contact_eef_body_ids
+        )
+        angular = self.robot.data.body_com_ang_vel_w.index_select(
+            1, self.contact_eef_body_ids
+        )
         return torch.cat(
             (
                 quat_apply_inverse(yaw[:, None], linear),
@@ -558,14 +513,24 @@ class PushDoorHandTaskAdapter:
 
     def expected_contact(self) -> torch.Tensor:
         frame = self.reference_step.clamp_max(self.reference.length - 1)
-        source = self.reference.data["object_contact"].index_select(0, frame).bool()
-        result = torch.zeros(self.num_envs, 2, device=self.device, dtype=torch.bool)
-        result[:, 1] = source[:, 0]
-        return result
+        source = self.reference.data["object_contact"].index_select(0, frame)
+        scalar = source.reshape(self.num_envs, -1).bool().any(dim=-1)
+        return scalar[:, None].expand(-1, 2)
 
     def contact_truth(self) -> torch.Tensor:
-        forces = self.contacts.data.net_forces_w.index_select(1, self.contact_wrist_ids)
-        return torch.linalg.vector_norm(forces, dim=-1) > 1.0
+        results: list[torch.Tensor] = []
+        for sensor in self.filtered_wrist_contacts:
+            matrix = sensor.data.force_matrix_w
+            if matrix is None:
+                results.append(
+                    torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+                )
+            else:
+                norm = torch.linalg.vector_norm(matrix, dim=-1).reshape(
+                    self.num_envs, -1
+                )
+                results.append(norm.amax(dim=-1) > 1.0)
+        return torch.stack(results, dim=-1)
 
     def support_contact_count(self) -> torch.Tensor:
         forces = self.contacts.data.net_forces_w.index_select(
@@ -578,56 +543,45 @@ class PushDoorHandTaskAdapter:
         )
 
     def build_object_state(self) -> torch.Tensor:
-        robot_quat = self.robot.data.root_link_quat_w
-        relative_position = quat_apply_inverse(
-            robot_quat,
-            self.door.data.root_link_pos_w - self.robot.data.root_link_pos_w,
+        result = rigid_object_state(
+            self.robot.data.root_link_pos_w,
+            self.robot.data.root_link_quat_w,
+            self.object.data.root_link_pos_w,
+            self.object.data.root_link_quat_w,
+            self.object.data.root_link_lin_vel_w,
+            self.object.data.root_link_ang_vel_w,
         )
-        relative_quat = quat_mul(
-            quat_conjugate(robot_quat), self.door.data.root_link_quat_w
-        )
-        linear = quat_apply_inverse(robot_quat, self.door.data.root_link_lin_vel_w)
-        angular = quat_apply_inverse(robot_quat, self.door.data.root_link_ang_vel_w)
-        return torch.cat(
-            (
-                relative_position,
-                relative_quat,
-                linear,
-                angular,
-                self.door.data.joint_pos,
-                self.door.data.joint_vel,
-                self.door.data.applied_torque,
-            ),
-            dim=-1,
-        )
+        if result.shape != (self.num_envs, 16):
+            raise AssertionError("rigid object_state must have shape [B,16]")
+        if torch.count_nonzero(result[:, 13:]) != 0:
+            raise AssertionError("rigid mechanism slots must be bitwise zero")
+        return result
 
     def nominal_physics_row(self) -> torch.Tensor:
-        return door_nominal_physics_mismatch(
-            self.num_envs,
-            mechanism_friction=self.mechanism_friction,
-            mechanism_damping=self.mechanism_damping,
-            device=self.device,
+        view = self.object.root_physx_view
+        masses = view.get_masses().to(device=self.device, dtype=torch.float32)
+        masses = masses.reshape(self.num_envs, -1)
+        inertias = view.get_inertias().to(device=self.device, dtype=torch.float32)
+        inertias = inertias.reshape(self.num_envs, -1, 9)
+        materials = view.get_material_properties().to(
+            device=self.device, dtype=torch.float32
+        )
+        materials = materials.reshape(self.num_envs, -1, 3)
+        if masses.shape[1] != 1 or inertias.shape[1] != 1:
+            raise ValueError("rigid task must expose exactly one applied mass/inertia")
+        static = materials[..., 0]
+        dynamic = materials[..., 1]
+        if not (
+            torch.equal(static, static[:, :1].expand_as(static))
+            and torch.equal(dynamic, dynamic[:, :1].expand_as(dynamic))
+        ):
+            raise ValueError("all rigid collision shapes must share one friction")
+        return rigid_nominal_physics_mismatch(
+            masses[:, 0],
+            inertias[:, 0],
+            static[:, 0],
+            dynamic[:, 0],
         )
 
     def progress_signals(self) -> TaskProgressSignals:
-        expected = self.expected_contact()
-        truth = self.contact_truth()
-        root_height = self.robot.data.root_link_pos_w[:, 2]
-        return TaskProgressSignals(
-            progress=(self.current_progress / self.target_progress).unsqueeze(1),
-            progress_delta=(
-                (self.current_progress - self.previous_progress) / self.target_progress
-            ).unsqueeze(1),
-            success=(self.current_progress >= self.target_progress)
-            .float()
-            .unsqueeze(1),
-            expected_contact=expected.float(),
-            contact_truth=truth.float(),
-            stability_margin=(root_height - self.root_height_failure).unsqueeze(1),
-            failure=strict_root_height_failure(
-                root_height, threshold=self.root_height_failure
-            ),
-            reference_exhausted=(
-                self.reference_step + max(FUTURE_STEPS) >= self.reference.length
-            ),
-        )
+        raise NotImplementedError

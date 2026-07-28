@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 from pathlib import Path
 
@@ -828,6 +829,95 @@ def test_empty_reset_is_validated_no_op() -> None:
             before,
             strict=True,
         )
+    )
+
+
+def test_c0_reset_uses_zero_wrist_history_and_independent_action_histories() -> None:
+    coordinator, _ = _coordinator(batch_size=4)
+    inputs = _reset_inputs(2)
+    inputs["initial_wrist_frame"].zero_()
+    inputs["current_a_nom"].fill_(2.0)
+    ids = torch.tensor([3, 1])
+    coordinator.reset(ids, **inputs)
+    assert torch.count_nonzero(coordinator.wrist_history.storage[ids]) == 0
+    assert torch.equal(
+        coordinator.nominal_action_history.storage[ids, :, 0],
+        torch.full((2, 23), 2.0),
+    )
+    assert (
+        torch.count_nonzero(coordinator.nominal_action_history.storage[ids, :, 1:]) == 0
+    )
+    assert torch.count_nonzero(coordinator.executed_action_history.storage[ids]) == 0
+    assert (
+        coordinator.nominal_action_history.storage.data_ptr()
+        != coordinator.executed_action_history.storage.data_ptr()
+    )
+
+
+def test_isaac_selected_reset_prevalidates_before_scene_mutation_and_never_steps() -> (
+    None
+):
+    path = Path(__file__).resolve().parents[1] / "somaforce_cross/envs/residual_env.py"
+    source = path.read_text(encoding="utf-8")
+    reset_source = source[
+        source.index("def _reset_idx") : source.index("def _owned_sensor_state")
+    ]
+    assert reset_source.index("self._validate_reset_plan") < reset_source.index(
+        "self.adapter.write_scene_reset"
+    )
+    assert "self.sim.step" not in reset_source
+    assert "initial_wrist_frame=torch.zeros" in reset_source
+    assert "stable_env_seeds(self.cfg.seed, ids" in reset_source
+
+
+def test_constructor_warmup_has_one_isolated_call_site() -> None:
+    root = Path(__file__).resolve().parents[1]
+    env_path = root / "somaforce_cross/envs/residual_env.py"
+    source = env_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(env_path))
+    call_sites: list[tuple[str, str]] = []
+    for class_node in (node for node in tree.body if isinstance(node, ast.ClassDef)):
+        for method in (
+            node for node in class_node.body if isinstance(node, ast.FunctionDef)
+        ):
+            for node in ast.walk(method):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "_warmup_golden_reset_state"
+                ):
+                    call_sites.append((class_node.name, method.name))
+    assert call_sites == [("SomaForceResidualEnv", "__init__")]
+
+    env_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SomaForceResidualEnv"
+    )
+    warmup = next(
+        node
+        for node in env_class.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_warmup_golden_reset_state"
+    )
+    sim_steps = [
+        node
+        for node in ast.walk(warmup)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "step"
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "sim"
+    ]
+    assert len(sim_steps) == 1
+
+    isolated_paths = [root / "somaforce_cross/envs/reset.py"]
+    isolated_paths.extend(
+        sorted((root / "somaforce_cross/envs/task_adapters").glob("*.py"))
+    )
+    assert all(
+        "_warmup_golden_reset_state" not in path.read_text(encoding="utf-8")
+        for path in isolated_paths
     )
 
 

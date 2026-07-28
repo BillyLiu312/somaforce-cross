@@ -1,4 +1,4 @@
-"""Door-only Isaac Lab DirectRLEnv for the Phase 4B3 C0 parity gate."""
+"""Manifest-driven Isaac Lab DirectRLEnv for Phase 4B4 C0 parity."""
 
 from __future__ import annotations
 
@@ -10,19 +10,24 @@ import torch
 from isaaclab.envs import DirectRLEnv
 
 from somaforce_cross.envs.action_history import NominalActionHistory
-from somaforce_cross.envs.mismatch import EpisodeParameterStore, PerEnvRandomStream
+from somaforce_cross.envs.mismatch import (
+    EpisodeParameterStore,
+    PerEnvRandomStream,
+    validate_env_ids,
+)
 from somaforce_cross.envs.observations import (
     CriticObservationBundle,
     ForceSemanticPipeline,
     build_semantic_target_bundle,
 )
 from somaforce_cross.envs.reset import EpisodeResetCoordinator
-from somaforce_cross.envs.residual_env_cfg import SomaForceDoorResidualEnvCfg
+from somaforce_cross.envs.residual_env_cfg import SomaForceResidualEnvCfg
 from somaforce_cross.envs.task_adapter import smoke_done_flags
-from somaforce_cross.envs.task_adapter import (
-    door_nominal_physics_mismatch,
-    stable_env_seeds,
+from somaforce_cross.envs.task_adapter import stable_env_seeds
+from somaforce_cross.envs.task_adapters.move_payload import (
+    MovePayloadTaskAdapter,
 )
+from somaforce_cross.envs.task_adapters.push_box import PushBoxTaskAdapter
 from somaforce_cross.envs.task_adapters.push_door_hand import (
     PushDoorHandTaskAdapter,
 )
@@ -49,7 +54,7 @@ from somaforce_cross.sensing import (
 from somaforce_cross.sensing.virtual_ft import VirtualFTSensorParameters
 
 
-class FrozenDoorScaffoldState:
+class FrozenScaffoldState:
     """Own frozen inference and HDMI-compatible nominal action history."""
 
     def __init__(self, scaffold: PretrainedHDMIScaffold, robot: object) -> None:
@@ -98,7 +103,7 @@ class FrozenDoorScaffoldState:
         self.history.advance_reference()
 
 
-class NormalizedDoorActionSink:
+class NormalizedActionSink:
     """Selected-reset wrapper around the audited normalized HDMI action sink."""
 
     def __init__(
@@ -147,14 +152,14 @@ class NormalizedDoorActionSink:
         return target
 
 
-class SomaForceDoorResidualEnv(DirectRLEnv):
-    """Push-door-only C0 environment; external actions are raw residual probes."""
+class SomaForceResidualEnv(DirectRLEnv):
+    """Four-task C0 environment; external actions are raw residual probes."""
 
-    cfg: SomaForceDoorResidualEnvCfg
+    cfg: SomaForceResidualEnvCfg
 
     def __init__(
         self,
-        cfg: SomaForceDoorResidualEnvCfg,
+        cfg: SomaForceResidualEnvCfg,
         render_mode: str | None = None,
         **kwargs: object,
     ) -> None:
@@ -165,8 +170,10 @@ class SomaForceDoorResidualEnv(DirectRLEnv):
             artifact_dir, device=self.device
         )
         self.task_spec = scaffold.task_spec
-        self.scaffold_state = FrozenDoorScaffoldState(scaffold, self.robot)
-        self.action_sink = NormalizedDoorActionSink(
+        if self.task_spec.object_kind == "rigid_object":
+            self._configure_rigid_object_nominal()
+        self.scaffold_state = FrozenScaffoldState(scaffold, self.robot)
+        self.action_sink = NormalizedActionSink(
             self.robot,
             action_joint_names=self.task_spec.action_joint_names,
             action_scale=self.task_spec.action_scale,
@@ -180,17 +187,34 @@ class SomaForceDoorResidualEnv(DirectRLEnv):
             sensor_offset_J=torch.zeros(2, 3, device=self.device),
             warmup_steps=1,
         )
-        self.adapter = PushDoorHandTaskAdapter(
-            artifact_dir=artifact_dir,
-            scene=self.scene,
-            robot=self.robot,
-            door=self.door,
-            contacts=self.contacts,
-            task_spec=self.task_spec,
-            scaffold_history=self.scaffold_state.history,
-            action_runtime=self.action_sink.runtime,
-            source_reset=self.wrench_source.reset,
-        )
+        common_adapter = {
+            "artifact_dir": artifact_dir,
+            "scene": self.scene,
+            "robot": self.robot,
+            "contacts": self.contacts,
+            "task_spec": self.task_spec,
+            "scaffold_history": self.scaffold_state.history,
+            "action_runtime": self.action_sink.runtime,
+            "source_reset": self.wrench_source.reset,
+        }
+        if self.task_spec.task == "push_door_hand":
+            self.adapter = PushDoorHandTaskAdapter(
+                **common_adapter,
+                door=self.object,
+                mechanism_friction=profile.door_friction,
+                mechanism_damping=profile.door_damping,
+            )
+        else:
+            rigid_adapter = {
+                **common_adapter,
+                "rigid_object": self.object,
+                "filtered_wrist_contacts": self.filtered_wrist_contacts,
+            }
+            if self.task_spec.task == "push_box":
+                self.adapter = PushBoxTaskAdapter(**rigid_adapter)
+            else:
+                self.adapter = MovePayloadTaskAdapter(**rigid_adapter)
+        self._warmup_golden_reset_state()
 
         self.tare_calibrator = WristTareCalibrator(
             self.num_envs,
@@ -321,8 +345,52 @@ class SomaForceDoorResidualEnv(DirectRLEnv):
 
     def _setup_scene(self) -> None:
         self.robot = self.scene["robot"]
-        self.door = self.scene["door"]
+        task = self.cfg.smoke_profile.task
+        self.object = (
+            self.scene["door"]
+            if task == "push_door_hand"
+            else self.scene["rigid_object"]
+        )
+        self.door = self.object if task == "push_door_hand" else None
         self.contacts = self.scene["contacts"]
+        self.filtered_wrist_contacts = (
+            ()
+            if task == "push_door_hand"
+            else (
+                self.scene["left_object_contacts"],
+                self.scene["right_object_contacts"],
+            )
+        )
+
+    def _configure_rigid_object_nominal(self) -> None:
+        mass = self.task_spec.nominal_object_mass
+        if mass is None:
+            raise ValueError("rigid task contract must declare nominal object mass")
+        view = self.object.root_physx_view
+        indices = torch.arange(self.num_envs, device="cpu")
+        masses = view.get_masses().clone()
+        inertias = view.get_inertias().clone()
+        scale = float(mass) / masses
+        masses.fill_(float(mass))
+        inertias *= scale.unsqueeze(-1) if inertias.ndim == 3 else scale
+        view.set_masses(masses, indices)
+        view.set_inertias(inertias, indices)
+        materials = view.get_material_properties().clone()
+        materials[..., 0] = self.cfg.smoke_profile.object_friction
+        materials[..., 1] = self.cfg.smoke_profile.object_friction
+        materials[..., 2] = 0.0
+        view.set_material_properties(materials, indices)
+        coms = view.get_coms().clone()
+        view.set_coms(coms, indices)
+
+    def _warmup_golden_reset_state(self) -> None:
+        """Mirror the golden constructor's one-time pre-rewind physics step."""
+        env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        self.adapter.write_scene_reset(env_ids)
+        self.scene.reset(env_ids)
+        self.scene.write_data_to_sim()
+        self.sim.step(render=False)
+        self.scene.update(self.cfg.smoke_profile.physics_dt)
 
     def _sensor_parameter_rows(self, count: int) -> torch.Tensor:
         profile = self.cfg.smoke_profile
@@ -370,45 +438,77 @@ class SomaForceDoorResidualEnv(DirectRLEnv):
         return parameters.flatten()
 
     def _snapshot_terminal(self, env_ids: torch.Tensor) -> None:
+        object_joint_pos, _, _ = self._object_mechanism_state()
         self._terminal_snapshot = {
             "env_ids": env_ids.clone(),
             "terminated": self.reset_terminated[env_ids].clone(),
             "time_outs": self.reset_time_outs[env_ids].clone(),
             "root_state": self.robot.data.root_state_w[env_ids].clone(),
             "joint_pos": self.robot.data.joint_pos[env_ids].clone(),
-            "door_joint": self.door.data.joint_pos[env_ids].clone(),
+            "object_joint": object_joint_pos[env_ids].clone(),
             "reference_step": self.adapter.reference_step[env_ids].clone(),
         }
         self.extras["terminal"] = self._terminal_snapshot
 
+    def _object_mechanism_state(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.task_spec.object_kind == "articulation":
+            return (
+                self.object.data.joint_pos,
+                self.object.data.joint_vel,
+                self.object.data.applied_torque,
+            )
+        zeros = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.float32)
+        return zeros, zeros.clone(), zeros.clone()
+
+    def _validate_reset_plan(
+        self,
+        env_ids: torch.Tensor,
+        physics_mismatch: torch.Tensor,
+        scaffold_mismatch: torch.Tensor,
+        sensor_mismatch: torch.Tensor,
+        seeds: torch.Tensor,
+    ) -> None:
+        self.parameter_store.validate_rows(
+            env_ids, physics_mismatch, scaffold_mismatch, sensor_mismatch
+        )
+        VirtualFTSensorParameters.from_flat(sensor_mismatch)
+        self.random_stream.validate_seeds(env_ids, seeds)
+        self.scaffold_state.validate_reset(env_ids)
+        self.action_sink.validate_reset(env_ids)
+        self.adapter.validate_reset(env_ids)
+
     def _reset_idx(self, env_ids: Sequence[int] | torch.Tensor) -> None:
-        ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        ids = validate_env_ids(env_ids, batch_size=self.num_envs, device=self.device)
+        count = ids.numel()
+        profile = self.cfg.smoke_profile
+        physics_mismatch = self.adapter.nominal_physics_row().index_select(0, ids)
+        scaffold_mismatch = torch.tensor(
+            [profile.delay, profile.alpha],
+            device=self.device,
+            dtype=torch.float32,
+        ).expand(count, 2)
+        sensor_mismatch = self._sensor_parameter_rows(count)
+        seeds = stable_env_seeds(self.cfg.seed, ids, device=self.device)
+        self._validate_reset_plan(
+            ids,
+            physics_mismatch,
+            scaffold_mismatch,
+            sensor_mismatch,
+            seeds,
+        )
         self._snapshot_terminal(ids)
         super()._reset_idx(ids)
         self.adapter.write_scene_reset(ids)
         self.scene.write_data_to_sim()
 
-        count = ids.numel()
-        profile = self.cfg.smoke_profile
         self.reset_coordinator.reset(
             ids,
-            physics_mismatch=door_nominal_physics_mismatch(
-                count,
-                mechanism_friction=profile.door_friction,
-                mechanism_damping=profile.door_damping,
-                device=self.device,
-            ),
-            scaffold_mismatch=torch.tensor(
-                [profile.delay, profile.alpha],
-                device=self.device,
-                dtype=torch.float32,
-            ).expand(count, 2),
-            sensor_mismatch=self._sensor_parameter_rows(count),
-            seeds=stable_env_seeds(
-                self.cfg.seed,
-                ids,
-                device=self.device,
-            ),
+            physics_mismatch=physics_mismatch,
+            scaffold_mismatch=scaffold_mismatch,
+            sensor_mismatch=sensor_mismatch,
+            seeds=seeds,
             initial_wrist_frame=torch.zeros(count, 2, 14, device=self.device),
             current_a_nom=torch.zeros(count, 23, device=self.device),
         )
@@ -546,15 +646,7 @@ class SomaForceDoorResidualEnv(DirectRLEnv):
     def _apply_action(self) -> None:
         target = self.action_sink.substep_target(self._substep)
         self.robot.set_joint_position_target(target)
-        door_velocity = self.door.data.joint_vel[:, 0]
-        profile = self.cfg.smoke_profile
-        friction = (
-            -torch.sign(door_velocity)
-            * (door_velocity.abs() > 0.01)
-            * profile.door_friction
-        )
-        effort = friction - door_velocity * profile.door_damping
-        self.door.set_joint_effort_target(effort.unsqueeze(1))
+        self.adapter.apply_object_action()
         self._substep += 1
 
     def _finish_control_step(self) -> None:
@@ -565,13 +657,14 @@ class SomaForceDoorResidualEnv(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         self._finish_control_step()
+        object_joint_pos, object_joint_vel, _ = self._object_mechanism_state()
         tensors = (
             self.robot.data.root_state_w,
             self.robot.data.joint_pos,
             self.robot.data.joint_vel,
-            self.door.data.root_state_w,
-            self.door.data.joint_pos,
-            self.door.data.joint_vel,
+            self.object.data.root_state_w,
+            object_joint_pos,
+            object_joint_vel,
             self._a_total,
         )
         nonfinite = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
@@ -668,6 +761,7 @@ class SomaForceDoorResidualEnv(DirectRLEnv):
 
     def environment_owned_state(self) -> dict[str, torch.Tensor]:
         """Expose selected-reset evidence without simulator-global buffers."""
+        object_joint_pos, object_joint_vel, _ = self._object_mechanism_state()
         state = {
             "scaffold_root_history": self.scaffold_state.history.root_ang_vel,
             "scaffold_gravity_history": self.scaffold_state.history.projected_gravity,
@@ -687,9 +781,9 @@ class SomaForceDoorResidualEnv(DirectRLEnv):
             "robot_root_state": self.robot.data.root_state_w,
             "robot_joint_pos": self.robot.data.joint_pos,
             "robot_joint_vel": self.robot.data.joint_vel,
-            "door_root_state": self.door.data.root_state_w,
-            "door_joint_pos": self.door.data.joint_pos,
-            "door_joint_vel": self.door.data.joint_vel,
+            "object_root_state": self.object.data.root_state_w,
+            "object_joint_pos": object_joint_pos,
+            "object_joint_vel": object_joint_vel,
             "joint_target": self.action_sink.last_joint_target,
         }
         state.update(self._owned_sensor_state())
@@ -697,13 +791,17 @@ class SomaForceDoorResidualEnv(DirectRLEnv):
 
     def trace_snapshot(self) -> dict[str, torch.Tensor | str]:
         """Return every field required by the independent C0 trace."""
+        object_joint_pos, object_joint_vel, object_applied_effort = (
+            self._object_mechanism_state()
+        )
         finite = torch.ones(self.num_envs, device=self.device, dtype=torch.bool)
         values = (
             self._step_a_nom,
             self._a_total,
             self.robot.data.root_state_w,
             self.robot.data.joint_pos,
-            self.door.data.joint_pos,
+            self.object.data.root_state_w,
+            object_joint_pos,
         )
         for value in values:
             finite &= torch.isfinite(value).reshape(self.num_envs, -1).all(dim=1)
@@ -722,13 +820,44 @@ class SomaForceDoorResidualEnv(DirectRLEnv):
             "robot_root_state": self.robot.data.root_state_w.clone(),
             "robot_joint_pos": self.robot.data.joint_pos.clone(),
             "robot_joint_vel": self.robot.data.joint_vel.clone(),
-            "door_root_state": self.door.data.root_state_w.clone(),
-            "door_joint_pos": self.door.data.joint_pos.clone(),
-            "door_joint_vel": self.door.data.joint_vel.clone(),
-            "door_applied_effort": self.door.data.applied_torque.clone(),
+            "object_root_state": self.object.data.root_state_w.clone(),
+            "object_joint_pos": object_joint_pos.clone(),
+            "object_joint_vel": object_joint_vel.clone(),
+            "object_applied_effort": object_applied_effort.clone(),
             "env_origin": self.scene.env_origins.clone(),
             "physics_mismatch": self.parameter_store.physics_mismatch.clone(),
             "reset_seed": self.random_stream.seeds.clone(),
             "finite": finite,
             "configuration_hash": getattr(self.cfg, "configuration_hash", ""),
         }
+
+
+class SomaForceDoorResidualEnv(SomaForceResidualEnv):
+    """Accepted Phase 4B3B door name with legacy trace field aliases."""
+
+    def environment_owned_state(self) -> dict[str, torch.Tensor]:
+        state = super().environment_owned_state()
+        state.update(
+            {
+                "door_root_state": state["object_root_state"],
+                "door_joint_pos": state["object_joint_pos"],
+                "door_joint_vel": state["object_joint_vel"],
+            }
+        )
+        return state
+
+    def trace_snapshot(self) -> dict[str, torch.Tensor | str]:
+        snapshot = super().trace_snapshot()
+        for old, new in (
+            ("door_root_state", "object_root_state"),
+            ("door_joint_pos", "object_joint_pos"),
+            ("door_joint_vel", "object_joint_vel"),
+            ("door_applied_effort", "object_applied_effort"),
+        ):
+            snapshot[old] = snapshot.pop(new)
+        return snapshot
+
+
+# Accepted Phase 4B3B helper names remain explicit aliases of generic helpers.
+FrozenDoorScaffoldState = FrozenScaffoldState
+NormalizedDoorActionSink = NormalizedActionSink

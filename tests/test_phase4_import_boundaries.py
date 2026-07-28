@@ -236,13 +236,52 @@ def test_isaac_environment_modules_are_not_imported_by_package_init() -> None:
 
 
 def test_runner_launches_app_before_delayed_isaac_environment_imports() -> None:
-    runner = Path(__file__).resolve().parents[1] / "scripts/smoke_phase4_door_env.py"
-    source = runner.read_text(encoding="utf-8")
-    launch_index = source.index("app_launcher = AppLauncher(args)")
-    dispatch_index = source.index("_run_residual(args, simulation_app)")
-    assert launch_index < dispatch_index
-    assert "from somaforce_cross.envs.residual_env import" in source
-    assert "def _run_residual" in source
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
+    for runner in (
+        scripts / "smoke_phase4_door_env.py",
+        scripts / "smoke_phase4_multitask_env.py",
+    ):
+        source = runner.read_text(encoding="utf-8")
+        launch_marker = (
+            "app_launcher = AppLauncher(args)"
+            if runner.name == "smoke_phase4_door_env.py"
+            else "launcher = AppLauncher(args)"
+        )
+        launch_index = source.index(launch_marker)
+        dispatch_index = source.index("_run_residual(args, simulation_app)")
+        assert launch_index < dispatch_index
+        assert "from somaforce_cross.envs.residual_env import" in source
+        assert "def _run_residual" in source
+
+
+def test_multitask_runner_and_environment_stop_at_c0_without_learning_code() -> None:
+    root = Path(__file__).resolve().parents[1]
+    paths = (
+        root / "scripts/smoke_phase4_multitask_env.py",
+        root / "somaforce_cross/envs/residual_env.py",
+        root / "somaforce_cross/envs/task_adapters/rigid_object.py",
+        root / "somaforce_cross/envs/task_adapters/push_box.py",
+        root / "somaforce_cross/envs/task_adapters/move_payload.py",
+    )
+    forbidden_imports = ("rsl_rl", "active_adaptation")
+    forbidden_identifiers = {"residualactor", "privilegedcritic", "ppo"}
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        imports: list[str] = []
+        identifiers: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imports.append(node.module or "")
+            elif isinstance(node, ast.Name):
+                identifiers.add(node.id.lower())
+            elif isinstance(node, ast.Attribute):
+                identifiers.add(node.attr.lower())
+        assert not any(
+            token in name.lower() for token in forbidden_imports for name in imports
+        )
+        assert identifiers.isdisjoint(forbidden_identifiers)
 
 
 def test_residual_actor_boundary_width_has_one_semantic_latent() -> None:

@@ -1,4 +1,4 @@
-"""Door-only DirectRLEnv configuration for the Phase 4B3 C0 smoke."""
+"""Manifest-driven DirectRLEnv configuration for Phase 4B4 C0 parity."""
 
 from __future__ import annotations
 
@@ -13,14 +13,23 @@ from somaforce_cross.scaffold.pretrained_hdmi_isaac import make_scene_cfg
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DOOR_ARTIFACT = REPO_ROOT / "artifacts/scaffolds/hdmi_push_door_hand/v1"
+DEFAULT_TASK = "push_door_hand"
+DEFAULT_ARTIFACT = REPO_ROOT / "artifacts/scaffolds/hdmi_push_door_hand/v1"
+# Accepted Phase 4B3B constant remains an explicit alias of the generic default.
+DOOR_ARTIFACT = DEFAULT_ARTIFACT
+SUPPORTED_TASKS = (
+    "push_door_hand",
+    "push_box",
+    "move_suitcase",
+    "move_largebox",
+)
 
 
 @configclass
-class DoorC0SmokeProfile:
-    """Owner-approved values used only by the bounded Phase 4B3 smoke."""
+class C0SmokeProfile:
+    """Owner-approved values used only by bounded C0 parity smokes."""
 
-    task: str = "push_door_hand"
+    task: str = DEFAULT_TASK
     physics_dt: float = 0.005
     control_dt: float = 0.02
     decimation: int = 4
@@ -32,6 +41,7 @@ class DoorC0SmokeProfile:
     alpha: float = 0.9
     door_friction: float = 0.3
     door_damping: float = 0.55
+    object_friction: float = 0.5
     F_scale: float = 1.0
     M_scale: float = 1.0
     tare_num_samples: int = 1
@@ -61,8 +71,8 @@ class DoorC0SmokeProfile:
 
 
 @configclass
-class SomaForceDoorResidualEnvCfg(DirectRLEnvCfg):
-    """Exact Isaac Lab 0.47.2 config for the door C0 integration gate."""
+class SomaForceResidualEnvCfg(DirectRLEnvCfg):
+    """Exact Isaac Lab 0.47.2 config for the four-task C0 integration gate."""
 
     seed: int = 20260727
     decimation: int = 4
@@ -72,30 +82,28 @@ class SomaForceDoorResidualEnvCfg(DirectRLEnvCfg):
     state_space: int = 845
     sim: SimulationCfg = SimulationCfg(dt=0.005, render_interval=4, device="cuda:0")
     scene = make_scene_cfg(
-        DOOR_ARTIFACT,
+        DEFAULT_ARTIFACT,
         1,
-        get_hdmi_task_spec("push_door_hand"),
+        get_hdmi_task_spec(DEFAULT_TASK),
     )
-    artifact_dir: str = str(DOOR_ARTIFACT)
+    artifact_dir: str = str(DEFAULT_ARTIFACT)
     configuration_hash: str = ""
-    smoke_profile: DoorC0SmokeProfile = DoorC0SmokeProfile()
+    smoke_profile: C0SmokeProfile = C0SmokeProfile()
 
     def __post_init__(self) -> None:
         profile = self.smoke_profile
-        if profile.task != "push_door_hand":
-            raise ValueError("SomaForceDoorResidualEnvCfg supports push_door_hand only")
+        if profile.task not in SUPPORTED_TASKS:
+            raise ValueError(f"unsupported Phase 4B4 task: {profile.task!r}")
         if profile.physics_dt * profile.decimation != profile.control_dt:
-            raise ValueError(
-                "door C0 physics/control dt and decimation are inconsistent"
-            )
+            raise ValueError("C0 physics/control dt and decimation are inconsistent")
         if (profile.action_dim, profile.policy_dim, profile.critic_dim) != (
             23,
             668,
             845,
         ):
-            raise ValueError("door C0 action/policy/critic dimensions are frozen")
+            raise ValueError("C0 action/policy/critic dimensions are frozen")
         if profile.semantic_target_dim != 31:
-            raise ValueError("door C0 semantic target dimension must be 31")
+            raise ValueError("C0 semantic target dimension must be 31")
         self.decimation = profile.decimation
         self.episode_length_s = profile.episode_length_steps * profile.control_dt
         self.action_space = profile.action_dim
@@ -103,3 +111,8 @@ class SomaForceDoorResidualEnvCfg(DirectRLEnvCfg):
         self.state_space = profile.critic_dim
         self.sim.dt = profile.physics_dt
         self.sim.render_interval = profile.decimation
+
+
+# Accepted Phase 4B3B API names remain aliases of the single generic config.
+DoorC0SmokeProfile = C0SmokeProfile
+SomaForceDoorResidualEnvCfg = SomaForceResidualEnvCfg
