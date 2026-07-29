@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import math
 from collections import Counter
 from pathlib import Path
@@ -46,6 +47,10 @@ def _nominal_physics(task: str, count: int) -> torch.Tensor:
         row[:, 15:21] = torch.tensor(nominal["inertia"])
         row[:, 21] = nominal["friction"]
     return row
+
+
+def _tensor_sha256(value: torch.Tensor) -> str:
+    return hashlib.sha256(value.cpu().contiguous().numpy().tobytes()).hexdigest()
 
 
 @pytest.mark.parametrize(
@@ -272,6 +277,153 @@ def test_seed_validation_stream_separation_readback_and_canonical_order() -> Non
     assert first.family == reordered_sample.family
 
 
+def test_v2_keeps_c0_reward_pcg_sensor_and_rigid_samples_bitwise_stable() -> None:
+    from somaforce_cross.envs.numeric_contract import canonical_sha256
+
+    assert canonical_sha256(CONTRACT.payload["c0"]) == (
+        "eac16c66023b4aa6e7c5205e6efdb5307b7dc30974160086abd619d2c7eff401"
+    )
+    assert canonical_sha256(CONTRACT.payload["reward"]) == (
+        "a0346e056468a316973ec869a6e5c570e3cd8c8cfd155644bbab20885e47978b"
+    )
+    assert canonical_sha256(CONTRACT.payload["sampler"]["counter_rng"]) == (
+        "a5b1631d91896b0cedb8a42c1d614ce655b8fa7fe3a40ca641e340ca875ae96c"
+    )
+    assert canonical_sha256(CONTRACT.payload["sampler"]["sensor"]) == (
+        "d923096e6db1da9b77ff72031d0d5d95776fe1a0f0eea47522e7a12dd6198e0e"
+    )
+    assert (
+        canonical_sha256(
+            {
+                task: CONTRACT.payload["sampler"]["nominal_rows"][task]
+                for task in ("push_box", "move_suitcase", "move_largebox")
+            }
+        )
+        == "09724bd26791448d17652f1a24a3c6cb2134a94b4be022c800b86e17c5b12c11"
+    )
+    sampler = Phase4B5MismatchSampler(CONTRACT, base_seed=9)
+    env_ids = torch.tensor([0, 7], dtype=torch.int64)
+    episode_indices = torch.tensor([0, 3], dtype=torch.int64)
+    expected_physics = {
+        "push_box": "9bc6a301687173f80887a84915d378fd01d7e5ef7c1286758744f98a59f9535b",
+        "move_suitcase": "ed2d37d2c54a033aa4f8ff150652c50dfe7946e74cb875da1549a57573650fc8",
+        "move_largebox": "36f5fc700a733744accd149a4ef38563c55947cb75d48735749234dc3ba0e78b",
+    }
+    for task, expected in expected_physics.items():
+        sample = sampler.sample(
+            task=task,
+            stage="C3",
+            env_ids=env_ids,
+            episode_indices=episode_indices,
+        )
+        assert _tensor_sha256(sample.physics) == expected
+        assert _tensor_sha256(sample.sensor) == (
+            "4859f4c731190752c03f1149034d4bbe7d6df33c29aef8dc8b7c09c7bab7e2be"
+        )
+
+
+def test_door_v2_one_million_draws_have_only_runtime_supported_fields() -> None:
+    sampler = Phase4B5MismatchSampler(CONTRACT, base_seed=1002)
+    stage = "C3"
+    total = 1_000_000
+    chunk = 50_000
+    names = CONTRACT.payload["sampler"]["physical_subfamilies"]["door"]
+    assert names == ["mechanism", "initial_stance", "contact_target"]
+    count_spec = CONTRACT.payload["sampler"]["physical_family_count"][stage]
+    counts: Counter[int] = Counter()
+    subfamily = torch.zeros(len(names), dtype=torch.int64)
+    active_physical = 0
+    for start in range(0, total, chunk):
+        env_ids = torch.arange(start, start + chunk, dtype=torch.int64)
+        sample = sampler.sample(
+            task="push_door_hand",
+            stage=stage,
+            env_ids=env_ids,
+            episode_indices=torch.zeros_like(env_ids),
+        )
+        assert sample.physical_subfamily_mask.shape == (chunk, len(names))
+        assert torch.equal(
+            sample.physics[:, 0:3], torch.zeros_like(sample.physics[:, 0:3])
+        )
+        assert torch.equal(
+            sample.physics[:, 5:11], torch.zeros_like(sample.physics[:, 5:11])
+        )
+        physical = torch.tensor(
+            ["physical" in family or family == "all" for family in sample.family]
+        )
+        selected = sample.physical_subfamily_mask[physical]
+        active_physical += int(physical.sum())
+        counts.update(selected.sum(dim=1).tolist())
+        subfamily += selected.sum(dim=0).cpu()
+        contact = sample.physical_subfamily_mask[:, 2]
+        ranges = CONTRACT.payload["sampler"]["task_ranges"]["push_door_hand"][stage]
+        if contact.any():
+            assert torch.all(
+                sample.physics[contact, 31:34].abs() <= ranges["contact_m"]
+            )
+            assert torch.all(
+                sample.physics[contact, 34:37].abs()
+                <= ranges["contact_rot_deg"] * torch.pi / 180.0
+            )
+    for count, probability in zip(
+        count_spec["count"], count_spec["probability"], strict=True
+    ):
+        assert abs(
+            counts[count] / active_physical - probability
+        ) <= _frequency_tolerance(probability, active_physical)
+    expected_subfamily_frequency = sum(
+        count * probability
+        for count, probability in zip(
+            count_spec["count"], count_spec["probability"], strict=True
+        )
+    ) / len(names)
+    for value in subfamily.tolist():
+        assert value > 0
+        assert abs(value / active_physical - expected_subfamily_frequency) <= (
+            _frequency_tolerance(expected_subfamily_frequency, active_physical)
+        )
+
+
+def test_door_normalizer_rejects_runtime_deferred_fields_and_uses_contact_support() -> (
+    None
+):
+    normalizer = FixedFieldNormalizer(CONTRACT)
+    ranges = CONTRACT.payload["sampler"]["task_ranges"]["push_door_hand"]["C3"]
+    physics = _nominal_physics("push_door_hand", 1)
+    physics[:, 22] = ranges["object_m"]
+    physics[:, 27] = ranges["object_yaw_deg"] * torch.pi / 180.0
+    physics[:, 28] = ranges["stance_m"]
+    physics[:, 30] = ranges["stance_yaw_deg"] * torch.pi / 180.0
+    physics[:, 31] = ranges["contact_m"]
+    physics[:, 34] = ranges["contact_rot_deg"] * torch.pi / 180.0
+    fields = {
+        "policy": torch.zeros(1, 668),
+        "object_state": torch.zeros(1, 16),
+        "physics_mismatch": physics,
+        "scaffold_mismatch": torch.tensor([[4.0, 0.9]]),
+        "sensor_mismatch": torch.zeros(1, 90),
+        "progress_state": torch.zeros(1, 4),
+        "contact_state": torch.zeros(1, 17),
+        "stability_state": torch.zeros(1, 9),
+    }
+    output = normalizer.normalize_critic(fields, task="push_door_hand")
+    assert torch.equal(
+        output["physics_mismatch"][:, [22, 27, 28, 30, 31, 34]],
+        torch.ones(1, 6),
+    )
+    for deferred_index in (0, 5):
+        bad = dict(fields)
+        bad["physics_mismatch"] = physics.clone()
+        bad["physics_mismatch"][:, deferred_index] = 1.0
+        with pytest.raises(ValueError, match="runtime-deferred"):
+            normalizer.normalize_critic(bad, task="push_door_hand")
+
+    v1_state = dict(normalizer.state_dict())
+    v1_state["contract_version"] = "phase4b5_numeric_v1"
+    with pytest.raises(ValueError):
+        normalizer.load_state_dict(v1_state)
+
+
 def test_all_held_out_rows_are_evaluation_only() -> None:
     sampler = Phase4B5MismatchSampler(CONTRACT, base_seed=29)
     ids = torch.tensor([0], dtype=torch.int64)
@@ -292,6 +444,11 @@ def test_all_held_out_rows_are_evaluation_only() -> None:
         assert sample.family == ("evaluation",)
         assert not sample.nominal.item()
         assert sample.evaluation_id == "evaluation"
+        family = "door" if task == "push_door_hand" else "rigid"
+        assert sample.physical_subfamily_mask.shape == (
+            1,
+            len(CONTRACT.payload["sampler"]["physical_subfamilies"][family]),
+        )
 
 
 def _frequency_tolerance(probability: float, count: int) -> float:

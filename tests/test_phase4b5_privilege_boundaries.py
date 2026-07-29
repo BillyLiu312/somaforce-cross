@@ -43,7 +43,7 @@ def test_critic_mutation_cannot_change_actor_values_or_state() -> None:
     after = normalizer.normalize_actor(actor)
     assert normalizer.state_dict() == {
         "contract_hash": normalizer.contract_hash,
-        "contract_version": "phase4b5_numeric_v1",
+        "contract_version": "phase4b5_numeric_v2",
     }
     assert torch.equal(before["z_cross"], after["z_cross"]) and torch.equal(
         before["wrist_tokens"], after["wrist_tokens"]

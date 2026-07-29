@@ -233,7 +233,9 @@ C2: 40% nominal, 60% mild/moderate mismatch
 C3: 30% nominal, 70% full training mismatch
 ```
 
-Door mismatch includes friction, damping, handle offset and stance offset.
+Door mismatch includes friction, damping, initial object/stance and contact-target
+offsets. Episode-time hinge-axis and physical-handle geometry are deferred by
+[`phase4b5_runtime_capability_amendment.md`](phase4b5_runtime_capability_amendment.md).
 Push-box mismatch includes mass, friction, CoM and initial pose. Suitcase and
 largebox mismatch include mass, friction, CoM, contact stability and
 lift/carry tracking. Sensor curriculum is low noise and 0-1 step delay at C1,

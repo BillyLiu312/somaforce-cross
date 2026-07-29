@@ -268,34 +268,25 @@ class Phase4B5MismatchSampler:
                 mask[:, 0], self._log_uniform(seeds, ranges["damping"], 22), row[:, 4]
             )
         if mask[:, 1].any():
-            values = self._symmetric(seeds, 9, float(ranges["axis_deg"]) * degrees, 23)
-            row[mask[:, 1], 0:3] = values[mask[:, 1], 0:3]
-            row[mask[:, 1], 5:8] = self._symmetric(
-                seeds, 3, float(ranges["handle_m"]), 32
-            )[mask[:, 1]]
-            row[mask[:, 1], 8:11] = self._symmetric(
-                seeds, 3, float(ranges["handle_rot_deg"]) * degrees, 35
-            )[mask[:, 1]]
-        if mask[:, 2].any():
-            row[mask[:, 2], 22:25] = self._symmetric(
+            row[mask[:, 1], 22:25] = self._symmetric(
                 seeds, 3, float(ranges["object_m"]), 38
-            )[mask[:, 2]]
-            row[mask[:, 2], 27] = self._symmetric(
+            )[mask[:, 1]]
+            row[mask[:, 1], 27] = self._symmetric(
                 seeds, 1, float(ranges["object_yaw_deg"]) * degrees, 41
-            )[mask[:, 2], 0]
-            row[mask[:, 2], 28:30] = self._symmetric(
+            )[mask[:, 1], 0]
+            row[mask[:, 1], 28:30] = self._symmetric(
                 seeds, 2, float(ranges["stance_m"]), 42
-            )[mask[:, 2]]
-            row[mask[:, 2], 30] = self._symmetric(
+            )[mask[:, 1]]
+            row[mask[:, 1], 30] = self._symmetric(
                 seeds, 1, float(ranges["stance_yaw_deg"]) * degrees, 44
-            )[mask[:, 2], 0]
-        if mask[:, 3].any():
-            row[mask[:, 3], 31:34] = self._symmetric(
-                seeds, 3, float(ranges["handle_m"]), 45
-            )[mask[:, 3]]
-            row[mask[:, 3], 34:37] = self._symmetric(
-                seeds, 3, float(ranges["handle_rot_deg"]) * degrees, 48
-            )[mask[:, 3]]
+            )[mask[:, 1], 0]
+        if mask[:, 2].any():
+            row[mask[:, 2], 31:34] = self._symmetric(
+                seeds, 3, float(ranges["contact_m"]), 45
+            )[mask[:, 2]]
+            row[mask[:, 2], 34:37] = self._symmetric(
+                seeds, 3, float(ranges["contact_rot_deg"]) * degrees, 48
+            )[mask[:, 2]]
 
     def _sample_rigid(
         self,

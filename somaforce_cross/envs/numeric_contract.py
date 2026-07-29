@@ -10,14 +10,23 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-CONTRACT_VERSION = "phase4b5_numeric_v1"
+CONTRACT_VERSION = "phase4b5_numeric_v2"
 SOURCE_RUNTIME_COMMIT = "caf09bfdaaa50004bead2750b9da495a340adffa"
 CONTRACT_AUDIT_COMMIT = "4a3c384f5017b9da96cc5b5abdebda0245ec53bd"
 APPROVAL_OWNER = "project_owner_delegated_planner"
 APPROVAL_DATE = "2026-07-29"
+AMENDMENT_BASE_COMMIT = "1221b3f55d876d280bd82c1c3809f7ae4997cbd9"
+AMENDMENT_REASON = (
+    "episode-time selected hinge-axis and physical-handle geometry unavailable"
+)
+_RUNTIME_DEFERRED_FIELDS = {
+    "0:3": "hinge_axis_requires_scene_bank",
+    "5:11": "physical_handle_geometry_requires_scene_bank",
+}
 _ROOT_KEYS = frozenset(
     {
         "acceptance",
+        "amendment",
         "approval",
         "c0",
         "contract_audit_commit",
@@ -29,6 +38,7 @@ _ROOT_KEYS = frozenset(
         "normalizer",
         "retention",
         "reward",
+        "runtime_deferred_fields",
         "sampler",
         "sensor",
         "source_runtime_commit",
@@ -57,11 +67,10 @@ _SENSOR_STAGE_KEYS = {
     "white_moment",
 }
 _DOOR_RANGE_KEYS = {
-    "axis_deg",
+    "contact_m",
+    "contact_rot_deg",
     "damping",
     "friction",
-    "handle_m",
-    "handle_rot_deg",
     "object_m",
     "object_yaw_deg",
     "stance_m",
@@ -445,11 +454,28 @@ def _validate_schema(payload: Mapping[str, Any]) -> None:
         "sampler.physical_subfamilies",
         {"door", "rigid"},
     )
-    if (
-        len(sampler["physical_subfamilies"]["door"]) != 4
-        or len(sampler["physical_subfamilies"]["rigid"]) != 4
-    ):
-        raise ValueError("each physical family requires four named subfamilies")
+    if sampler["physical_subfamilies"]["door"] != [
+        "mechanism",
+        "initial_stance",
+        "contact_target",
+    ] or sampler["physical_subfamilies"]["rigid"] != [
+        "inertial",
+        "surface",
+        "initial_stance",
+        "contact_target_load_share",
+    ]:
+        raise ValueError(
+            "physical subfamilies do not match the approved runtime support"
+        )
+    for stage in STAGES:
+        for count_value in sampler["physical_family_count"][stage]["count"]:
+            count = _positive_integer(
+                count_value, f"sampler.physical_family_count.{stage}.count"
+            )
+            if count > len(sampler["physical_subfamilies"]["door"]) or count > len(
+                sampler["physical_subfamilies"]["rigid"]
+            ):
+                raise ValueError("physical family count exceeds available subfamilies")
     _exact(sampler["nominal_scaffold"], "sampler.nominal_scaffold", {"alpha", "delay"})
     _positive_integer(
         sampler["nominal_scaffold"]["delay"], "sampler.nominal_scaffold.delay"
@@ -655,6 +681,35 @@ def validate_numeric_contract(payload: Mapping[str, Any]) -> None:
         raise ValueError("unexpected source_runtime_commit")
     if payload["contract_audit_commit"] != CONTRACT_AUDIT_COMMIT:
         raise ValueError("unexpected contract_audit_commit")
+    amendment = _require_exact_keys(
+        payload["amendment"],
+        "amendment",
+        {"base_commit", "date", "owner", "reason", "status"},
+    )
+    if amendment != {
+        "base_commit": AMENDMENT_BASE_COMMIT,
+        "date": APPROVAL_DATE,
+        "owner": APPROVAL_OWNER,
+        "reason": AMENDMENT_REASON,
+        "status": "approved",
+    }:
+        raise ValueError(
+            "runtime capability amendment does not match the approved record"
+        )
+    deferred = _require_exact_keys(
+        payload["runtime_deferred_fields"],
+        "runtime_deferred_fields",
+        {"push_door_hand"},
+    )
+    if (
+        _require_exact_keys(
+            deferred["push_door_hand"],
+            "runtime_deferred_fields.push_door_hand",
+            set(_RUNTIME_DEFERRED_FIELDS),
+        )
+        != _RUNTIME_DEFERRED_FIELDS
+    ):
+        raise ValueError("runtime deferred fields must not define a training fallback")
     approval = _require_exact_keys(
         payload["approval"], "approval", {"date", "owner", "status"}
     )

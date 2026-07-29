@@ -1,9 +1,10 @@
 {
   "acceptance": {"float_dtype": "float32", "held_out_requires_evaluation_id": true, "pooled_episode_weighting": "equal_episode"},
+  "amendment": {"base_commit": "1221b3f55d876d280bd82c1c3809f7ae4997cbd9", "date": "2026-07-29", "owner": "project_owner_delegated_planner", "reason": "episode-time selected hinge-axis and physical-handle geometry unavailable", "status": "approved"},
   "approval": {"date": "2026-07-29", "owner": "project_owner_delegated_planner", "status": "approved"},
   "c0": {"F_scale": 1.0, "M_scale": 1.0, "authority": 0.0, "control_steps": 6, "episode_steps": 8, "identity_sensor": true, "reward": 0.0, "seed_rule": "base_seed+env_id"},
   "contract_audit_commit": "4a3c384f5017b9da96cc5b5abdebda0245ec53bd",
-  "contract_version": "phase4b5_numeric_v1",
+  "contract_version": "phase4b5_numeric_v2",
   "curriculum": {
     "gates": {"C1": {"failure_max": 0.05, "min_transitions": 5000000, "retention_min": 0.95, "success_min": 0.75}, "C2": {"failure_max": 0.08, "min_transitions": 10000000, "retention_min": 0.95, "success_min": 0.65}, "rollback": {"failure_margin": 0.05, "retention_min": 0.9, "success_margin": 0.15}},
     "family_order": ["physical", "sensor", "scaffold", "physical_sensor", "physical_scaffold", "sensor_scaffold", "all"],
@@ -33,6 +34,7 @@
     "version": "phase4b5_fixed_fields_v1"
   },
   "retention": {"move_largebox": {"carry_error_m": {"baseline": 0.10169, "direction": "lower"}, "median_progress": {"baseline": 0.99706, "direction": "higher"}, "setdown_m": {"baseline": 0.18235, "direction": "lower"}}, "move_suitcase": {"median_progress": {"baseline": 0.98646, "direction": "higher"}, "setdown_m": {"baseline": 0.2063, "direction": "lower"}}, "push_box": {"final_error_m": {"baseline": 0.06195, "direction": "lower"}, "median_progress": {"baseline": 1.467, "direction": "higher"}}, "push_door_hand": {"median_progress": {"baseline": 2.618, "direction": "higher"}}},
+  "runtime_deferred_fields": {"push_door_hand": {"0:3": "hinge_axis_requires_scene_bank", "5:11": "physical_handle_geometry_requires_scene_bank"}},
   "reward": {"aggregate_clip": [-20.0, 10.0], "constants": {"contact_unexpected_penalty": 0.25, "force_expected_threshold": 0.5, "force_scale_N": 100.0, "force_s_clip": 2.0, "moment_scale_Nm": 10.0, "progress_delta_clip": 0.02, "rate_delta_scale": 0.1, "rate_ratio_clip": 2.0, "residual_epsilon": 0.000001, "stability_margin_m": 0.15, "stability_penalty_clip": 4.0}, "weights": {"contact": 1.0, "force": 0.5, "nonfinite": -20.0, "progress": 5.0, "rate": 0.02, "residual": 0.05, "stability": 1.0, "terminal_failure": -10.0, "terminal_success": 5.0}},
   "sampler": {
     "nominal_rows": {
@@ -42,7 +44,7 @@
       "push_door_hand": {"damping": 0.55, "friction": 0.3}
     },
     "physical_family_count": {"C1": {"count": [1], "probability": [1.0]}, "C2": {"count": [1, 2], "probability": [0.7, 0.3]}, "C3": {"count": [1, 2, 3], "probability": [0.4, 0.4, 0.2]}},
-    "physical_subfamilies": {"door": ["mechanism", "axis_handle", "initial_stance", "contact_target"], "rigid": ["inertial", "surface", "initial_stance", "contact_target_load_share"]},
+    "physical_subfamilies": {"door": ["mechanism", "initial_stance", "contact_target"], "rigid": ["inertial", "surface", "initial_stance", "contact_target_load_share"]},
     "nominal_scaffold": {"alpha": 0.9, "delay": 4},
     "scaffold": {"C1": {"pairs": [[3, 0.85], [4, 0.9], [5, 0.95]], "probability": [0.2, 0.6, 0.2]}, "C2": {"pairs": [[2, 0.8], [3, 0.85], [4, 0.9], [5, 0.94], [6, 0.97]], "probability": [0.1, 0.2, 0.4, 0.2, 0.1]}, "C3": {"pairs": [[2, 0.8], [3, 0.85], [4, 0.9], [5, 0.94], [6, 0.97]], "probability": [0.2, 0.2, 0.2, 0.2, 0.2]}},
     "counter_rng": {"algorithm": "pcg_rxs_m_xs_32", "counter_bias": 1, "float_divisor": 16777216, "mantissa_shift": 8, "output_multiplier": 277803737, "output_shift": 22, "slot_bias": 97, "slot_multiplier": 6961, "state_increment": 2891336453, "state_multiplier": 747796405, "state_shift": 28, "state_shift_bias": 4, "word_mask": 4294967295},
@@ -57,7 +59,7 @@
       "move_largebox": {"C1": {"contact_m": 0.01, "contact_rot_deg": 2.0, "com_m": 0.02, "friction": [0.4, 0.6], "mass": [0.8, 1.2], "object_xy_m": 0.02, "object_yaw_deg": 2.0, "stance_m": 0.02, "stance_yaw_deg": 2.0}, "C2": {"contact_m": 0.025, "contact_rot_deg": 5.0, "com_m": 0.05, "friction": [0.3, 0.7], "mass": [0.7, 1.4], "object_xy_m": 0.05, "object_yaw_deg": 5.0, "stance_m": 0.05, "stance_yaw_deg": 5.0}, "C3": {"contact_m": 0.05, "contact_rot_deg": 10.0, "com_m": 0.08, "friction": [0.2, 0.8], "mass": [0.6, 1.6], "object_xy_m": 0.1, "object_yaw_deg": 10.0, "stance_m": 0.08, "stance_yaw_deg": 8.0}},
       "move_suitcase": {"C1": {"contact_m": 0.005, "contact_rot_deg": 1.0, "com_m": 0.01, "friction": [0.4, 0.6], "mass": [1.2, 1.8], "object_xy_m": 0.02, "object_yaw_deg": 2.0, "stance_m": 0.02, "stance_yaw_deg": 2.0}, "C2": {"contact_m": 0.015, "contact_rot_deg": 3.0, "com_m": 0.03, "friction": [0.3, 0.7], "mass": [0.75, 3.0], "object_xy_m": 0.05, "object_yaw_deg": 5.0, "stance_m": 0.05, "stance_yaw_deg": 5.0}, "C3": {"contact_m": 0.03, "contact_rot_deg": 5.0, "com_m": 0.05, "friction": [0.2, 0.8], "mass": [0.5, 4.0], "object_xy_m": 0.1, "object_yaw_deg": 10.0, "stance_m": 0.08, "stance_yaw_deg": 8.0}},
       "push_box": {"C1": {"contact_m": 0.01, "contact_rot_deg": 2.0, "com_m": 0.02, "friction": [0.4, 0.6], "mass": [6.0, 10.0], "object_xy_m": 0.02, "object_yaw_deg": 2.0, "stance_m": 0.02, "stance_yaw_deg": 2.0}, "C2": {"contact_m": 0.025, "contact_rot_deg": 5.0, "com_m": 0.05, "friction": [0.25, 0.6], "mass": [3.0, 13.0], "object_xy_m": 0.05, "object_yaw_deg": 5.0, "stance_m": 0.05, "stance_yaw_deg": 5.0}, "C3": {"contact_m": 0.05, "contact_rot_deg": 10.0, "com_m": 0.1, "friction": [0.1, 0.6], "mass": [1.0, 16.0], "object_xy_m": 0.1, "object_yaw_deg": 10.0, "stance_m": 0.08, "stance_yaw_deg": 8.0}},
-      "push_door_hand": {"C1": {"axis_deg": 1.0, "damping": [0.55, 1.5], "friction": [0.3, 0.8], "handle_m": 0.01, "handle_rot_deg": 2.0, "object_m": 0.01, "object_yaw_deg": 1.0, "stance_m": 0.02, "stance_yaw_deg": 2.0}, "C2": {"axis_deg": 3.0, "damping": [0.4, 4.0], "friction": [0.2, 3.0], "handle_m": 0.025, "handle_rot_deg": 5.0, "object_m": 0.02, "object_yaw_deg": 3.0, "stance_m": 0.05, "stance_yaw_deg": 5.0}, "C3": {"axis_deg": 5.0, "damping": [0.3, 8.0], "friction": [0.15, 8.0], "handle_m": 0.05, "handle_rot_deg": 10.0, "object_m": 0.04, "object_yaw_deg": 5.0, "stance_m": 0.08, "stance_yaw_deg": 8.0}}
+      "push_door_hand": {"C1": {"contact_m": 0.01, "contact_rot_deg": 2.0, "damping": [0.55, 1.5], "friction": [0.3, 0.8], "object_m": 0.01, "object_yaw_deg": 1.0, "stance_m": 0.02, "stance_yaw_deg": 2.0}, "C2": {"contact_m": 0.025, "contact_rot_deg": 5.0, "damping": [0.4, 4.0], "friction": [0.2, 3.0], "object_m": 0.02, "object_yaw_deg": 3.0, "stance_m": 0.05, "stance_yaw_deg": 5.0}, "C3": {"contact_m": 0.05, "contact_rot_deg": 10.0, "damping": [0.3, 8.0], "friction": [0.15, 8.0], "object_m": 0.04, "object_yaw_deg": 5.0, "stance_m": 0.08, "stance_yaw_deg": 8.0}}
     }
   },
   "sensor": {"control_dt_s": 0.02, "detector": {"off": 0.025, "on": 0.05, "smoothing_alpha": 0.5, "temperature": 0.02}, "fixed_scales": {"force_N": 100.0, "moment_Nm": 10.0}, "ramp": {"attack": 0.1, "release": 0.1}, "saturation": {"force_N": 200.0, "moment_Nm": 20.0}},

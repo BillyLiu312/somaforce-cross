@@ -220,9 +220,10 @@ class FixedFieldNormalizer:
                 torch.clamp_min(physics[:, 21], 1.0e-6) / float(nominal["friction"])
             ) / float(c["log_ratio_divisor"])
         if task == "push_door_hand":
-            physics[:, :3] /= float(c3["axis_deg"]) * torch.pi / 180.0
-            position_bound = float(c3["handle_m"])
-            rotation_bound = float(c3["handle_rot_deg"]) * torch.pi / 180.0
+            if torch.any(physics[:, 0:3] != 0.0) or torch.any(physics[:, 5:11] != 0.0):
+                raise ValueError(
+                    "door runtime-deferred hinge-axis and physical-handle fields must be zero"
+                )
             physics[:, 3] = torch.log(
                 torch.clamp_min(physics[:, 3], 1.0e-6) / float(nominal["friction"])
             ) / float(c["log_ratio_divisor"])
@@ -231,19 +232,26 @@ class FixedFieldNormalizer:
             ) / float(c["log_ratio_divisor"])
             object_position_bound = float(c3["object_m"])
             object_rotation_bound = float(c3["object_yaw_deg"]) * torch.pi / 180.0
+            contact_position_bound = float(c3["contact_m"])
+            contact_rotation_bound = float(c3["contact_rot_deg"]) * torch.pi / 180.0
         else:
             position_bound = float(c3["contact_m"])
             rotation_bound = float(c3["contact_rot_deg"]) * torch.pi / 180.0
             object_position_bound = float(c3["object_xy_m"])
             object_rotation_bound = float(c3["object_yaw_deg"]) * torch.pi / 180.0
-        physics[:, 5:8] /= position_bound
-        physics[:, 8:11] /= rotation_bound
+        if task != "push_door_hand":
+            physics[:, 5:8] /= position_bound
+            physics[:, 8:11] /= rotation_bound
         physics[:, 22:25] /= object_position_bound
         physics[:, 25:28] /= object_rotation_bound
         physics[:, 28:30] /= float(c3["stance_m"])
         physics[:, 30] /= float(c3["stance_yaw_deg"]) * torch.pi / 180.0
-        physics[:, 31:34] /= position_bound
-        physics[:, 34:37] /= rotation_bound
+        if task == "push_door_hand":
+            physics[:, 31:34] /= contact_position_bound
+            physics[:, 34:37] /= contact_rotation_bound
+        else:
+            physics[:, 31:34] /= position_bound
+            physics[:, 34:37] /= rotation_bound
         physics[:, 37:39] /= float(sampler["stage_constants"]["C3"]["load_share"])
         scaffold = output["scaffold_mismatch"]
         scaffold[:, 0] = (scaffold[:, 0] - float(c["delay_center"])) / float(
