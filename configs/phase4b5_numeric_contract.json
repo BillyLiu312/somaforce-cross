@@ -1,0 +1,66 @@
+{
+  "acceptance": {"float_dtype": "float32", "held_out_requires_evaluation_id": true, "pooled_episode_weighting": "equal_episode"},
+  "approval": {"date": "2026-07-29", "owner": "project_owner_delegated_planner", "status": "approved"},
+  "c0": {"F_scale": 1.0, "M_scale": 1.0, "authority": 0.0, "control_steps": 6, "episode_steps": 8, "identity_sensor": true, "reward": 0.0, "seed_rule": "base_seed+env_id"},
+  "contract_audit_commit": "4a3c384f5017b9da96cc5b5abdebda0245ec53bd",
+  "contract_version": "phase4b5_numeric_v1",
+  "curriculum": {
+    "gates": {"C1": {"failure_max": 0.05, "min_transitions": 5000000, "retention_min": 0.95, "success_min": 0.75}, "C2": {"failure_max": 0.08, "min_transitions": 10000000, "retention_min": 0.95, "success_min": 0.65}, "rollback": {"failure_margin": 0.05, "retention_min": 0.9, "success_margin": 0.15}},
+    "family_order": ["physical", "sensor", "scaffold", "physical_sensor", "physical_scaffold", "sensor_scaffold", "all"],
+    "nominal_atom": {"C1": 0.7, "C2": 0.4, "C3": 0.3},
+    "stage_families": {"C1": {"all": 0.01, "physical": 0.4, "physical_scaffold": 0.03, "physical_sensor": 0.1, "scaffold": 0.15, "sensor": 0.3, "sensor_scaffold": 0.01}, "C2": {"all": 0.05, "physical": 0.25, "physical_scaffold": 0.08, "physical_sensor": 0.25, "scaffold": 0.1, "sensor": 0.2, "sensor_scaffold": 0.07}, "C3": {"all": 0.15, "physical": 0.15, "physical_scaffold": 0.1, "physical_sensor": 0.3, "scaffold": 0.05, "sensor": 0.15, "sensor_scaffold": 0.1}},
+    "task_probability": {"move_largebox": 0.25, "move_suitcase": 0.25, "push_box": 0.25, "push_door_hand": 0.25},
+    "windows": {"evaluation_interval_transitions": 250000, "nominal_episodes_per_task": 128, "promotion_windows": 3, "rollback_windows": 2, "stage_episodes_per_task": 256}
+  },
+  "episodes": {"horizons": {"move_largebox": 199, "move_suitcase": 472, "push_box": 792, "push_door_hand": 508}, "tare": {"max_steps": 25, "samples": 8, "valid_expected_contact": false}},
+  "held_out": {
+    "largebox_mass_2": {"task": "move_largebox", "type": "physical", "values": {"mass": 2.0}},
+    "sensor_stress": {"task": "push_door_hand", "type": "sensor", "values": {"axis_deg": 8.0, "delay": 3, "dropout": 0.05, "filter": 0.85, "force_saturation": 80.0, "scale": 0.08, "torque_saturation": 8.0}},
+    "suitcase_mass_5_5": {"task": "move_suitcase", "type": "physical", "values": {"mass": 5.5}},
+    "box_mass_16_friction_1_2": {"task": "push_box", "type": "physical", "values": {"friction": 1.2, "mass": 16.0}},
+    "door_friction_10_damping_10": {"task": "push_door_hand", "type": "physical", "values": {"damping": 10.0, "friction": 10.0}}
+  },
+  "logging": {
+    "diagnostic_keys": ["p50_wrench", "p95_wrench", "p99_wrench", "impulse", "p95_force_rate", "contact_fraction", "contact_loss", "sensor_quality", "saturation", "dropout", "arms_residual_norm", "waist_residual_norm", "legs_residual_norm", "semantic_entropy", "semantic_kl", "stability_margin"],
+    "outcome_keys": ["success", "failure", "timeout", "episode_invalid"],
+    "raw_reward_keys": ["progress", "contact", "force", "stability", "residual", "rate", "terminal_success", "terminal_failure", "nonfinite"],
+    "weighted_reward_keys": ["progress", "contact", "force", "stability", "residual", "rate", "terminal_success", "terminal_failure", "nonfinite"]
+  },
+  "normalizer": {
+    "actor": {"action_divisor": 4.0, "action_clip": 2.5, "angular_twist_divisor": 8.0, "joint_offset_divisor": 3.141592653589793, "joint_velocity_divisor": 20.0, "linear_twist_divisor": 2.0, "root_angular_divisor": 8.0, "wrench_clip": 3.0, "z_cross_clip": 10.0},
+    "critic": {"alpha_center": 0.9, "alpha_divisor": 0.1, "angular_divisor": 8.0, "delay_center": 4.0, "delay_divisor": 2.0, "force_divisor": 100.0, "linear_divisor": 3.0, "log_ratio_divisor": 1.3862943611198906, "moment_divisor": 10.0, "object_position_divisor": 2.0, "root_height_divisor": 1.0, "support_divisor": 2.0, "torque_divisor": 100.0, "velocity_divisor": 10.0},
+    "final_continuous_clip": 5.0,
+    "version": "phase4b5_fixed_fields_v1"
+  },
+  "retention": {"move_largebox": {"carry_error_m": {"baseline": 0.10169, "direction": "lower"}, "median_progress": {"baseline": 0.99706, "direction": "higher"}, "setdown_m": {"baseline": 0.18235, "direction": "lower"}}, "move_suitcase": {"median_progress": {"baseline": 0.98646, "direction": "higher"}, "setdown_m": {"baseline": 0.2063, "direction": "lower"}}, "push_box": {"final_error_m": {"baseline": 0.06195, "direction": "lower"}, "median_progress": {"baseline": 1.467, "direction": "higher"}}, "push_door_hand": {"median_progress": {"baseline": 2.618, "direction": "higher"}}},
+  "reward": {"aggregate_clip": [-20.0, 10.0], "constants": {"contact_unexpected_penalty": 0.25, "force_expected_threshold": 0.5, "force_scale_N": 100.0, "force_s_clip": 2.0, "moment_scale_Nm": 10.0, "progress_delta_clip": 0.02, "rate_delta_scale": 0.1, "rate_ratio_clip": 2.0, "residual_epsilon": 0.000001, "stability_margin_m": 0.15, "stability_penalty_clip": 4.0}, "weights": {"contact": 1.0, "force": 0.5, "nonfinite": -20.0, "progress": 5.0, "rate": 0.02, "residual": 0.05, "stability": 1.0, "terminal_failure": -10.0, "terminal_success": 5.0}},
+  "sampler": {
+    "nominal_rows": {
+      "move_largebox": {"friction": 0.5, "inertia": [0.0020000001, 0.0020000001, 0.0020000001, 0.0, 0.0, 0.0], "mass": 1.0},
+      "move_suitcase": {"friction": 0.5, "inertia": [0.031249996, 0.024999999, 0.016249999, 0.0, 0.0, 0.0], "mass": 1.5},
+      "push_box": {"friction": 0.5, "inertia": [0.853333353, 1.093333244, 1.093333244, 0.0, 0.0, 0.0], "mass": 8.0},
+      "push_door_hand": {"damping": 0.55, "friction": 0.3}
+    },
+    "physical_family_count": {"C1": {"count": [1], "probability": [1.0]}, "C2": {"count": [1, 2], "probability": [0.7, 0.3]}, "C3": {"count": [1, 2, 3], "probability": [0.4, 0.4, 0.2]}},
+    "physical_subfamilies": {"door": ["mechanism", "axis_handle", "initial_stance", "contact_target"], "rigid": ["inertial", "surface", "initial_stance", "contact_target_load_share"]},
+    "nominal_scaffold": {"alpha": 0.9, "delay": 4},
+    "scaffold": {"C1": {"pairs": [[3, 0.85], [4, 0.9], [5, 0.95]], "probability": [0.2, 0.6, 0.2]}, "C2": {"pairs": [[2, 0.8], [3, 0.85], [4, 0.9], [5, 0.94], [6, 0.97]], "probability": [0.1, 0.2, 0.4, 0.2, 0.1]}, "C3": {"pairs": [[2, 0.8], [3, 0.85], [4, 0.9], [5, 0.94], [6, 0.97]], "probability": [0.2, 0.2, 0.2, 0.2, 0.2]}},
+    "counter_rng": {"algorithm": "pcg_rxs_m_xs_32", "counter_bias": 1, "float_divisor": 16777216, "mantissa_shift": 8, "output_multiplier": 277803737, "output_shift": 22, "slot_bias": 97, "slot_multiplier": 6961, "state_increment": 2891336453, "state_multiplier": 747796405, "state_shift": 28, "state_shift_bias": 4, "word_mask": 4294967295},
+    "seed_offsets": {"episode_multiplier": 1000003, "per_step": 40000000, "physical": 10000000, "scaffold": 20000000, "sensor": 30000000},
+    "stage_constants": {"C1": {"load_share": 0.05}, "C2": {"load_share": 0.1}, "C3": {"load_share": 0.2}},
+    "sensor": {
+      "C1": {"axis_deg": [0.0, 0.0], "bias_force": [0.0, 0.0], "bias_moment": [0.0, 0.0], "delay_probability": [0.7, 0.3], "delay_values": [0, 1], "drift_force": [0.0, 0.0], "drift_moment": [0.0, 0.0], "dropout": [0.0, 0.0], "filter": [0.0, 0.2], "random_walk_force": [0.0, 0.0], "random_walk_moment": [0.0, 0.0], "scale": [0.0, 0.0], "saturation_force": [200.0, 200.0], "saturation_moment": [20.0, 20.0], "white_force": [0.0, 0.25], "white_moment": [0.0, 0.025]},
+      "C2": {"axis_deg": [0.0, 0.0], "bias_force": [-1.0, 1.0], "bias_moment": [-0.1, 0.1], "delay_probability": [0.4, 0.4, 0.2], "delay_values": [0, 1, 2], "drift_force": [0.0, 0.0], "drift_moment": [0.0, 0.0], "dropout": [0.0, 0.0], "filter": [0.2, 0.5], "random_walk_force": [0.0, 0.0], "random_walk_moment": [0.0, 0.0], "scale": [0.0, 0.0], "saturation_force": [200.0, 200.0], "saturation_moment": [20.0, 20.0], "white_force": [0.25, 0.75], "white_moment": [0.025, 0.075]},
+      "C3": {"axis_deg": [0.0, 5.0], "bias_force": [-3.0, 3.0], "bias_moment": [-0.3, 0.3], "delay_probability": [0.25, 0.25, 0.25, 0.25], "delay_values": [0, 1, 2, 3], "drift_force": [-0.002, 0.002], "drift_moment": [-0.0002, 0.0002], "dropout": [0.0, 0.02], "filter": [0.3, 0.8], "random_walk_force": [0.0, 0.03], "random_walk_moment": [0.0, 0.003], "scale": [-0.05, 0.05], "saturation_force": [100.0, 200.0], "saturation_moment": [10.0, 20.0], "white_force": [0.5, 1.5], "white_moment": [0.05, 0.15]}
+    },
+    "task_ranges": {
+      "move_largebox": {"C1": {"contact_m": 0.01, "contact_rot_deg": 2.0, "com_m": 0.02, "friction": [0.4, 0.6], "mass": [0.8, 1.2], "object_xy_m": 0.02, "object_yaw_deg": 2.0, "stance_m": 0.02, "stance_yaw_deg": 2.0}, "C2": {"contact_m": 0.025, "contact_rot_deg": 5.0, "com_m": 0.05, "friction": [0.3, 0.7], "mass": [0.7, 1.4], "object_xy_m": 0.05, "object_yaw_deg": 5.0, "stance_m": 0.05, "stance_yaw_deg": 5.0}, "C3": {"contact_m": 0.05, "contact_rot_deg": 10.0, "com_m": 0.08, "friction": [0.2, 0.8], "mass": [0.6, 1.6], "object_xy_m": 0.1, "object_yaw_deg": 10.0, "stance_m": 0.08, "stance_yaw_deg": 8.0}},
+      "move_suitcase": {"C1": {"contact_m": 0.005, "contact_rot_deg": 1.0, "com_m": 0.01, "friction": [0.4, 0.6], "mass": [1.2, 1.8], "object_xy_m": 0.02, "object_yaw_deg": 2.0, "stance_m": 0.02, "stance_yaw_deg": 2.0}, "C2": {"contact_m": 0.015, "contact_rot_deg": 3.0, "com_m": 0.03, "friction": [0.3, 0.7], "mass": [0.75, 3.0], "object_xy_m": 0.05, "object_yaw_deg": 5.0, "stance_m": 0.05, "stance_yaw_deg": 5.0}, "C3": {"contact_m": 0.03, "contact_rot_deg": 5.0, "com_m": 0.05, "friction": [0.2, 0.8], "mass": [0.5, 4.0], "object_xy_m": 0.1, "object_yaw_deg": 10.0, "stance_m": 0.08, "stance_yaw_deg": 8.0}},
+      "push_box": {"C1": {"contact_m": 0.01, "contact_rot_deg": 2.0, "com_m": 0.02, "friction": [0.4, 0.6], "mass": [6.0, 10.0], "object_xy_m": 0.02, "object_yaw_deg": 2.0, "stance_m": 0.02, "stance_yaw_deg": 2.0}, "C2": {"contact_m": 0.025, "contact_rot_deg": 5.0, "com_m": 0.05, "friction": [0.25, 0.6], "mass": [3.0, 13.0], "object_xy_m": 0.05, "object_yaw_deg": 5.0, "stance_m": 0.05, "stance_yaw_deg": 5.0}, "C3": {"contact_m": 0.05, "contact_rot_deg": 10.0, "com_m": 0.1, "friction": [0.1, 0.6], "mass": [1.0, 16.0], "object_xy_m": 0.1, "object_yaw_deg": 10.0, "stance_m": 0.08, "stance_yaw_deg": 8.0}},
+      "push_door_hand": {"C1": {"axis_deg": 1.0, "damping": [0.55, 1.5], "friction": [0.3, 0.8], "handle_m": 0.01, "handle_rot_deg": 2.0, "object_m": 0.01, "object_yaw_deg": 1.0, "stance_m": 0.02, "stance_yaw_deg": 2.0}, "C2": {"axis_deg": 3.0, "damping": [0.4, 4.0], "friction": [0.2, 3.0], "handle_m": 0.025, "handle_rot_deg": 5.0, "object_m": 0.02, "object_yaw_deg": 3.0, "stance_m": 0.05, "stance_yaw_deg": 5.0}, "C3": {"axis_deg": 5.0, "damping": [0.3, 8.0], "friction": [0.15, 8.0], "handle_m": 0.05, "handle_rot_deg": 10.0, "object_m": 0.04, "object_yaw_deg": 5.0, "stance_m": 0.08, "stance_yaw_deg": 8.0}}
+    }
+  },
+  "sensor": {"control_dt_s": 0.02, "detector": {"off": 0.025, "on": 0.05, "smoothing_alpha": 0.5, "temperature": 0.02}, "fixed_scales": {"force_N": 100.0, "moment_Nm": 10.0}, "ramp": {"attack": 0.1, "release": 0.1}, "saturation": {"force_N": 200.0, "moment_Nm": 20.0}},
+  "source_runtime_commit": "caf09bfdaaa50004bead2750b9da495a340adffa",
+  "units": {"angles": "deg_or_rad_explicit_per_field", "control_dt": "s", "force": "N", "mass": "kg", "moment": "Nm", "position": "m", "reward": "dimensionless", "time": "control_steps"}
+}

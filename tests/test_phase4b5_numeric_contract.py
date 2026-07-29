@@ -1,0 +1,106 @@
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+
+import pytest
+
+from somaforce_cross.envs.numeric_contract import (
+    CONTRACT_AUDIT_COMMIT,
+    CONTRACT_VERSION,
+    SOURCE_RUNTIME_COMMIT,
+    canonical_json_bytes,
+    load_numeric_contract,
+    validate_numeric_contract,
+)
+
+
+CONTRACT_PATH = Path("configs/phase4b5_numeric_contract.json")
+
+
+def _payload() -> dict[str, object]:
+    return json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+
+
+def test_canonical_contract_covers_runtime_identity_and_hash() -> None:
+    contract = load_numeric_contract(CONTRACT_PATH)
+    assert contract.payload["contract_version"] == CONTRACT_VERSION
+    assert contract.payload["source_runtime_commit"] == SOURCE_RUNTIME_COMMIT
+    assert contract.payload["contract_audit_commit"] == CONTRACT_AUDIT_COMMIT
+    assert len(contract.sha256) == 64
+    changed = copy.deepcopy(contract.payload)
+    changed["sampler"]["seed_offsets"]["physical"] += 1
+    assert canonical_json_bytes(changed) != canonical_json_bytes(contract.payload)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value.__setitem__("unknown", 1),
+        lambda value: value["sampler"]["task_ranges"]["move_suitcase"].pop("C3"),
+        lambda value: value["units"].pop("force"),
+        lambda value: value["approval"].__setitem__("status", "pending"),
+        lambda value: value["reward"]["constants"].__setitem__(
+            "force_scale_N", float("nan")
+        ),
+    ],
+)
+def test_contract_rejects_nested_schema_unit_approval_and_nonfinite(
+    mutate: object,
+) -> None:
+    payload = _payload()
+    mutate(payload)  # type: ignore[operator]
+    with pytest.raises((TypeError, ValueError)):
+        validate_numeric_contract(payload)
+
+
+def test_contract_rejects_invalid_probability_and_c0_upgrade() -> None:
+    payload = _payload()
+    payload["curriculum"]["stage_families"]["C2"]["physical"] = 0.5
+    with pytest.raises(ValueError):
+        validate_numeric_contract(payload)
+    payload = _payload()
+    payload["c0"]["F_scale"] = 100.0
+    with pytest.raises(ValueError, match="C0"):
+        validate_numeric_contract(payload)
+
+
+@pytest.mark.parametrize(
+    "path,value",
+    [
+        (("curriculum", "windows", "promotion_windows"), 0),
+        (("curriculum", "family_order"), ["physical"]),
+        (("sampler", "sensor", "C3", "delay_probability"), [0.5, 0.5]),
+        (("sampler", "task_ranges", "push_box", "C3", "mass"), [16.0, 1.0]),
+        (("retention", "push_box", "median_progress", "direction"), "sideways"),
+        (("held_out", "box_mass_16_friction_1_2", "type"), "unknown"),
+        (("sampler", "counter_rng", "algorithm"), "fallback"),
+        (("sampler", "counter_rng", "float_divisor"), 1),
+        (("sampler", "counter_rng", "mantissa_shift"), 32),
+        (("sampler", "counter_rng", "state_shift"), 32),
+        (("sampler", "counter_rng", "output_shift"), 0),
+        (("sampler", "counter_rng", "state_multiplier"), 4294967296),
+    ],
+)
+def test_contract_rejects_nested_type_support_and_direction_errors(
+    path: tuple[str, ...], value: object
+) -> None:
+    payload = _payload()
+    target = payload
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    with pytest.raises((TypeError, ValueError)):
+        validate_numeric_contract(payload)
+
+
+def test_contract_rejects_counter_rng_unknown_or_missing_fields() -> None:
+    payload = _payload()
+    payload["sampler"]["counter_rng"]["fallback_seed"] = 1
+    with pytest.raises(ValueError):
+        validate_numeric_contract(payload)
+    payload = _payload()
+    payload["sampler"]["counter_rng"].pop("word_mask")
+    with pytest.raises(ValueError):
+        validate_numeric_contract(payload)
