@@ -9,8 +9,14 @@ import torch
 
 from somaforce_cross.envs.task_adapter import (
     TaskProgressSignals,
+    apply_selected_rigid_physx_parameters,
+    adapter_contact_target_offsets,
+    quat_mul_wxyz,
+    quat_to_rotvec_wxyz,
     rigid_nominal_physics_mismatch,
     rigid_object_state,
+    rigid_physx_readback,
+    rotvec_to_quat_wxyz,
 )
 from somaforce_cross.scaffold.contracts import G1_FULL_JOINT_NAMES
 from somaforce_cross.scaffold.pretrained_hdmi import (
@@ -73,6 +79,30 @@ class RigidObjectTaskAdapter:
             self.num_envs, device=self.device, dtype=torch.long
         )
         self._resolve_indices()
+        nominal_offsets = torch.tensor(
+            self.task_spec.contact_target_offsets,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self._nominal_contact_target_offsets = nominal_offsets
+        self.contact_target_offsets = nominal_offsets.expand(
+            self.num_envs, -1, -1
+        ).clone()
+        self.contact_target_translation = torch.zeros(
+            self.num_envs, 3, device=self.device, dtype=torch.float32
+        )
+        self.contact_target_rotvec = torch.zeros_like(self.contact_target_translation)
+        self.desired_load_share_error = torch.zeros(
+            self.num_envs, 2, device=self.device, dtype=torch.float32
+        )
+        self._runtime_nominal_object_pose = torch.zeros(
+            self.num_envs, 7, device=self.device, dtype=torch.float32
+        )
+        self._runtime_nominal_robot_pose = torch.zeros_like(
+            self._runtime_nominal_object_pose
+        )
+        self._runtime_nominal_object_pose[:, 3] = 1.0
+        self._runtime_nominal_robot_pose[:, 3] = 1.0
 
     def _resolve_indices(self) -> None:
         shared_joint_names = tuple(
@@ -236,6 +266,97 @@ class RigidObjectTaskAdapter:
             torch.zeros(count, 6, device=self.device), env_ids=env_ids
         )
 
+    def validate_runtime_parameters(
+        self, env_ids: torch.Tensor, physics_row: torch.Tensor
+    ) -> None:
+        self.validate_reset(env_ids)
+        if (
+            not isinstance(physics_row, torch.Tensor)
+            or physics_row.shape != (env_ids.numel(), 39)
+            or physics_row.dtype != torch.float32
+            or physics_row.device != self.device
+            or not torch.isfinite(physics_row).all()
+        ):
+            raise ValueError("rigid runtime physics must be finite float32 [B,39]")
+        if torch.count_nonzero(physics_row[:, 0:11]):
+            raise ValueError("rigid runtime rows 0:11 must be bitwise zero")
+        if torch.any(physics_row[:, 11] <= 0.0) or torch.any(physics_row[:, 21] < 0.0):
+            raise ValueError("rigid mass must be positive and friction nonnegative")
+
+    @staticmethod
+    def _from_physx_xyzw(pose: torch.Tensor) -> torch.Tensor:
+        return torch.cat((pose[:, :3], pose[:, [6, 3, 4, 5]]), dim=-1).to(
+            dtype=torch.float32
+        )
+
+    def _object_root_pose_readback(self, env_ids: torch.Tensor) -> torch.Tensor:
+        pose = self.object.root_physx_view.get_transforms().to(self.device)
+        return self._from_physx_xyzw(pose.index_select(0, env_ids.to(pose.device)))
+
+    def _robot_root_pose_readback(self, env_ids: torch.Tensor) -> torch.Tensor:
+        pose = self.robot.root_physx_view.get_root_transforms().to(self.device)
+        return self._from_physx_xyzw(pose.index_select(0, env_ids.to(pose.device)))
+
+    def apply_runtime_parameters(
+        self, env_ids: torch.Tensor, physics_row: torch.Tensor
+    ) -> None:
+        self.validate_runtime_parameters(env_ids, physics_row)
+        if env_ids.numel() == 0:
+            return
+        view = self.object.root_physx_view
+        apply_selected_rigid_physx_parameters(view, env_ids, physics_row)
+
+        object_nominal = self._object_root_pose_readback(env_ids)
+        robot_nominal = self._robot_root_pose_readback(env_ids)
+        self._runtime_nominal_object_pose[env_ids] = object_nominal
+        self._runtime_nominal_robot_pose[env_ids] = robot_nominal
+        object_pose = object_nominal.clone()
+        object_pose[:, :3] += physics_row[:, 22:25]
+        object_pose[:, 3:] = quat_mul_wxyz(
+            rotvec_to_quat_wxyz(physics_row[:, 25:28]), object_nominal[:, 3:]
+        )
+        robot_pose = robot_nominal.clone()
+        robot_pose[:, :2] += physics_row[:, 28:30]
+        stance_rotvec = torch.zeros_like(physics_row[:, 25:28])
+        stance_rotvec[:, 2] = physics_row[:, 30]
+        robot_pose[:, 3:] = quat_mul_wxyz(
+            rotvec_to_quat_wxyz(stance_rotvec), robot_nominal[:, 3:]
+        )
+        self.object.write_root_link_pose_to_sim(object_pose, env_ids=env_ids)
+        self.robot.write_root_link_pose_to_sim(robot_pose, env_ids=env_ids)
+        self.contact_target_translation[env_ids] = physics_row[:, 31:34]
+        self.contact_target_rotvec[env_ids] = physics_row[:, 34:37]
+        self.contact_target_offsets[env_ids] = adapter_contact_target_offsets(
+            self._nominal_contact_target_offsets, physics_row
+        )
+        self.desired_load_share_error[env_ids] = physics_row[:, 37:39]
+
+    def runtime_parameter_readback(self, env_ids: torch.Tensor) -> torch.Tensor:
+        self.validate_reset(env_ids)
+        view = self.object.root_physx_view
+        result = rigid_physx_readback(view, env_ids, device=self.device)
+        object_pose = self._object_root_pose_readback(env_ids)
+        robot_pose = self._robot_root_pose_readback(env_ids)
+        object_nominal = self._runtime_nominal_object_pose[env_ids]
+        robot_nominal = self._runtime_nominal_robot_pose[env_ids]
+        result[:, 22:25] = object_pose[:, :3] - object_nominal[:, :3]
+        result[:, 25:28] = quat_to_rotvec_wxyz(
+            quat_mul_wxyz(
+                object_pose[:, 3:],
+                torch.cat((object_nominal[:, 3:4], -object_nominal[:, 4:]), dim=-1),
+            )
+        )
+        result[:, 28:30] = robot_pose[:, :2] - robot_nominal[:, :2]
+        robot_delta = quat_mul_wxyz(
+            robot_pose[:, 3:],
+            torch.cat((robot_nominal[:, 3:4], -robot_nominal[:, 4:]), dim=-1),
+        )
+        result[:, 30] = quat_to_rotvec_wxyz(robot_delta)[:, 2]
+        result[:, 31:34] = self.contact_target_translation[env_ids]
+        result[:, 34:37] = self.contact_target_rotvec[env_ids]
+        result[:, 37:39] = self.desired_load_share_error[env_ids]
+        return result
+
     def advance(self) -> None:
         self._advance_progress()
         self.reference_step.add_(1)
@@ -320,15 +441,7 @@ class RigidObjectTaskAdapter:
         object_root_quat = self.object.data.root_link_quat_w
         object_body_pos = self.object.data.body_link_pos_w[:, self.object_body_id]
         object_body_quat = self.object.data.body_link_quat_w[:, self.object_body_id]
-        target_offsets = (
-            torch.tensor(
-                self.task_spec.contact_target_offsets,
-                device=self.device,
-                dtype=object_body_pos.dtype,
-            )
-            .unsqueeze(0)
-            .expand(self.num_envs, -1, -1)
-        )
+        target_offsets = self.contact_target_offsets.to(dtype=object_body_pos.dtype)
         contact_target = object_body_pos[:, None] + quat_apply(
             object_body_quat[:, None], target_offsets
         )

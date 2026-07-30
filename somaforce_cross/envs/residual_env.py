@@ -15,6 +15,11 @@ from somaforce_cross.envs.mismatch import (
     PerEnvRandomStream,
     validate_env_ids,
 )
+from somaforce_cross.envs.mismatch_sampler import Phase4B5MismatchSampler
+from somaforce_cross.envs.numeric_contract import (
+    CONTRACT_VERSION,
+    load_numeric_contract,
+)
 from somaforce_cross.envs.observations import (
     CriticObservationBundle,
     ForceSemanticPipeline,
@@ -152,6 +157,54 @@ class NormalizedActionSink:
         return target
 
 
+class _ScaffoldRuntimeParameterOwner:
+    """Own selected delay/alpha lifecycle without changing the action-sink API."""
+
+    def __init__(self, runtime: object) -> None:
+        self.runtime = runtime
+        self.device = runtime.device
+
+    def validate(self, env_ids: torch.Tensor, scaffold_row: torch.Tensor) -> None:
+        if env_ids.ndim != 1 or env_ids.dtype != torch.long:
+            raise TypeError("env_ids must be a one-dimensional int64 tensor")
+        if env_ids.device != self.device:
+            raise ValueError("env_ids must be on the scaffold runtime device")
+        if (
+            not isinstance(scaffold_row, torch.Tensor)
+            or scaffold_row.shape != (env_ids.numel(), 2)
+            or scaffold_row.dtype != torch.float32
+            or scaffold_row.device != self.device
+            or not torch.isfinite(scaffold_row).all()
+        ):
+            raise ValueError("scaffold runtime row must be finite float32 [B,2]")
+        delay = scaffold_row[:, 0]
+        if not torch.equal(delay, delay.round()) or torch.any(
+            (delay < 2) | (delay > 6)
+        ):
+            raise ValueError("scaffold delay must be an integer in [2,6]")
+        if torch.any((scaffold_row[:, 1] < 0.8) | (scaffold_row[:, 1] > 1.0)):
+            raise ValueError("scaffold alpha must be in [0.8,1.0]")
+
+    def apply(self, env_ids: torch.Tensor, scaffold_row: torch.Tensor) -> None:
+        self.validate(env_ids, scaffold_row)
+        with torch.no_grad():
+            self.runtime.delay[env_ids, 0] = scaffold_row[:, 0].to(torch.long)
+            self.runtime.alpha[env_ids, 0] = scaffold_row[:, 1]
+
+    def readback(self, env_ids: torch.Tensor) -> torch.Tensor:
+        if env_ids.ndim != 1 or env_ids.dtype != torch.long:
+            raise TypeError("env_ids must be a one-dimensional int64 tensor")
+        if env_ids.device != self.device:
+            raise ValueError("env_ids must be on the scaffold runtime device")
+        return torch.stack(
+            (
+                self.runtime.delay[env_ids, 0].to(dtype=torch.float32),
+                self.runtime.alpha[env_ids, 0],
+            ),
+            dim=-1,
+        ).clone()
+
+
 class SomaForceResidualEnv(DirectRLEnv):
     """Four-task C0 environment; external actions are raw residual probes."""
 
@@ -165,6 +218,16 @@ class SomaForceResidualEnv(DirectRLEnv):
     ) -> None:
         super().__init__(cfg, render_mode, **kwargs)
         profile = self.cfg.smoke_profile
+        self.runtime_mode = profile.runtime_mode
+        self.scaffold_stage = profile.scaffold_stage
+        self.mismatch_sampler: Phase4B5MismatchSampler | None = None
+        if self.runtime_mode == "scaffold_only":
+            contract = load_numeric_contract(Path(profile.numeric_contract_path))
+            if contract.payload["contract_version"] != CONTRACT_VERSION:
+                raise ValueError("scaffold_only requires phase4b5_numeric_v2")
+            self.mismatch_sampler = Phase4B5MismatchSampler(
+                contract, base_seed=self.cfg.seed
+            )
         artifact_dir = Path(self.cfg.artifact_dir).expanduser().resolve()
         scaffold = PretrainedHDMIScaffold.from_artifact(
             artifact_dir, device=self.device
@@ -181,6 +244,7 @@ class SomaForceResidualEnv(DirectRLEnv):
             delay=profile.delay,
             alpha=profile.alpha,
         )
+        self.scaffold_runtime = _ScaffoldRuntimeParameterOwner(self.action_sink.runtime)
         self.wrench_source = IsaacWristWrenchSource(
             self.robot,
             artifact_identity=self.task_spec.artifact_name,
@@ -276,6 +340,18 @@ class SomaForceResidualEnv(DirectRLEnv):
         )
         self.parameter_store = EpisodeParameterStore(self.num_envs, device=self.device)
         self.random_stream = PerEnvRandomStream(self.num_envs, device=self.device)
+        self.episode_index = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.long
+        )
+        self.requested_physics = torch.zeros(
+            self.num_envs, 39, device=self.device, dtype=torch.float32
+        )
+        self.requested_scaffold = torch.zeros(
+            self.num_envs, 2, device=self.device, dtype=torch.float32
+        )
+        self.requested_sensor = torch.zeros(
+            self.num_envs, 90, device=self.device, dtype=torch.float32
+        )
         self.reset_coordinator = EpisodeResetCoordinator(
             parameter_store=self.parameter_store,
             random_stream=self.random_stream,
@@ -479,9 +555,33 @@ class SomaForceResidualEnv(DirectRLEnv):
         self.action_sink.validate_reset(env_ids)
         self.adapter.validate_reset(env_ids)
 
+    def _sensor_parameter_readback(self, env_ids: torch.Tensor) -> torch.Tensor:
+        """Flatten the public selected VirtualFTSensor parameter buffers."""
+        limits = self.virtual_sensor.saturation_limit[env_ids]
+        scales = self.virtual_sensor.normalization_scale[env_ids]
+        return VirtualFTSensorParameters(
+            axis_misalignment_quat=self.virtual_sensor.axis_misalignment_quat[env_ids],
+            scale_error=self.virtual_sensor.scale_error[env_ids],
+            additive_bias=self.virtual_sensor.additive_bias[env_ids],
+            drift_rate=self.virtual_sensor.drift_rate[env_ids],
+            drift_noise_std=self.virtual_sensor.drift_noise_std[env_ids],
+            white_noise_std=self.virtual_sensor.white_noise_std[env_ids],
+            delay_steps=self.virtual_sensor.delay_steps[env_ids],
+            filter_alpha=self.virtual_sensor.filter_alpha[env_ids],
+            force_saturation=limits[..., :3],
+            torque_saturation=limits[..., 3:],
+            dropout_probability=self.virtual_sensor.dropout_probability[env_ids],
+            F_scale=scales[..., 0],
+            M_scale=scales[..., 3],
+        ).flatten()
+
     def _reset_idx(self, env_ids: Sequence[int] | torch.Tensor) -> None:
         ids = validate_env_ids(env_ids, batch_size=self.num_envs, device=self.device)
         count = ids.numel()
+        if self.runtime_mode == "scaffold_only":
+            self._reset_scaffold_only_idx(ids)
+            return
+
         profile = self.cfg.smoke_profile
         physics_mismatch = self.adapter.nominal_physics_row().index_select(0, ids)
         scaffold_mismatch = torch.tensor(
@@ -516,6 +616,70 @@ class SomaForceResidualEnv(DirectRLEnv):
         self._initialize_wrist_rows(ids)
         self._refresh_nominal(ids, initialize=True)
         self._last_observations = self._assemble_observations()
+
+    def _reset_scaffold_only_idx(self, ids: torch.Tensor) -> None:
+        """Execute the B5B2B1 selected-row parameter lifecycle without stepping."""
+        if self.mismatch_sampler is None or self.scaffold_stage is None:
+            raise AssertionError("scaffold_only runtime was not initialized")
+        count = ids.numel()
+        episodes = self.episode_index.index_select(0, ids)
+        sample = self.mismatch_sampler.sample(
+            task=self.task_spec.task,
+            stage=self.scaffold_stage,
+            env_ids=ids,
+            episode_indices=episodes,
+        )
+        # Validate every sampled/runtime row before scene, PhysX, buffer, seed,
+        # or history mutation.  Requested rows remain distinct from critic rows.
+        prepared = self.parameter_store.validate_rows(
+            ids, sample.physics, sample.scaffold, sample.sensor
+        )
+        _, _, _, prepared_sensor = prepared
+        sensor_parameters = VirtualFTSensorParameters.from_flat(prepared_sensor)
+        self.random_stream.validate_seeds(ids, sample.episode_seeds)
+        self.scaffold_state.validate_reset(ids)
+        self.action_sink.validate_reset(ids)
+        self.scaffold_runtime.validate(ids, sample.scaffold)
+        self.adapter.validate_reset(ids)
+        self.adapter.validate_runtime_parameters(ids, sample.physics)
+
+        if count == 0:
+            return
+
+        self.requested_physics[ids] = sample.physics
+        self.requested_scaffold[ids] = sample.scaffold
+        self.requested_sensor[ids] = sample.sensor
+        self._snapshot_terminal(ids)
+        super()._reset_idx(ids)
+
+        # The nominal pose is installed first.  Selected PhysX/runtime writes
+        # then produce the only rows that may enter the critic parameter store.
+        self.adapter.write_scene_reset(ids)
+        self.scaffold_runtime.apply(ids, sample.scaffold)
+        self.adapter.apply_runtime_parameters(ids, sample.physics)
+        self.virtual_sensor._apply_validated_parameters(ids, sensor_parameters)
+        self.scene.write_data_to_sim()
+
+        applied_physics = self.adapter.runtime_parameter_readback(ids)
+        applied_scaffold = self.scaffold_runtime.readback(ids)
+        applied_sensor = self._sensor_parameter_readback(ids)
+        self.parameter_store.validate_rows(
+            ids, applied_physics, applied_scaffold, applied_sensor
+        )
+        self.reset_coordinator.reset_after_runtime_apply(
+            ids,
+            applied_physics=applied_physics,
+            applied_scaffold=applied_scaffold,
+            applied_sensor=applied_sensor,
+            seeds=sample.episode_seeds,
+            initial_wrist_frame=torch.zeros(count, 2, 14, device=self.device),
+            current_a_nom=torch.zeros(count, 23, device=self.device),
+        )
+        self.scaffold_state.set_motion_length(ids, self.adapter.reference.length)
+        self._initialize_wrist_rows(ids)
+        self._refresh_nominal(ids, initialize=True)
+        self._last_observations = self._assemble_observations()
+        self.episode_index[ids] += 1
 
     def _owned_sensor_state(self) -> dict[str, torch.Tensor]:
         return {
@@ -564,16 +728,25 @@ class SomaForceResidualEnv(DirectRLEnv):
         tare = self.tare_calibrator.update(
             source.clean_total_wrench_base_yaw, calibration_mask
         )
-        zeros = torch.zeros_like(source.clean_total_wrench_base_yaw)
+        if self.runtime_mode == "scaffold_only":
+            draws = self.random_stream.draw_virtual_ft()
+            drift_draw = draws.drift
+            noise_draw = draws.noise
+            dropout_draw = draws.dropout
+        else:
+            # The C0 trace is intentionally bitwise isolated from B5 draws.
+            drift_draw = torch.zeros_like(source.clean_total_wrench_base_yaw)
+            noise_draw = torch.zeros_like(source.clean_total_wrench_base_yaw)
+            dropout_draw = torch.ones(self.num_envs, 2, device=self.device)
         virtual = self.virtual_sensor(
             source.clean_total_wrench_base_yaw,
             tare.calibrated_wrench,
             tare.calibration_ready,
             torch.ones(self.num_envs, 2, device=self.device),
             source.valid.float(),
-            drift_draw=zeros,
-            noise_draw=zeros,
-            dropout_draw=torch.ones(self.num_envs, 2, device=self.device),
+            drift_draw=drift_draw,
+            noise_draw=noise_draw,
+            dropout_draw=dropout_draw,
         )
         sample_valid = source.valid & tare.calibration_ready
         if selected is not None:
@@ -777,7 +950,13 @@ class SomaForceResidualEnv(DirectRLEnv):
             "parameter_physics": self.parameter_store.physics_mismatch,
             "parameter_scaffold": self.parameter_store.scaffold_mismatch,
             "parameter_sensor": self.parameter_store.sensor_mismatch,
+            "requested_physics": self.requested_physics,
+            "requested_scaffold": self.requested_scaffold,
+            "requested_sensor": self.requested_sensor,
+            "episode_index": self.episode_index,
             "random_seed": self.random_stream.seeds,
+            "scaffold_delay": self.action_sink.runtime.delay,
+            "scaffold_alpha": self.action_sink.runtime.alpha,
             "robot_root_state": self.robot.data.root_state_w,
             "robot_joint_pos": self.robot.data.joint_pos,
             "robot_joint_vel": self.robot.data.joint_vel,
@@ -786,6 +965,17 @@ class SomaForceResidualEnv(DirectRLEnv):
             "object_joint_vel": object_joint_vel,
             "joint_target": self.action_sink.last_joint_target,
         }
+        for name in (
+            "mechanism_friction_buffer",
+            "mechanism_damping_buffer",
+            "contact_target_offsets",
+            "contact_target_translation",
+            "contact_target_rotvec",
+            "desired_load_share_error",
+        ):
+            value = getattr(self.adapter, name, None)
+            if isinstance(value, torch.Tensor):
+                state[f"adapter_{name}"] = value
         state.update(self._owned_sensor_state())
         return state
 

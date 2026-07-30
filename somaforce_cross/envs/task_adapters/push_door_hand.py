@@ -9,8 +9,14 @@ import torch
 
 from somaforce_cross.envs.task_adapter import (
     TaskProgressSignals,
+    adapter_contact_target_offsets,
+    door_custom_effort,
     door_nominal_physics_mismatch,
+    quat_mul_wxyz,
+    quat_to_rotvec_wxyz,
+    rotvec_to_quat_wxyz,
     strict_root_height_failure,
+    validate_door_runtime_physics,
 )
 from somaforce_cross.scaffold.contracts import G1_FULL_JOINT_NAMES
 from somaforce_cross.scaffold.pretrained_hdmi import (
@@ -86,6 +92,33 @@ class PushDoorHandTaskAdapter:
         )
         self.previous_progress = torch.zeros_like(self.initial_door_joint)
         self.current_progress = torch.zeros_like(self.initial_door_joint)
+        self.mechanism_friction_buffer = torch.full_like(
+            self.initial_door_joint, self.mechanism_friction
+        )
+        self.mechanism_damping_buffer = torch.full_like(
+            self.initial_door_joint, self.mechanism_damping
+        )
+        nominal_offsets = torch.tensor(
+            self.task_spec.contact_target_offsets,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self._nominal_contact_target_offsets = nominal_offsets
+        self.contact_target_offsets = nominal_offsets.expand(
+            self.num_envs, -1, -1
+        ).clone()
+        self.contact_target_translation = torch.zeros(
+            self.num_envs, 3, device=self.device, dtype=torch.float32
+        )
+        self.contact_target_rotvec = torch.zeros_like(self.contact_target_translation)
+        self._runtime_nominal_door_pose = torch.zeros(
+            self.num_envs, 7, device=self.device, dtype=torch.float32
+        )
+        self._runtime_nominal_robot_pose = torch.zeros_like(
+            self._runtime_nominal_door_pose
+        )
+        self._runtime_nominal_door_pose[:, 3] = 1.0
+        self._runtime_nominal_robot_pose[:, 3] = 1.0
 
     def _resolve_indices(self) -> None:
         shared_joint_names = tuple(
@@ -267,6 +300,83 @@ class PushDoorHandTaskAdapter:
         )
         self.door.write_joint_state_to_sim(door_joint, door_joint_vel, env_ids=env_ids)
 
+    def validate_runtime_parameters(
+        self, env_ids: torch.Tensor, physics_row: torch.Tensor
+    ) -> None:
+        self.validate_reset(env_ids)
+        validate_door_runtime_physics(env_ids, physics_row, device=self.device)
+
+    @staticmethod
+    def _from_physx_xyzw(pose: torch.Tensor) -> torch.Tensor:
+        return torch.cat((pose[:, :3], pose[:, [6, 3, 4, 5]]), dim=-1).to(
+            dtype=torch.float32
+        )
+
+    def _root_pose_readback(self, asset: object, env_ids: torch.Tensor) -> torch.Tensor:
+        pose = asset.root_physx_view.get_root_transforms().to(self.device)
+        return self._from_physx_xyzw(pose.index_select(0, env_ids.to(pose.device)))
+
+    def apply_runtime_parameters(
+        self, env_ids: torch.Tensor, physics_row: torch.Tensor
+    ) -> None:
+        self.validate_runtime_parameters(env_ids, physics_row)
+        if env_ids.numel() == 0:
+            return
+        door_nominal = self._root_pose_readback(self.door, env_ids)
+        robot_nominal = self._root_pose_readback(self.robot, env_ids)
+        self._runtime_nominal_door_pose[env_ids] = door_nominal
+        self._runtime_nominal_robot_pose[env_ids] = robot_nominal
+
+        door_pose = door_nominal.clone()
+        door_pose[:, :3] += physics_row[:, 22:25]
+        door_pose[:, 3:] = quat_mul_wxyz(
+            rotvec_to_quat_wxyz(physics_row[:, 25:28]), door_nominal[:, 3:]
+        )
+        robot_pose = robot_nominal.clone()
+        robot_pose[:, :2] += physics_row[:, 28:30]
+        stance_rotvec = torch.zeros_like(physics_row[:, 25:28])
+        stance_rotvec[:, 2] = physics_row[:, 30]
+        robot_pose[:, 3:] = quat_mul_wxyz(
+            rotvec_to_quat_wxyz(stance_rotvec), robot_nominal[:, 3:]
+        )
+        self.door.write_root_link_pose_to_sim(door_pose, env_ids=env_ids)
+        self.robot.write_root_link_pose_to_sim(robot_pose, env_ids=env_ids)
+        self.mechanism_friction_buffer[env_ids] = physics_row[:, 3]
+        self.mechanism_damping_buffer[env_ids] = physics_row[:, 4]
+        self.contact_target_translation[env_ids] = physics_row[:, 31:34]
+        self.contact_target_rotvec[env_ids] = physics_row[:, 34:37]
+        self.contact_target_offsets[env_ids] = adapter_contact_target_offsets(
+            self._nominal_contact_target_offsets, physics_row
+        )
+
+    def runtime_parameter_readback(self, env_ids: torch.Tensor) -> torch.Tensor:
+        self.validate_reset(env_ids)
+        door_pose = self._root_pose_readback(self.door, env_ids)
+        robot_pose = self._root_pose_readback(self.robot, env_ids)
+        door_nominal = self._runtime_nominal_door_pose[env_ids]
+        robot_nominal = self._runtime_nominal_robot_pose[env_ids]
+        result = torch.zeros(
+            env_ids.numel(), 39, device=self.device, dtype=torch.float32
+        )
+        result[:, 3] = self.mechanism_friction_buffer[env_ids]
+        result[:, 4] = self.mechanism_damping_buffer[env_ids]
+        result[:, 22:25] = door_pose[:, :3] - door_nominal[:, :3]
+        result[:, 25:28] = quat_to_rotvec_wxyz(
+            quat_mul_wxyz(
+                door_pose[:, 3:],
+                torch.cat((door_nominal[:, 3:4], -door_nominal[:, 4:]), dim=-1),
+            )
+        )
+        result[:, 28:30] = robot_pose[:, :2] - robot_nominal[:, :2]
+        robot_delta = quat_mul_wxyz(
+            robot_pose[:, 3:],
+            torch.cat((robot_nominal[:, 3:4], -robot_nominal[:, 4:]), dim=-1),
+        )
+        result[:, 30] = quat_to_rotvec_wxyz(robot_delta)[:, 2]
+        result[:, 31:34] = self.contact_target_translation[env_ids]
+        result[:, 34:37] = self.contact_target_rotvec[env_ids]
+        return result
+
     def advance(self) -> None:
         self.previous_progress.copy_(self.current_progress)
         door_joint = self.door.data.joint_pos[:, 0]
@@ -277,12 +387,11 @@ class PushDoorHandTaskAdapter:
 
     def apply_object_action(self) -> None:
         door_velocity = self.door.data.joint_vel[:, 0]
-        friction = (
-            -torch.sign(door_velocity)
-            * (door_velocity.abs() > 0.01)
-            * self.mechanism_friction
+        effort = door_custom_effort(
+            door_velocity,
+            self.mechanism_friction_buffer,
+            self.mechanism_damping_buffer,
         )
-        effort = friction - door_velocity * self.mechanism_damping
         self.door.set_joint_effort_target(effort.unsqueeze(1))
 
     def _future_reference(self) -> dict[str, torch.Tensor]:
@@ -359,15 +468,7 @@ class PushDoorHandTaskAdapter:
         door_root_quat = self.door.data.root_link_quat_w
         door_body_pos = self.door.data.body_link_pos_w[:, self.door_panel_body_id]
         door_body_quat = self.door.data.body_link_quat_w[:, self.door_panel_body_id]
-        target_offsets = (
-            torch.tensor(
-                self.task_spec.contact_target_offsets,
-                device=self.device,
-                dtype=door_body_pos.dtype,
-            )
-            .unsqueeze(0)
-            .expand(self.num_envs, -1, -1)
-        )
+        target_offsets = self.contact_target_offsets.to(dtype=door_body_pos.dtype)
         contact_target = door_body_pos[:, None] + quat_apply(
             door_body_quat[:, None], target_offsets
         )
@@ -602,12 +703,15 @@ class PushDoorHandTaskAdapter:
         )
 
     def nominal_physics_row(self) -> torch.Tensor:
-        return door_nominal_physics_mismatch(
+        result = door_nominal_physics_mismatch(
             self.num_envs,
-            mechanism_friction=self.mechanism_friction,
-            mechanism_damping=self.mechanism_damping,
+            mechanism_friction=0.0,
+            mechanism_damping=0.0,
             device=self.device,
         )
+        result[:, 3] = self.mechanism_friction_buffer
+        result[:, 4] = self.mechanism_damping_buffer
+        return result
 
     def progress_signals(self) -> TaskProgressSignals:
         expected = self.expected_contact()

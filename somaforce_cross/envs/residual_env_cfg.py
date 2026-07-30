@@ -68,6 +68,11 @@ class C0SmokeProfile:
     parity_atol: float = 1.0e-5
     parity_rtol: float = 1.0e-5
     root_height_failure: float = 0.45
+    # C0 is the immutable parity path.  The lifecycle path has no implicit
+    # curriculum stage or numeric-contract fallback.
+    runtime_mode: str = "c0"
+    scaffold_stage: str | None = None
+    numeric_contract_path: str | None = None
 
 
 @configclass
@@ -104,6 +109,24 @@ class SomaForceResidualEnvCfg(DirectRLEnvCfg):
             raise ValueError("C0 action/policy/critic dimensions are frozen")
         if profile.semantic_target_dim != 31:
             raise ValueError("C0 semantic target dimension must be 31")
+        if profile.runtime_mode not in ("c0", "scaffold_only"):
+            raise ValueError("runtime_mode must be 'c0' or 'scaffold_only'")
+        if profile.runtime_mode == "c0":
+            if (
+                profile.scaffold_stage is not None
+                or profile.numeric_contract_path is not None
+            ):
+                raise ValueError("c0 mode must not declare a B5 runtime contract")
+        else:
+            if profile.scaffold_stage not in ("C1", "C2", "C3"):
+                raise ValueError(
+                    "scaffold_only requires an explicit C1, C2, or C3 stage"
+                )
+            if (
+                not isinstance(profile.numeric_contract_path, str)
+                or not profile.numeric_contract_path
+            ):
+                raise ValueError("scaffold_only requires an explicit v2 contract path")
         self.decimation = profile.decimation
         self.episode_length_s = profile.episode_length_steps * profile.control_dt
         self.action_space = profile.action_dim

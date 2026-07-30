@@ -229,3 +229,66 @@ class EpisodeResetCoordinator:
             self.reference_step[ids] = 0
             self.episode_length[ids] = 0
         return ids
+
+    def reset_after_runtime_apply(
+        self,
+        env_ids: int | Iterable[int] | torch.Tensor,
+        *,
+        applied_physics: torch.Tensor,
+        applied_scaffold: torch.Tensor,
+        applied_sensor: torch.Tensor,
+        seeds: torch.Tensor,
+        initial_wrist_frame: torch.Tensor,
+        current_a_nom: torch.Tensor,
+    ) -> torch.Tensor:
+        """Commit verified applied rows, then reset selected episode-owned state.
+
+        The caller owns scene writes and all runtime parameter apply/readback.
+        In particular, this method deliberately does not write sensor parameters:
+        it only resets their selected state after the applied sensor row has been
+        captured for the critic store.
+        """
+        ids = validate_env_ids(env_ids, batch_size=self.batch_size, device=self.device)
+        prepared_parameters = self.parameter_store.validate_rows(
+            ids, applied_physics, applied_scaffold, applied_sensor
+        )
+        random_ids, prepared_seeds = self.random_stream.validate_seeds(ids, seeds)
+        initial_frame = _selected_float32(
+            initial_wrist_frame,
+            "initial_wrist_frame",
+            rows=ids.numel(),
+            trailing_shape=(2, 14),
+            device=self.device,
+        )
+        nominal_action = _selected_float32(
+            current_a_nom,
+            "current_a_nom",
+            rows=ids.numel(),
+            trailing_shape=(23,),
+            device=self.device,
+        )
+        self.scaffold.validate_reset(ids)
+        self.action_sink.validate_reset(ids)
+        self.reference_adapter.validate_reset(ids)
+
+        if ids.numel() == 0:
+            return ids
+
+        self.parameter_store._apply_validated(*prepared_parameters)
+        self.random_stream._reseed_validated(random_ids, prepared_seeds)
+        self.scaffold.reset(ids)
+        self.action_sink.reset(ids)
+        self.reference_adapter.reset(ids)
+        self.tare_calibrator.reset(ids)
+        self.virtual_sensor.reset(ids)
+        self.contact_detector.reset(ids)
+        self.contact_ramp.reset(ids)
+        self.wrist_history.reset(ids)
+        self.nominal_action_history.reset(ids)
+        self.executed_action_history.reset(ids)
+        self.wrist_history.reset(ids, initial_frame)
+        self.nominal_action_history.set_current(ids, nominal_action)
+        with torch.no_grad():
+            self.reference_step[ids] = 0
+            self.episode_length[ids] = 0
+        return ids
