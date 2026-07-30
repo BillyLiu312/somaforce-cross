@@ -1,0 +1,4 @@
+interface:
+  display_name: "SomaForce V1 Planning & Admission"
+  short_description: "Plan, gate, admit, and ship SomaForce V1 phases"
+  default_prompt: "Use $somaforce-v1-planning-admission to inspect the repository, determine the live V1 state, produce the right agent prompt, and perform admission when ready."
