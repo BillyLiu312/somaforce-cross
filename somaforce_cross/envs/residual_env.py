@@ -16,6 +16,8 @@ from somaforce_cross.envs.mismatch import (
     validate_env_ids,
 )
 from somaforce_cross.envs.mismatch_sampler import Phase4B5MismatchSampler
+from somaforce_cross.envs.curriculum import Phase4B5Curriculum
+from somaforce_cross.envs.normalizer import FixedFieldNormalizer
 from somaforce_cross.envs.numeric_contract import (
     CONTRACT_VERSION,
     load_numeric_contract,
@@ -27,8 +29,17 @@ from somaforce_cross.envs.observations import (
 )
 from somaforce_cross.envs.reset import EpisodeResetCoordinator
 from somaforce_cross.envs.residual_env_cfg import SomaForceResidualEnvCfg
-from somaforce_cross.envs.task_adapter import smoke_done_flags
-from somaforce_cross.envs.task_adapter import stable_env_seeds
+from somaforce_cross.envs.reward_manager import (
+    EpisodeMetricLog,
+    EpisodeTermination,
+    Phase4B5RewardManager,
+    RewardOutput,
+)
+from somaforce_cross.envs.task_adapter import (
+    TaskProgressSignals,
+    smoke_done_flags,
+    stable_env_seeds,
+)
 from somaforce_cross.envs.task_adapters.move_payload import (
     MovePayloadTaskAdapter,
 )
@@ -57,6 +68,12 @@ from somaforce_cross.sensing import (
     WristTareCalibrator,
 )
 from somaforce_cross.sensing.virtual_ft import VirtualFTSensorParameters
+
+
+_DEFAULT_NUMERIC_CONTRACT = (
+    Path(__file__).resolve().parents[2] / "configs/phase4b5_numeric_contract.json"
+)
+_STAGE_INDEX = {"C1": 1, "C2": 2, "C3": 3}
 
 
 class FrozenScaffoldState:
@@ -220,13 +237,26 @@ class SomaForceResidualEnv(DirectRLEnv):
         profile = self.cfg.smoke_profile
         self.runtime_mode = profile.runtime_mode
         self.scaffold_stage = profile.scaffold_stage
+        contract_path = Path(profile.numeric_contract_path or _DEFAULT_NUMERIC_CONTRACT)
+        self.numeric_contract = load_numeric_contract(contract_path)
+        if self.numeric_contract.payload["contract_version"] != CONTRACT_VERSION:
+            raise ValueError("residual environment requires phase4b5_numeric_v2")
+        self.is_c0 = self.runtime_mode == "c0"
+        self.is_scaffold_only = self.runtime_mode == "scaffold_only"
+        self.is_residual = self.runtime_mode == "residual"
+        self.curriculum: Phase4B5Curriculum | None = None
         self.mismatch_sampler: Phase4B5MismatchSampler | None = None
-        if self.runtime_mode == "scaffold_only":
-            contract = load_numeric_contract(Path(profile.numeric_contract_path))
-            if contract.payload["contract_version"] != CONTRACT_VERSION:
-                raise ValueError("scaffold_only requires phase4b5_numeric_v2")
+        if not self.is_c0:
+            if self.scaffold_stage not in _STAGE_INDEX:
+                raise ValueError(
+                    "non-C0 runtime requires an explicit C1, C2, or C3 stage"
+                )
+            if self.is_residual:
+                self.curriculum = Phase4B5Curriculum(
+                    self.numeric_contract, stage=self.scaffold_stage
+                )
             self.mismatch_sampler = Phase4B5MismatchSampler(
-                contract, base_seed=self.cfg.seed
+                self.numeric_contract, base_seed=self.cfg.seed
             )
         artifact_dir = Path(self.cfg.artifact_dir).expanduser().resolve()
         scaffold = PretrainedHDMIScaffold.from_artifact(
@@ -395,6 +425,19 @@ class SomaForceResidualEnv(DirectRLEnv):
         ).to(self.device)
         self.authority = PerJointAuthority(device=self.device)
         self.semantic_pipeline = ForceSemanticPipeline().to(self.device).eval()
+        self.normalizer: FixedFieldNormalizer | None = None
+        self.reward_manager: Phase4B5RewardManager | None = None
+        self.episode_termination: EpisodeTermination | None = None
+        self.episode_metric_log: EpisodeMetricLog | None = None
+        if self.is_residual:
+            self.normalizer = FixedFieldNormalizer(self.numeric_contract)
+            self.reward_manager = Phase4B5RewardManager(
+                self.numeric_contract, self.task_spec.task
+            )
+            self.episode_termination = EpisodeTermination(
+                self.numeric_contract, self.num_envs, device=self.device
+            )
+            self.episode_metric_log = EpisodeMetricLog(self.numeric_contract)
 
         self._a_nom = torch.zeros(self.num_envs, 23, device=self.device)
         self._nominal_reference_step = torch.full(
@@ -407,6 +450,8 @@ class SomaForceResidualEnv(DirectRLEnv):
         )
         self._a_total = torch.zeros_like(self._a_nom)
         self._authority = torch.zeros_like(self._a_nom)
+        self._delta_safe = torch.zeros_like(self._a_nom)
+        self._previous_delta_safe = torch.zeros_like(self._a_nom)
         self._clean_wrench = torch.zeros(self.num_envs, 2, 6, device=self.device)
         self._normalized_wrench = torch.zeros_like(self._clean_wrench)
         self._observed_wrench = torch.zeros_like(self._clean_wrench)
@@ -415,6 +460,57 @@ class SomaForceResidualEnv(DirectRLEnv):
         self._source_valid = torch.zeros(
             self.num_envs, 2, device=self.device, dtype=torch.bool
         )
+        self._saturation_mask = torch.zeros_like(self._source_valid)
+        self._dropout_mask = torch.zeros_like(self._source_valid)
+        self._last_nonfinite = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.bool
+        )
+        self._last_terminated = torch.zeros_like(self._last_nonfinite)
+        self._last_time_outs = torch.zeros_like(self._last_nonfinite)
+        self._episode_active = torch.zeros_like(self._last_nonfinite)
+        self._episode_reward_steps = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.long
+        )
+        self._episode_return = torch.zeros(self.num_envs, device=self.device)
+        self._episode_raw_sums = {
+            name: torch.zeros(self.num_envs, device=self.device)
+            for name in self.numeric_contract.payload["logging"]["raw_reward_keys"]
+        }
+        self._episode_weighted_sums = {
+            name: torch.zeros(self.num_envs, device=self.device)
+            for name in self.numeric_contract.payload["logging"]["weighted_reward_keys"]
+        }
+        horizon = int(
+            self.numeric_contract.payload["episodes"]["horizons"][self.task_spec.task]
+        )
+        self._episode_wrench_history = torch.zeros(
+            self.num_envs, horizon, device=self.device
+        )
+        self._episode_force_rate_history = torch.zeros_like(
+            self._episode_wrench_history
+        )
+        self._episode_impulse = torch.zeros(self.num_envs, device=self.device)
+        self._episode_contact_fraction = torch.zeros(self.num_envs, device=self.device)
+        self._episode_contact_loss = torch.zeros(self.num_envs, device=self.device)
+        self._episode_sensor_quality = torch.zeros(self.num_envs, device=self.device)
+        self._episode_saturation = torch.zeros(self.num_envs, device=self.device)
+        self._episode_dropout = torch.zeros(self.num_envs, device=self.device)
+        self._episode_arms_residual = torch.zeros(self.num_envs, device=self.device)
+        self._episode_waist_residual = torch.zeros(self.num_envs, device=self.device)
+        self._episode_legs_residual = torch.zeros(self.num_envs, device=self.device)
+        self._episode_semantic_entropy = torch.zeros(self.num_envs, device=self.device)
+        self._episode_semantic_kl = torch.zeros(self.num_envs, device=self.device)
+        self._episode_stability_margin = torch.zeros(self.num_envs, device=self.device)
+        self._previous_wrench_norm = torch.zeros(self.num_envs, device=self.device)
+        self._episode_family: list[str] = ["nominal"] * self.num_envs
+        self._episode_nominal = torch.ones(
+            self.num_envs, device=self.device, dtype=torch.bool
+        )
+        self._episode_seed = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.long
+        )
+        self._episode_stage: list[str] = ["C1"] * self.num_envs
+        self._episode_evaluation_id: list[str | None] = [None] * self.num_envs
         self._substep = 0
         self._last_observations: dict[str, torch.Tensor] = {}
         self._terminal_snapshot: dict[str, torch.Tensor] = {}
@@ -575,10 +671,156 @@ class SomaForceResidualEnv(DirectRLEnv):
             M_scale=scales[..., 3],
         ).flatten()
 
+    def set_curriculum_stage(self, stage: str) -> None:
+        """Accept a stage selected by the external training coordinator."""
+        if not self.is_residual or self.curriculum is None:
+            raise RuntimeError("only residual mode accepts a curriculum stage")
+        if stage not in _STAGE_INDEX:
+            raise ValueError("stage must be C1, C2, or C3")
+        self.curriculum.stage = stage
+        self.scaffold_stage = stage
+
+    def _reset_episode_metrics(self, env_ids: torch.Tensor) -> None:
+        if not self.is_residual or self.episode_termination is None:
+            return
+        self.episode_termination.reset(env_ids)
+        self._episode_active[env_ids] = True
+        self._episode_reward_steps[env_ids] = 0
+        self._episode_return[env_ids] = 0.0
+        self._delta_safe[env_ids] = 0.0
+        self._previous_delta_safe[env_ids] = 0.0
+        self._previous_wrench_norm[env_ids] = 0.0
+        self._episode_wrench_history[env_ids] = 0.0
+        self._episode_force_rate_history[env_ids] = 0.0
+        for values in (
+            self._episode_raw_sums,
+            self._episode_weighted_sums,
+        ):
+            for value in values.values():
+                value[env_ids] = 0.0
+        for value in (
+            self._episode_impulse,
+            self._episode_contact_fraction,
+            self._episode_contact_loss,
+            self._episode_sensor_quality,
+            self._episode_saturation,
+            self._episode_dropout,
+            self._episode_arms_residual,
+            self._episode_waist_residual,
+            self._episode_legs_residual,
+            self._episode_semantic_entropy,
+            self._episode_semantic_kl,
+            self._episode_stability_margin,
+        ):
+            value[env_ids] = 0.0
+        self._last_nonfinite[env_ids] = False
+        self._last_terminated[env_ids] = False
+        self._last_time_outs[env_ids] = False
+
+    def _record_completed_episodes(self, env_ids: torch.Tensor) -> None:
+        if (
+            not self.is_residual
+            or self.episode_metric_log is None
+            or self.episode_termination is None
+            or self.curriculum is None
+        ):
+            return
+        completed = env_ids[
+            self._episode_active[env_ids]
+            & (self._last_terminated[env_ids] | self._last_time_outs[env_ids])
+        ]
+        for env_id in completed.tolist():
+            steps = int(self._episode_reward_steps[env_id].item())
+            count = max(steps, 1)
+            wrench = self._episode_wrench_history[env_id, :count]
+            force_rate = self._episode_force_rate_history[env_id, :count]
+            failure = bool(
+                (
+                    self.episode_termination.failure[env_id]
+                    | self._last_nonfinite[env_id]
+                ).item()
+            )
+            outcome = {
+                "success": bool(
+                    (
+                        self.episode_termination.success[env_id]
+                        & ~self.episode_termination.failure[env_id]
+                        & ~self._last_nonfinite[env_id]
+                    ).item()
+                ),
+                "failure": failure,
+                "timeout": bool(self._last_time_outs[env_id].item()),
+                "episode_invalid": bool(
+                    self.episode_termination.episode_invalid[env_id].item()
+                ),
+            }
+            diagnostics = {
+                "p50_wrench": torch.quantile(wrench, 0.50),
+                "p95_wrench": torch.quantile(wrench, 0.95),
+                "p99_wrench": torch.quantile(wrench, 0.99),
+                "impulse": self._episode_impulse[env_id],
+                "p95_force_rate": torch.quantile(force_rate, 0.95),
+                "contact_fraction": self._episode_contact_fraction[env_id] / count,
+                "contact_loss": self._episode_contact_loss[env_id] / count,
+                "sensor_quality": self._episode_sensor_quality[env_id] / count,
+                "saturation": self._episode_saturation[env_id] / count,
+                "dropout": self._episode_dropout[env_id] / count,
+                "arms_residual_norm": self._episode_arms_residual[env_id] / count,
+                "waist_residual_norm": self._episode_waist_residual[env_id] / count,
+                "legs_residual_norm": self._episode_legs_residual[env_id] / count,
+                "semantic_entropy": self._episode_semantic_entropy[env_id] / count,
+                "semantic_kl": self._episode_semantic_kl[env_id] / count,
+                "stability_margin": self._episode_stability_margin[env_id] / count,
+            }
+            self.episode_metric_log.add_episode(
+                {
+                    "task": self.task_spec.task,
+                    "stage": self._episode_stage[env_id],
+                    "family": self._episode_family[env_id],
+                    "evaluation_id": self._episode_evaluation_id[env_id],
+                    "nominal": bool(self._episode_nominal[env_id].item()),
+                    "seed": int(self._episode_seed[env_id].item()),
+                    "steps": steps,
+                    "outcome": outcome,
+                    "raw_reward_sums": {
+                        name: values[env_id]
+                        for name, values in self._episode_raw_sums.items()
+                    },
+                    "weighted_reward_sums": {
+                        name: values[env_id]
+                        for name, values in self._episode_weighted_sums.items()
+                    },
+                    "return": self._episode_return[env_id],
+                    "diagnostics": diagnostics,
+                }
+            )
+            self.curriculum.complete_episode(
+                self.task_spec.task, nominal=bool(self._episode_nominal[env_id].item())
+            )
+
+    def _set_episode_metadata(
+        self,
+        env_ids: torch.Tensor,
+        *,
+        family: tuple[str, ...],
+        nominal: torch.Tensor,
+        seeds: torch.Tensor,
+        stage: str,
+        evaluation_id: str | None,
+    ) -> None:
+        if not self.is_residual:
+            return
+        self._episode_nominal[env_ids] = nominal
+        self._episode_seed[env_ids] = seeds
+        for index, env_id in enumerate(env_ids.tolist()):
+            self._episode_family[env_id] = family[index]
+            self._episode_stage[env_id] = stage
+            self._episode_evaluation_id[env_id] = evaluation_id
+
     def _reset_idx(self, env_ids: Sequence[int] | torch.Tensor) -> None:
         ids = validate_env_ids(env_ids, batch_size=self.num_envs, device=self.device)
         count = ids.numel()
-        if self.runtime_mode == "scaffold_only":
+        if not self.is_c0:
             self._reset_scaffold_only_idx(ids)
             return
 
@@ -618,14 +860,17 @@ class SomaForceResidualEnv(DirectRLEnv):
         self._last_observations = self._assemble_observations()
 
     def _reset_scaffold_only_idx(self, ids: torch.Tensor) -> None:
-        """Execute the B5B2B1 selected-row parameter lifecycle without stepping."""
-        if self.mismatch_sampler is None or self.scaffold_stage is None:
-            raise AssertionError("scaffold_only runtime was not initialized")
+        """Reset selected rows after contract sampling without a physics advance."""
+        if self.mismatch_sampler is None:
+            raise AssertionError("non-C0 runtime was not initialized")
         count = ids.numel()
         episodes = self.episode_index.index_select(0, ids)
+        stage = self.curriculum.stage if self.is_residual else self.scaffold_stage
+        if stage is None:
+            raise AssertionError("non-C0 runtime has no curriculum stage")
         sample = self.mismatch_sampler.sample(
             task=self.task_spec.task,
-            stage=self.scaffold_stage,
+            stage=stage,
             env_ids=ids,
             episode_indices=episodes,
         )
@@ -646,6 +891,8 @@ class SomaForceResidualEnv(DirectRLEnv):
         if count == 0:
             return
 
+        self._record_completed_episodes(ids)
+        self._reset_episode_metrics(ids)
         self.requested_physics[ids] = sample.physics
         self.requested_scaffold[ids] = sample.scaffold
         self.requested_sensor[ids] = sample.sensor
@@ -678,6 +925,14 @@ class SomaForceResidualEnv(DirectRLEnv):
         self.scaffold_state.set_motion_length(ids, self.adapter.reference.length)
         self._initialize_wrist_rows(ids)
         self._refresh_nominal(ids, initialize=True)
+        self._set_episode_metadata(
+            ids,
+            family=sample.family,
+            nominal=sample.nominal,
+            seeds=sample.episode_seeds,
+            stage=stage,
+            evaluation_id=sample.evaluation_id,
+        )
         self._last_observations = self._assemble_observations()
         self.episode_index[ids] += 1
 
@@ -700,6 +955,8 @@ class SomaForceResidualEnv(DirectRLEnv):
             "sensor_quality": self._sensor_quality,
             "contact_probability": self._contact_probability,
             "valid": self._source_valid,
+            "saturation": self._saturation_mask,
+            "dropout": self._dropout_mask,
         }
 
     def _initialize_wrist_rows(self, env_ids: torch.Tensor) -> None:
@@ -716,6 +973,8 @@ class SomaForceResidualEnv(DirectRLEnv):
         ):
             value[env_ids] = 0
         self._source_valid[env_ids] = False
+        self._saturation_mask[env_ids] = False
+        self._dropout_mask[env_ids] = False
 
     def _update_wrist_pipeline(
         self, selected: torch.Tensor | None = None
@@ -728,7 +987,7 @@ class SomaForceResidualEnv(DirectRLEnv):
         tare = self.tare_calibrator.update(
             source.clean_total_wrench_base_yaw, calibration_mask
         )
-        if self.runtime_mode == "scaffold_only":
+        if self.runtime_mode == "scaffold_only" or self.is_residual:
             draws = self.random_stream.draw_virtual_ft()
             drift_draw = draws.drift
             noise_draw = draws.noise
@@ -758,6 +1017,8 @@ class SomaForceResidualEnv(DirectRLEnv):
         self._sensor_quality.copy_(virtual.sensor_quality)
         self._contact_probability.copy_(detector.contact_probability)
         self._source_valid.copy_(source.valid)
+        self._saturation_mask.copy_(virtual.saturation_mask.any(dim=-1))
+        self._dropout_mask.copy_(virtual.dropout_mask)
         return torch.cat(
             (
                 virtual.normalized_wrench,
@@ -793,7 +1054,8 @@ class SomaForceResidualEnv(DirectRLEnv):
         self._raw_residual = actions.clone()
         self._step_a_nom.copy_(self._a_nom)
         self._step_nominal_history.copy_(self.nominal_action_history.storage)
-        authority = self.authority(0)
+        stage = _STAGE_INDEX[self.curriculum.stage] if self.is_residual else 0
+        authority = self.authority(stage)
         self._authority.copy_(authority.expand(self.num_envs, -1))
         contact = self.contact_gate(
             self._contact_probability, self._sensor_quality
@@ -808,8 +1070,12 @@ class SomaForceResidualEnv(DirectRLEnv):
             torch.ones(self.num_envs, 1, device=self.device),
             self.robot.data.joint_pos.index_select(1, action_ids),
         )
-        if not torch.equal(composed.a_total, self._step_a_nom):
-            raise AssertionError("C0 violation: a_total is not bitwise equal to a_nom")
+        self._previous_delta_safe.copy_(self._delta_safe)
+        self._delta_safe.copy_(composed.delta_safe)
+        if not self.is_residual and not torch.equal(composed.a_total, self._step_a_nom):
+            raise AssertionError(
+                "non-residual violation: a_total is not bitwise equal to a_nom"
+            )
         self._a_total.copy_(composed.a_total)
         self.action_sink.set_action(self._a_total)
         self.scaffold_state.push_nominal_action(self._step_a_nom)
@@ -844,23 +1110,154 @@ class SomaForceResidualEnv(DirectRLEnv):
         for value in tensors:
             nonfinite |= ~torch.isfinite(value).reshape(self.num_envs, -1).all(dim=1)
         signals = self.adapter.progress_signals()
-        dones = smoke_done_flags(
-            nonfinite,
-            signals.failure,
-            self.episode_length_buf,
-            signals.reference_exhausted,
-            episode_length_steps=self.cfg.smoke_profile.episode_length_steps,
+        if not self.is_residual:
+            dones = smoke_done_flags(
+                nonfinite,
+                signals.failure,
+                self.episode_length_buf,
+                signals.reference_exhausted,
+                episode_length_steps=self.cfg.smoke_profile.episode_length_steps,
+            )
+            self.extras["success"] = signals.success.squeeze(1)
+            return dones.terminated, dones.time_outs
+
+        assert self.episode_termination is not None
+        terminated, time_outs = self.episode_termination.update(
+            task=self.task_spec.task,
+            progress=signals.progress.squeeze(1),
+            adapter_task_success=signals.success.squeeze(1).to(dtype=torch.bool),
+            failure=signals.failure,
+            nonfinite=nonfinite,
+            reference_exhausted=signals.reference_exhausted,
+            episode_steps=self.episode_length_buf,
+            tare_ready=self.tare_calibrator.ready.all(dim=1),
         )
-        self.extras["success"] = signals.success.squeeze(1)
-        return dones.terminated, dones.time_outs
+        self._last_nonfinite.copy_(nonfinite)
+        self._last_terminated.copy_(terminated)
+        self._last_time_outs.copy_(time_outs)
+        self.extras["success"] = self.episode_termination.success.clone()
+        self.extras["failure"] = self.episode_termination.failure.clone()
+        self.extras["episode_invalid"] = (
+            self.episode_termination.episode_invalid.clone()
+        )
+        return terminated, time_outs
+
+    def _accumulate_episode_metrics(
+        self,
+        reward: RewardOutput,
+        *,
+        signals: TaskProgressSignals,
+    ) -> None:
+        if not self.is_residual:
+            return
+
+        batch = self.num_envs
+        rows = torch.arange(batch, device=self.device)
+        horizon = self._episode_wrench_history.shape[1]
+        index = self._episode_reward_steps.clamp_max(horizon - 1)
+        wrench_norm = torch.linalg.vector_norm(
+            self._normalized_wrench.reshape(batch, -1), dim=-1
+        )
+        force_norm = torch.linalg.vector_norm(
+            self._observed_wrench[..., :3], dim=-1
+        ).mean(dim=-1)
+        control_dt = float(self.numeric_contract.payload["sensor"]["control_dt_s"])
+        force_rate = torch.abs(force_norm - self._previous_wrench_norm) / control_dt
+        self._episode_wrench_history[rows, index] = wrench_norm
+        self._episode_force_rate_history[rows, index] = force_rate
+        self._previous_wrench_norm.copy_(force_norm)
+        self._episode_impulse += force_norm * control_dt
+        self._episode_contact_fraction += signals.contact_truth.mean(dim=-1)
+        self._episode_contact_loss += (
+            signals.expected_contact * (1.0 - signals.contact_truth)
+        ).mean(dim=-1)
+        self._episode_sensor_quality += self._sensor_quality.mean(dim=-1)
+        self._episode_saturation += self._saturation_mask.float().mean(dim=-1)
+        self._episode_dropout += self._dropout_mask.float().mean(dim=-1)
+        self._episode_arms_residual += torch.linalg.vector_norm(
+            self._delta_safe[:, self.authority.ARMS], dim=-1
+        )
+        self._episode_waist_residual += torch.linalg.vector_norm(
+            self._delta_safe[:, self.authority.WAIST], dim=-1
+        )
+        self._episode_legs_residual += torch.linalg.vector_norm(
+            self._delta_safe[:, self.authority.LEGS], dim=-1
+        )
+        with torch.inference_mode():
+            semantic = self.semantic_pipeline(self.wrist_history.storage)
+            target = build_semantic_target_bundle(
+                self._clean_wrench,
+                signals.contact_truth,
+                torch.tensor(
+                    self.numeric_contract.payload["sensor"]["fixed_scales"]["force_N"],
+                    device=self.device,
+                ),
+                torch.tensor(
+                    self.numeric_contract.payload["sensor"]["fixed_scales"][
+                        "moment_Nm"
+                    ],
+                    device=self.device,
+                ),
+            )
+        eps = torch.finfo(torch.float32).eps
+        entropy = -0.5 * (
+            (semantic.p_dir * semantic.p_dir.clamp_min(eps).log()).sum(dim=-1)
+            + (semantic.p_mag * semantic.p_mag.clamp_min(eps).log()).sum(dim=-1)
+        )
+        kl = 0.5 * (
+            (
+                target.p_dir_target
+                * (
+                    target.p_dir_target.clamp_min(eps).log()
+                    - semantic.p_dir.clamp_min(eps).log()
+                )
+            ).sum(dim=-1)
+            + (
+                target.p_mag_target
+                * (
+                    target.p_mag_target.clamp_min(eps).log()
+                    - semantic.p_mag.clamp_min(eps).log()
+                )
+            ).sum(dim=-1)
+        )
+        self._episode_semantic_entropy += entropy
+        self._episode_semantic_kl += kl
+        self._episode_stability_margin += signals.stability_margin.squeeze(1)
+        for name, value in reward.raw_terms.items():
+            self._episode_raw_sums[name] += value
+        for name, value in reward.weighted_terms.items():
+            self._episode_weighted_sums[name] += value
+        self._episode_return += reward.total
+        self._episode_reward_steps += 1
 
     def _get_rewards(self) -> torch.Tensor:
-        return torch.full(
-            (self.num_envs,),
-            self.cfg.smoke_profile.smoke_reward,
-            device=self.device,
-            dtype=torch.float32,
+        if not self.is_residual:
+            return torch.full(
+                (self.num_envs,),
+                self.cfg.smoke_profile.smoke_reward,
+                device=self.device,
+                dtype=torch.float32,
+            )
+        assert self.reward_manager is not None
+        assert self.episode_termination is not None
+        signals = self.adapter.progress_signals()
+        reward = self.reward_manager.compute(
+            progress_delta=signals.progress_delta.squeeze(1),
+            expected_contact=signals.expected_contact,
+            contact_truth=signals.contact_truth,
+            wrench=self._observed_wrench,
+            stability_margin=signals.stability_margin.squeeze(1),
+            delta_safe=self._delta_safe,
+            authority=self._authority,
+            previous_delta_safe=self._previous_delta_safe,
+            success_latched=self.episode_termination.success,
+            failure_latched=self.episode_termination.failure,
+            nonfinite=self._last_nonfinite,
+            terminated=self._last_terminated,
+            time_outs=self._last_time_outs,
         )
+        self._accumulate_episode_metrics(reward, signals=signals)
+        return reward.total
 
     def _assemble_observations(self) -> dict[str, torch.Tensor]:
         self._ensure_current_nominal()
@@ -871,7 +1268,12 @@ class SomaForceResidualEnv(DirectRLEnv):
                 self.nominal_action_history.storage,
                 self.executed_action_history.storage[:, :, 0],
             )
-            policy = policy_assembly.bundle.flatten()
+            raw_policy = policy_assembly.bundle.flatten()
+            policy = (
+                raw_policy
+                if not self.is_residual
+                else self.normalizer.normalize_policy(raw_policy)
+            )
             signals = self.adapter.progress_signals()
             phase = (
                 self.adapter.reference_step.float() / self.adapter.reference.length
@@ -910,21 +1312,41 @@ class SomaForceResidualEnv(DirectRLEnv):
                 ),
                 dim=-1,
             )
-            critic = CriticObservationBundle(
-                policy=policy,
-                object_state=self.adapter.build_object_state(),
-                physics_mismatch=self.parameter_store.physics_mismatch,
-                scaffold_mismatch=self.parameter_store.scaffold_mismatch,
-                sensor_mismatch=self.parameter_store.sensor_mismatch,
-                progress_state=progress_state,
-                contact_state=contact_state,
-                stability_state=stability_state,
-            ).flatten()
+            critic_fields = {
+                "policy": raw_policy,
+                "object_state": self.adapter.build_object_state(),
+                "physics_mismatch": self.parameter_store.physics_mismatch,
+                "scaffold_mismatch": self.parameter_store.scaffold_mismatch,
+                "sensor_mismatch": self.parameter_store.sensor_mismatch,
+                "progress_state": progress_state,
+                "contact_state": contact_state,
+                "stability_state": stability_state,
+            }
+            normalized_critic = (
+                critic_fields
+                if not self.is_residual
+                else self.normalizer.normalize_critic(
+                    critic_fields, task=self.task_spec.task
+                )
+            )
+            critic = CriticObservationBundle(**normalized_critic).flatten()
+            force_scale = (
+                self.cfg.smoke_profile.F_scale
+                if not self.is_residual
+                else self.numeric_contract.payload["sensor"]["fixed_scales"]["force_N"]
+            )
+            moment_scale = (
+                self.cfg.smoke_profile.M_scale
+                if not self.is_residual
+                else self.numeric_contract.payload["sensor"]["fixed_scales"][
+                    "moment_Nm"
+                ]
+            )
             target = build_semantic_target_bundle(
                 self._clean_wrench,
                 signals.contact_truth,
-                torch.tensor(self.cfg.smoke_profile.F_scale, device=self.device),
-                torch.tensor(self.cfg.smoke_profile.M_scale, device=self.device),
+                torch.tensor(force_scale, device=self.device),
+                torch.tensor(moment_scale, device=self.device),
             ).flatten()
         return {"policy": policy, "critic": critic, "semantic_target": target}
 
@@ -946,6 +1368,8 @@ class SomaForceResidualEnv(DirectRLEnv):
             "applied_action": self.action_sink.runtime.applied_action,
             "nominal_history": self.nominal_action_history.storage,
             "executed_history": self.executed_action_history.storage,
+            "delta_safe": self._delta_safe,
+            "previous_delta_safe": self._previous_delta_safe,
             "wrist_history": self.wrist_history.storage,
             "parameter_physics": self.parameter_store.physics_mismatch,
             "parameter_scaffold": self.parameter_store.scaffold_mismatch,
@@ -976,6 +1400,24 @@ class SomaForceResidualEnv(DirectRLEnv):
             value = getattr(self.adapter, name, None)
             if isinstance(value, torch.Tensor):
                 state[f"adapter_{name}"] = value
+        if self.is_residual and self.episode_termination is not None:
+            state.update(
+                {
+                    "termination_success": self.episode_termination.success,
+                    "termination_failure": self.episode_termination.failure,
+                    "episode_invalid": self.episode_termination.episode_invalid,
+                    "episode_active": self._episode_active,
+                    "episode_reward_steps": self._episode_reward_steps,
+                    "episode_return": self._episode_return,
+                    "episode_wrench_history": self._episode_wrench_history,
+                    "episode_force_rate_history": self._episode_force_rate_history,
+                }
+            )
+            for name, values in (
+                ("episode_raw", self._episode_raw_sums),
+                ("episode_weighted", self._episode_weighted_sums),
+            ):
+                state.update({f"{name}_{key}": value for key, value in values.items()})
         state.update(self._owned_sensor_state())
         return state
 
