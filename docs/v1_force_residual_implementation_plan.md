@@ -227,9 +227,25 @@ lambda_mag = 0.05
 The actor must never receive critic-only object/mismatch fields. The critic may
 use them. `P_cross` is deterministic and has no separate loss in V1.
 
+The first Phase 5 residual actor uses the existing deployable boundary without
+separate proprioception or action-history encoders:
+
+```text
+actor input = z_cross 64 + proprioception 64 + a_nom history 69
+            + previous a_total 23 = 220
+ResidualActor = 220 -> 256 -> 256 -> 23
+```
+
+The first MLP layer learns the proprioception/action projections and their
+fusion with `z_cross`. Do not add unused branch encoders to the first-version
+implementation. A parameter-matched branch-encoder variant is a later
+ablation. Keep the existing `CrossEncoder` and `[B,668]` policy / `[B,845]`
+critic contracts unchanged; direct `P_cross` input is not part of this change.
+
 Acceptance:
 
 - short training remains finite;
+- the actor consumes exactly the approved `[B,220]` deployable boundary;
 - semantic losses decrease without collapsing to one class;
 - actor gradient remains dominated by PPO task objective;
 - nominal retention is at least 95% of scaffold baseline;

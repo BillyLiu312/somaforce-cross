@@ -203,13 +203,25 @@ WristEncoder:        shared 3-block causal TCN, channels=128, kernel=3,
 side embedding:      8
 semantic heads:      hidden=128
 CrossEncoder:        65 -> 128 -> 64
-proprio encoder:     256 -> 128
-a_nom/action encoder:128 -> 64
-ResidualActor:        256 -> 256 -> 23
+ResidualActor:       220 -> 256 -> 256 -> 23
 PrivilegedCritic:     512 -> 256 -> 256 -> 1
 ```
 
-These are engineering defaults and may change only after smoke evidence.
+The first Phase 5 actor consumes the approved deployable input directly:
+
+```text
+z_cross 64 + proprioception 64 + a_nom history 69
+  + previous a_total 23 = 220
+```
+
+It does not use separate proprioception or action-history encoders. The actor's
+first MLP layer owns those projections and their fusion with `z_cross`.
+Separate proprioception/action encoders remain a later parameter-matched
+ablation, not a first-version implementation requirement. `CrossEncoder`
+remains unchanged so the actor continues to receive only `z_cross` as its
+force-semantic latent and the frozen Phase 1--4 observation dimensions do not
+change. These are engineering defaults and may change only after smoke
+evidence.
 
 ## 8. Curriculum
 
