@@ -1,0 +1,64 @@
+{
+  "contract_version": "phase5_ppo_v1",
+  "network": {
+    "action_dim": 23,
+    "actor": [220, 256, 256, 23],
+    "actor_input_dim": 220,
+    "critic": [845, 512, 256, 256, 1],
+    "critic_input_dim": 845,
+    "policy_dim": 668,
+    "semantic_pipeline": {
+      "cross_encoder": [65, 128, 64],
+      "p_dir_dim": 13,
+      "p_mag_dim": 5,
+      "wrist_tokens": [2, 16, 14]
+    }
+  },
+  "observation": {
+    "actor_suffix": [448, 604],
+    "critic_dim": 845,
+    "environment_z_cross_diagnostic": [604, 668],
+    "obs_groups": {
+      "critic": ["critic"],
+      "policy": ["policy"]
+    },
+    "policy_dim": 668,
+    "semantic_target_dim": 31,
+    "wrist_token_prefix": [0, 448]
+  },
+  "phase4": {
+    "canonical_sha256": "214b5328f0705b467f0fe305ec5eec78dc91f3ced163cf1d410ea00d43889ab3",
+    "contract_version": "phase4b5_numeric_v2",
+    "source_commit": "e578c4f8bb617fbbf8a0021aa6dd0ada9fbd5329"
+  },
+  "ppo": {
+    "clip_param": 0.2,
+    "desired_kl": null,
+    "entropy_coef": 0.001,
+    "gamma": 0.99,
+    "init_noise_std": 1.0,
+    "lam": 0.95,
+    "learning_rate": 0.0003,
+    "max_grad_norm": 1.0,
+    "noise_std_type": "log",
+    "normalize_advantage_per_mini_batch": false,
+    "num_learning_epochs": 3,
+    "num_mini_batches": 8,
+    "num_steps_per_env": 32,
+    "ppo_epochs": 3,
+    "schedule": "fixed",
+    "use_clipped_value_loss": true,
+    "value_loss_coef": 1.0
+  },
+  "semantic_loss": {
+    "clean_wrench_dim": 12,
+    "eps": 1e-08,
+    "lambda_cross": 0.0,
+    "lambda_dir": 0.05,
+    "lambda_mag": 0.05,
+    "p_dir_dim": 13,
+    "p_mag_dim": 5,
+    "reduction": "sum(weight * per_sample_kl) / clamp(sum(weight), min=1)",
+    "semantic_loss_weight_dim": 1
+  }
+}
