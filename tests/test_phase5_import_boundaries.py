@@ -59,6 +59,7 @@ def test_pure_learning_modules_have_no_isaac_hdmi_or_rsl_imports() -> None:
 def test_smoke_delays_isaac_environment_and_rsl_imports_until_worker_factory() -> None:
     smoke = SCRIPTS / "smoke_phase5_ppo.py"
     train = SCRIPTS / "train_phase5.py"
+    joint_train = SCRIPTS / "train_phase6.py"
     source = smoke.read_text(encoding="utf-8")
     assert (
         "from somaforce_cross.envs.residual_env import SomaForceResidualEnv" in source
@@ -120,3 +121,43 @@ def test_smoke_delays_isaac_environment_and_rsl_imports_until_worker_factory() -
     } | {node.attr for node in ast.walk(runner_tree) if isinstance(node, ast.Attribute)}
     assert "OnPolicyRunner" not in runner_identifiers
     assert 'importlib.import_module("rsl_rl.storage")' in runner_source
+
+    assert not any(
+        token in imported.lower()
+        for token in ("isaaclab", "omni", "carb", "rsl_rl")
+        for imported in _top_level_imports(joint_train)
+    )
+    joint_tree = ast.parse(
+        joint_train.read_text(encoding="utf-8"), filename=str(joint_train)
+    )
+    joint_forbidden_imports: dict[str, list[str]] = {}
+    for function in (
+        node for node in joint_tree.body if isinstance(node, ast.FunctionDef)
+    ):
+        imports = [
+            imported
+            for node in ast.walk(function)
+            if isinstance(node, ast.ImportFrom)
+            for imported in [node.module or ""]
+            if any(
+                token in imported.lower()
+                for token in ("isaaclab", "omni", "carb", "rsl_rl")
+            )
+        ]
+        if imports:
+            joint_forbidden_imports[function.name] = imports
+    assert joint_forbidden_imports == {
+        "_worker_parser": ["isaaclab.app"],
+        "_worker_main": ["isaaclab.app"],
+    }
+    joint_worker = next(
+        node
+        for node in joint_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_worker_main"
+    )
+    joint_worker_source = ast.get_source_segment(
+        joint_train.read_text(encoding="utf-8"), joint_worker
+    )
+    assert joint_worker_source is not None
+    launcher_index = joint_worker_source.index("launcher = AppLauncher(args)")
+    assert launcher_index < joint_worker_source.index("_build_environment(")

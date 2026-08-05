@@ -15,6 +15,7 @@ wandb/
 tensorboard/
 logs/
 outputs/
+/job_logs/
 
 # Simulator/cache artifacts
 isaac-sim/

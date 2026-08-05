@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import torch
 from torch import nn, optim
@@ -69,6 +69,7 @@ class SemanticPPO:
         desired_kl: float | None = None,
         device: torch.device | str = "cpu",
         normalize_advantage_per_mini_batch: bool = False,
+        gradient_sync_hook: Callable[[nn.Module], None] | None = None,
     ) -> None:
         if not isinstance(policy, ResidualActorCritic):
             raise TypeError("Phase 5 requires ResidualActorCritic")
@@ -82,6 +83,8 @@ class SemanticPPO:
             raise ValueError("Phase 5 disables per-mini-batch advantage normalization")
         if num_learning_epochs != 3 or num_mini_batches != 8:
             raise ValueError("Phase 5 PPO epoch and mini-batch counts are frozen")
+        if gradient_sync_hook is not None and not callable(gradient_sync_hook):
+            raise TypeError("gradient_sync_hook must be callable or None")
         self.policy = policy.to(device)
         self.storage_class = storage_class
         self.device = torch.device(device)
@@ -99,6 +102,7 @@ class SemanticPPO:
         self.schedule = schedule
         self.desired_kl = desired_kl
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
+        self.gradient_sync_hook = gradient_sync_hook
         self.storage: Any | None = None
         self.transition = _Transition()
         self.last_gradient_diagnostics: tuple[dict[str, float], ...] = ()
@@ -341,6 +345,8 @@ class SemanticPPO:
                 )
             self.optimizer.zero_grad(set_to_none=True)
             combined_loss.backward()
+            if self.gradient_sync_hook is not None:
+                self.gradient_sync_hook(self.policy)
             semantic_gradient_norm, nonzero_gradient = self._semantic_gradient_norm(
                 self.policy
             )

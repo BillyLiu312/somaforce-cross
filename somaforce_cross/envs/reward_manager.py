@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Mapping
 
 import torch
@@ -342,6 +344,26 @@ class EpisodeMetricLog:
             }
         normalized["return"] = self._finite_scalar(record["return"], "return")
         self._episodes.append(normalized)
+
+    @staticmethod
+    def _readonly_copy(value: object) -> object:
+        if isinstance(value, Mapping):
+            return MappingProxyType(
+                {
+                    copy.deepcopy(key): EpisodeMetricLog._readonly_copy(item)
+                    for key, item in value.items()
+                }
+            )
+        if isinstance(value, list | tuple):
+            return tuple(EpisodeMetricLog._readonly_copy(item) for item in value)
+        return copy.deepcopy(value)
+
+    def snapshot(self) -> tuple[Mapping[str, object], ...]:
+        """Return an immutable deep copy of completed episode records."""
+        return tuple(
+            self._readonly_copy(episode)  # type: ignore[return-value]
+            for episode in self._episodes
+        )
 
     def pooled(self, key: str) -> dict[str, object]:
         if not self._episodes:

@@ -1,0 +1,50 @@
+{
+  "contract_version": "phase6_task_roster_v1",
+  "phase6_canonical_sha256": "8e733479baada2334636106ee352aeb8ab8bf8dc7ad4ce3b39b844019c74df42",
+  "tasks": [
+    {
+      "adapter_identity": "somaforce_cross.envs.task_adapters.push_door_hand.PushDoorHandTaskAdapter",
+      "admitted": true,
+      "artifact_absolute_path": "/inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/somaforce-cross/artifacts/scaffolds/hdmi_push_door_hand/v1",
+      "artifact_repo_relative_path": "artifacts/scaffolds/hdmi_push_door_hand/v1",
+      "artifact_sha256sums_sha256": "51a1535953d57b2ac63dea7d821edfdd71b95f9ad6e681bb16bd714148a5e6cb",
+      "mismatch_owner": "Phase4B5MismatchSampler:push_door_hand",
+      "retention_owner": "phase4b5_numeric_v2.retention.push_door_hand",
+      "task": "push_door_hand",
+      "task_spec_identity": "hdmi_push_door_hand_teacher_v1"
+    },
+    {
+      "adapter_identity": "somaforce_cross.envs.task_adapters.push_box.PushBoxTaskAdapter",
+      "admitted": true,
+      "artifact_absolute_path": "/inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/somaforce-cross/artifacts/scaffolds/hdmi_push_box/v1",
+      "artifact_repo_relative_path": "artifacts/scaffolds/hdmi_push_box/v1",
+      "artifact_sha256sums_sha256": "5dafd1f2b4b75edec859a8aa9b026158f125d9e2d3e294537b35bf9569729b08",
+      "mismatch_owner": "Phase4B5MismatchSampler:push_box",
+      "retention_owner": "phase4b5_numeric_v2.retention.push_box",
+      "task": "push_box",
+      "task_spec_identity": "hdmi_push_box_teacher_v1"
+    },
+    {
+      "adapter_identity": "somaforce_cross.envs.task_adapters.move_payload.MovePayloadTaskAdapter",
+      "admitted": true,
+      "artifact_absolute_path": "/inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/somaforce-cross/artifacts/scaffolds/hdmi_move_suitcase/v1",
+      "artifact_repo_relative_path": "artifacts/scaffolds/hdmi_move_suitcase/v1",
+      "artifact_sha256sums_sha256": "c0d61caca2ca6aeade7b34278168fda1e9a3f0daaaa36febef536f9a053055d9",
+      "mismatch_owner": "Phase4B5MismatchSampler:move_suitcase",
+      "retention_owner": "phase4b5_numeric_v2.retention.move_suitcase",
+      "task": "move_suitcase",
+      "task_spec_identity": "hdmi_move_suitcase_teacher_v1"
+    },
+    {
+      "adapter_identity": "somaforce_cross.envs.task_adapters.move_payload.MovePayloadTaskAdapter",
+      "admitted": true,
+      "artifact_absolute_path": "/inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/somaforce-cross/artifacts/scaffolds/hdmi_move_largebox/v1",
+      "artifact_repo_relative_path": "artifacts/scaffolds/hdmi_move_largebox/v1",
+      "artifact_sha256sums_sha256": "bc469c68324f54cbeb8d258b917a3773b82b38091aac3817d465da55971b3baa",
+      "mismatch_owner": "Phase4B5MismatchSampler:move_largebox",
+      "retention_owner": "phase4b5_numeric_v2.retention.move_largebox",
+      "task": "move_largebox",
+      "task_spec_identity": "hdmi_move_largebox_teacher_v1"
+    }
+  ]
+}

@@ -215,6 +215,13 @@ def test_episode_log_schema_equal_episode_pool_and_retention() -> None:
         "move_suitcase": 0,
         "move_largebox": 0,
     }
+    snapshot = log.snapshot()
+    assert len(snapshot) == 2
+    with pytest.raises(TypeError):
+        snapshot[0]["task"] = "move_suitcase"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        snapshot[0]["diagnostics"]["impulse"] = 99.0  # type: ignore[index]
+    assert log.snapshot()[0]["task"] == "push_box"
     broken = _episode_record("push_box", 3, 1.0)
     broken.pop("diagnostics")
     with pytest.raises(ValueError):

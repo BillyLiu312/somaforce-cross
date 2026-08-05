@@ -1,0 +1,143 @@
+{
+  "bindings": {
+    "phase4": {
+      "canonical_sha256": "214b5328f0705b467f0fe305ec5eec78dc91f3ced163cf1d410ea00d43889ab3",
+      "contract_version": "phase4b5_numeric_v2",
+      "raw_sha256": "689e02f9eb3fae1959abb001f7917e91908980377299275c843f04e17b0f930f"
+    },
+    "phase5": {
+      "canonical_sha256": "e95eca5f3c1332965967555f81cd33a78f9144280d0aa446e5eefaf5b83ae1f8",
+      "contract_version": "phase5_ppo_v1",
+      "raw_sha256": "ac3ca17ef7b0f5cd800c2c967c7242eec94a2fdaf59eb8ba465e8f3697d9f200"
+    },
+    "phase5_initial_checkpoint": {
+      "path": "outputs/phase5_learning_acceptance/phase5_learning_v3_20260805/learning_64env_2442iter/checkpoints/iteration_0002442_transitions_5001216.pt",
+      "sha256": "46d76e722e0422bfa1f00e5d815d80f4a328b0cf169f7104a16c6fbdeebf723a"
+    },
+    "phase5_learning_acceptance": {
+      "canonical_sha256": "28907947392ba5cc8e663c7219c13b3043a4c93ba6563fcdc49e88f12531dc50",
+      "contract_version": "phase5_learning_acceptance_v4",
+      "raw_sha256": "cf2d4a2d78babb632775fe58a41bce83421d50b4a30c57adeb9cc5170c1f80fb"
+    },
+    "roster_contract_version": "phase6_task_roster_v1"
+  },
+  "checkpoint": {
+    "atomic_writer_rank": 0,
+    "checkpoint_version": "phase6_joint_checkpoint_v1",
+    "persist_rank_rng_states": true,
+    "resume_strict": true,
+    "verify_hash_each_iteration": true
+  },
+  "contract_version": "phase6_joint_training_v1",
+  "curriculum": {
+    "evaluation_interval_transitions": 250000,
+    "nominal_atom": {
+      "C1": 0.7,
+      "C2": 0.4,
+      "C3": 0.3
+    },
+    "nominal_episodes_per_task": 128,
+    "promotion_windows": 3,
+    "rollback_windows": 2,
+    "stage_episodes_per_task": 256
+  },
+  "dimensions": {
+    "action": 23,
+    "actor_input": 220,
+    "critic": 845,
+    "policy": 668,
+    "semantic_target": 31
+  },
+  "metrics": {
+    "episode_metric_names": [
+      "return",
+      "p50_wrench",
+      "p95_wrench",
+      "p99_wrench",
+      "impulse",
+      "p95_force_rate",
+      "contact_fraction",
+      "contact_loss",
+      "sensor_quality",
+      "saturation",
+      "dropout",
+      "arms_residual_norm",
+      "waist_residual_norm",
+      "legs_residual_norm",
+      "semantic_entropy",
+      "semantic_kl",
+      "stability_margin"
+    ],
+    "force_norm_formula": "mean(norm(observed_wrench_physical[:, :, :3], dim=-1), dim=-1)",
+    "force_rate_excludes_first_control_step": true,
+    "force_rate_formula": "abs(force_norm[t]-force_norm[t-1])/0.02",
+    "impulse_dt_s": 0.02,
+    "p_cross_shape": [13, 5],
+    "p_cross_trace_reduction": "env_mean_per_control_step",
+    "ppo_metric_names": [
+      "ppo_loss",
+      "value_loss",
+      "surrogate_loss",
+      "entropy",
+      "semantic_dir_loss",
+      "semantic_mag_loss",
+      "semantic_total",
+      "semantic_entropy",
+      "semantic_pipeline_grad_norm"
+    ],
+    "transition_metric_names": [
+      "reward",
+      "ppo_loss",
+      "value_loss",
+      "surrogate_loss",
+      "entropy",
+      "semantic_dir_loss",
+      "semantic_mag_loss",
+      "semantic_total",
+      "semantic_entropy",
+      "semantic_pipeline_grad_norm",
+      "force_p95_N",
+      "force_p99_N",
+      "force_impulse_Ns_mean",
+      "force_rate_p95_N_per_s",
+      "contact_fraction",
+      "stability_margin_mean_m",
+      "residual_arms_mean_norm",
+      "residual_waist_mean_norm",
+      "residual_legs_mean_norm",
+      "saturation_fraction",
+      "p_cross_entropy_mean"
+    ]
+  },
+  "ppo": {
+    "clip_param": 0.2,
+    "desired_kl": null,
+    "entropy_coef": 0.001,
+    "gamma": 0.99,
+    "init_noise_std": 1.0,
+    "lam": 0.95,
+    "learning_rate": 0.0003,
+    "max_grad_norm": 1.0,
+    "noise_std_type": "log",
+    "normalize_advantage_per_mini_batch": false,
+    "num_learning_epochs": 3,
+    "num_mini_batches": 8,
+    "num_steps_per_env": 32,
+    "ppo_epochs": 3,
+    "schedule": "fixed",
+    "use_clipped_value_loss": true,
+    "value_loss_coef": 1.0
+  },
+  "runtime": {
+    "backend": "nccl",
+    "init_method": "env://",
+    "process_group_timeout_s": 180,
+    "required_visible_gpus": 4,
+    "world_size": 4
+  },
+  "scheduler": {
+    "schedule_formula": "task_index=(window_index*world_size+rank+cycle_index)%task_count",
+    "slot_length_source": "num_envs*num_steps_per_env",
+    "supercycle_windows_formula": "task_count/gcd(task_count,world_size)"
+  }
+}
