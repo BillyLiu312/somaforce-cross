@@ -1,6 +1,6 @@
 # SomaForce-Cross
 
-> Scaffolded humanoid force adaptation via cross semantic force distillation.
+> Scaffolded humanoid force adaptation via cross-semantic force conditioning.
 
 This repository is the executable engineering baseline for SomaForce-Cross. The
 first door scaffold is a frozen policy trained with the official HDMI
@@ -16,24 +16,27 @@ retain HDMI provenance and redistribution restrictions.
 
 The figure is the retained conceptual overview of the complete research
 pipeline. Its older `SomaForce-RLD-S` and `Sonic-style` labels should be read as
-`SomaForce-Cross` and the nominal interaction scaffold, respectively. The
-implemented door baseline now uses the standalone frozen HDMI artifact; the
-force teacher, Cross residual, and deployable student remain future stages.
+`SomaForce-Cross` and the nominal interaction scaffold, respectively. The V1
+implementation uses standalone frozen HDMI artifacts and a deployable-input
+force-semantic residual actor. It does not train a privileged force teacher or
+use a teacher-to-student distillation route.
 
 ## Selected Pipeline
 
 ```text
-frozen pretrained HDMI door policy
+frozen pretrained HDMI task policy
   -> standalone exported artifact
   -> versioned observation/action adapter
   -> nominal normalized action a_nom [B, 23]
   -> virtual wrist F/T observation model
-  -> privileged task-conditioned force semantics
+  -> deployable-input direction/magnitude force semantics
   -> p_dir outer p_mag
   -> P_cross -> CrossEncoder -> z_cross
-  -> bounded residual actor
-  -> a = a_nom + clip(Delta a_force)
-  -> student distillation from real wrist F/T histories
+  -> contact-gated bounded residual actor
+  -> a_total in normalized 23-D action coordinates
+
+clean simulated wrench -> auxiliary semantic targets
+privileged simulator state -> critic only
 ```
 
 Door-scaffold decisions:
@@ -45,7 +48,7 @@ Door-scaffold decisions:
 - OMOMO supplies full-body human-object motion for lift/carry/place after joint G1/object retargeting.
 - Reference data ingested by SomaForce-Cross enters the strict `CanonicalReferenceEpisode` contract; the learned door policy remains a separate artifact.
 - OMOMO does not provide door motion, physical payload labels, or wrist F/T; those are assigned or generated in Isaac Lab.
-- The door uses the frozen pretrained artifact first; payload scaffolds remain separate later artifacts.
+- Door and payload tasks use four independently selectable frozen artifacts; task differences remain in manifests and adapters rather than task-specific residual networks.
 - Legacy tracker compatibility code is not part of this runtime repository.
 
 The complete migration and development rules are in [docs/pretrained_hdmi_scaffold_rules.md](docs/pretrained_hdmi_scaffold_rules.md). Goal-mode prompts are supplied separately for each scoped development round.
@@ -78,13 +81,22 @@ The current code provides:
   history/reset and JointPosition delay/alpha runtime;
 - independent PyTorch inference module, per-task HDMI-source deterministic
   parity fixtures, import-isolation checks, and a shared Isaac Lab rollout entry
-  for G1 + articulated door or G1 + rigid box.
+  for G1 + articulated door or G1 + rigid object;
+- pure-PyTorch two-wrist force semantics, `P_cross`, `CrossEncoder`, contact
+  gating, residual authority and action safety;
+- a vectorized four-task residual environment with `c0`, `scaffold_only`, and
+  `residual` modes, fixed normalization, reward, termination, metrics, and
+  C1-C3 curriculum support;
+- the Phase 5 asymmetric actor/critic and SemanticPPO path, including bounded
+  Isaac smoke and single-task `push_door_hand` C1 learning acceptance.
 
 The current code does not yet provide:
 
 - raw SMPL-H OMOMO to G1 nonlinear retarget optimization;
-- force teacher/student policy implementations;
-- real F/T integration, checkpoints, or experiment logs.
+- four-task joint PPO orchestration or Phase 6 joint-training evidence;
+- the three Phase 7 scaffolds or held-out Phase 8 zero-shot evaluation;
+- a validated non-privileged production scaffold, real F/T integration, or
+  physical hardware evidence.
 
 The materialized HDMI artifact is deliberately marked
 `privileged_simulation_baseline` and `deployable: false`. The checkpoint was
@@ -102,6 +114,9 @@ docs/
   scaffold_rollout_results.md
 configs/
   pretrained_hdmi_rollout_cases.json
+  phase4b5_numeric_contract.json
+  phase5_ppo_v1.json
+  phase5_learning_acceptance_v1.json
 figures/
   somaforce_cross_pipeline.png
 artifacts/scaffolds/hdmi_push_door_hand/v1/
@@ -128,6 +143,11 @@ somaforce_cross/scaffold/
   omomo_adapter.py
   reference_library.py
   contracts.py
+somaforce_cross/force/        # pure-PyTorch force-semantic core
+somaforce_cross/residual/     # bounded residual composition and safety
+somaforce_cross/sensing/      # virtual wrist F/T contracts and corruption
+somaforce_cross/envs/         # four-task Isaac residual environment
+somaforce_cross/learning/     # asymmetric actor/critic and SemanticPPO
 scripts/
   build_scaffold_reference.py
   batch_rollout_and_render_pretrained_hdmi_scaffolds.py
@@ -135,6 +155,9 @@ scripts/
   rollout_pretrained_hdmi_scaffold.py      # one task/condition -> one metrics file
   render_pretrained_hdmi_scaffold.py       # one task/condition -> one MP4
   verify_pretrained_hdmi_isolation.py
+  smoke_phase4b5_environment.py
+  smoke_phase5_ppo.py
+  train_phase5.py             # governed learning acceptance, not a quick demo
 tests/
   test_hdmi_omomo_pipeline.py
   test_pretrained_hdmi_scaffold.py
@@ -155,7 +178,7 @@ git lfs install
 Clone the active development branch and materialize all LFS objects:
 
 ```bash
-git clone --branch dev https://github.com/BillyLiu312/somaforce-cross.git
+git clone --branch v1 https://github.com/BillyLiu312/somaforce-cross.git
 cd somaforce-cross
 git lfs pull
 git lfs fsck
@@ -165,23 +188,10 @@ git lfs ls-files
 For a routine update of an existing clean checkout:
 
 ```bash
-git switch dev
-git pull --ff-only origin dev
+git switch v1
+git pull --ff-only origin v1
 git lfs pull
 git status --short --branch
-```
-
-The `dev` branch history was rewritten on 2026-07-23 to correct inherited
-author metadata. A checkout that still follows the old history must create a
-backup and realign once instead of using `git pull`. Commit or stash local work
-before the reset because `reset --hard` discards uncommitted tracked changes:
-
-```bash
-git switch dev
-git branch backup/dev-before-author-rewrite
-git fetch origin
-git reset --hard origin/dev
-git lfs pull
 ```
 
 When publishing a scoped change, inspect both ordinary Git state and LFS state.
@@ -193,16 +203,16 @@ git add <paths>
 git status --short
 git lfs status
 git commit -m "Describe the change"
-git push origin dev
-git lfs push --dry-run origin dev
+git push origin v1
+git lfs push --dry-run origin v1
 ```
 
 The final dry run should report no pending objects. If an earlier push bypassed
 the LFS hook, upload the objects explicitly and then push the Git ref again:
 
 ```bash
-git lfs push origin dev
-git push origin dev
+git lfs push origin v1
+git push origin v1
 ```
 
 ## Reference Conversion
@@ -240,30 +250,49 @@ The OMOMO command intentionally rejects raw/incomplete data. The input must alre
 
 ## Verification
 
-```text
+Install the pure-PyTorch package, or include the pinned Phase 5 dependencies
+when using the PPO components:
+
+```bash
+python -m pip install -e .
+python -m pip install -e '.[phase5]'
+
 python -m pytest -q
-python -m compileall -q scripts somaforce_cross
+```
+
+Use the Isaac Lab environment for simulator entry points:
+
+```bash
+ISAAC_PYTHON=/opt/miniconda3/envs/isaaclab/bin/python
 
 # one rollout with explicit task and evolution parameters
-python scripts/rollout_pretrained_hdmi_scaffold.py \
+$ISAAC_PYTHON scripts/rollout_pretrained_hdmi_scaffold.py \
   --task push_door_hand --condition high_friction --headless \
   --door-friction 10.0 --door-damping 0.55
 
 # render exactly one task/condition without writing rollout metrics
-python scripts/render_pretrained_hdmi_scaffold.py \
+$ISAAC_PYTHON scripts/render_pretrained_hdmi_scaffold.py \
   --task push_door_hand --condition high_friction \
   --door-friction 10.0 --door-damping 0.55
 
 # sequentially run every configured task/condition and render one MP4 per case
-python scripts/batch_rollout_and_render_pretrained_hdmi_scaffolds.py
+$ISAAC_PYTHON scripts/batch_rollout_and_render_pretrained_hdmi_scaffolds.py
+
+# bounded four-task residual-environment evidence
+$ISAAC_PYTHON scripts/smoke_phase4b5_environment.py \
+  --mode suite --python "$ISAAC_PYTHON" --output-dir outputs/phase4_environment
+
+# bounded single-task PPO integration evidence, not full learning acceptance
+$ISAAC_PYTHON scripts/smoke_phase5_ppo.py \
+  --mode suite --python "$ISAAC_PYTHON" --output-dir outputs/phase5_smoke
 
 # materialize the local/private artifact (requires the trusted HDMI checkout)
-python scripts/export_pretrained_hdmi_scaffold.py \
+$ISAAC_PYTHON scripts/export_pretrained_hdmi_scaffold.py \
   --hdmi-root /inspire/hdd/global_user/liumengfan-253108110079/yindianyu_workspace/somaforce/HDMI \
   --task move_suitcase --force
 
 # runtime checks without HDMI on PYTHONPATH
-env -u PYTHONPATH python scripts/verify_pretrained_hdmi_isolation.py --task move_suitcase
+env -u PYTHONPATH $ISAAC_PYTHON scripts/verify_pretrained_hdmi_isolation.py --task move_suitcase
 
 ```
 
@@ -337,10 +366,11 @@ and `checkpoint_*.pt/.pth` remain ignored. Before committing artifacts, verify
 redistribution permission in `THIRD_PARTY.md`; LFS changes storage mechanics,
 not licensing rights.
 
-## Boundary After This Round
+## Current V1 Boundary
 
-This round stops at the frozen scaffold. It does not implement virtual F/T,
-force semantics, `P_cross`, Cross residuals, student distillation, training, or
-cluster jobs. The next independent task is validating/exporting a
-non-privileged scaffold candidate; only after that gate should the Cross force
-pipeline be developed.
+Phases 0-5 of the governed V1 implementation plan are implemented and admitted.
+The admitted learning evidence is the bounded single-task `push_door_hand` C1
+acceptance; it is not four-task learning, robustness, zero-shot, deployment, or
+hardware evidence. The next implementation-plan requirement is Phase 6
+four-task joint training with balanced task transitions, synchronized shared
+weights, per-task metrics, pooled metrics, nominal retention, and curriculum.
