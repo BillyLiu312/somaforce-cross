@@ -156,6 +156,21 @@ def test_obs_groups_semantic_storage_reforward_and_combined_gradient() -> None:
         assert torch.isfinite(torch.tensor(update[name]))
     assert update["semantic_pipeline_has_nonzero_gradient"] is True
     assert update["semantic_pipeline_grad_norm"] > 0.0
+    assert update["contact_bearing_minibatches"] == 24.0
+    assert len(algorithm.last_gradient_diagnostics) == 24
+    assert all(
+        torch.isfinite(torch.tensor(item["ppo_grad_norm"]))
+        and torch.isfinite(torch.tensor(item["aux_grad_norm"]))
+        and item["ppo_grad_norm"] >= 0.0
+        and item["aux_grad_norm"] >= 0.0
+        for item in algorithm.last_gradient_diagnostics
+    )
+    assert any(
+        item["ppo_grad_norm"] > 0.0 for item in algorithm.last_gradient_diagnostics
+    )
+    assert any(
+        item["aux_grad_norm"] > 0.0 for item in algorithm.last_gradient_diagnostics
+    )
     assert algorithm.storage.cleared is True
 
 

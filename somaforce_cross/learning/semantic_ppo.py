@@ -101,6 +101,7 @@ class SemanticPPO:
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
         self.storage: Any | None = None
         self.transition = _Transition()
+        self.last_gradient_diagnostics: tuple[dict[str, float], ...] = ()
 
     @staticmethod
     def _require_observations(observations: object) -> Mapping[str, torch.Tensor]:
@@ -213,6 +214,34 @@ class SemanticPPO:
             has_nonzero_gradient |= norm > 0.0
         return squared_norm**0.5, has_nonzero_gradient
 
+    @staticmethod
+    def _objective_gradient_norm(
+        objective: torch.Tensor,
+        parameters: tuple[nn.Parameter, ...],
+    ) -> float:
+        """Inspect one objective without touching `.grad` or optimizer state."""
+        gradients = torch.autograd.grad(
+            objective,
+            parameters,
+            retain_graph=True,
+            create_graph=False,
+            allow_unused=True,
+        )
+        squared_norm = 0.0
+        for gradient in gradients:
+            if gradient is None:
+                continue
+            if not torch.isfinite(gradient).all():
+                raise FloatingPointError(
+                    "non-finite semantic-pipeline diagnostic gradient"
+                )
+            norm = float(gradient.detach().norm().item())
+            squared_norm += norm * norm
+        result = squared_norm**0.5
+        if not torch.isfinite(torch.tensor(result)):
+            raise FloatingPointError("non-finite semantic-pipeline gradient norm")
+        return result
+
     def update(self) -> dict[str, float | bool]:
         """Re-forward semantic features for every stored mini-batch with gradients."""
         if self.storage is None:
@@ -228,7 +257,9 @@ class SemanticPPO:
             "semantic_entropy": 0.0,
             "semantic_pipeline_grad_norm": 0.0,
         }
+        gradient_diagnostics: list[dict[str, float]] = []
         any_semantic_gradient = False
+        semantic_parameters = tuple(self.policy.semantic_pipeline.parameters())
         generator = self.storage.mini_batch_generator(
             self.num_mini_batches, self.num_learning_epochs
         )
@@ -292,6 +323,22 @@ class SemanticPPO:
             combined_loss = ppo_loss + semantic.total
             if not torch.isfinite(combined_loss):
                 raise FloatingPointError("non-finite combined Phase 5 PPO objective")
+            semantic_weight = obs_batch["semantic_target"][:, 30:31]
+            if torch.any(semantic_weight > 0.0):
+                # These autograd queries are diagnostic-only.  They run before the
+                # one combined backward and never populate parameter `.grad`.
+                ppo_gradient_norm = self._objective_gradient_norm(
+                    ppo_loss, semantic_parameters
+                )
+                auxiliary_gradient_norm = self._objective_gradient_norm(
+                    semantic.total, semantic_parameters
+                )
+                gradient_diagnostics.append(
+                    {
+                        "ppo_grad_norm": ppo_gradient_norm,
+                        "aux_grad_norm": auxiliary_gradient_norm,
+                    }
+                )
             self.optimizer.zero_grad(set_to_none=True)
             combined_loss.backward()
             semantic_gradient_norm, nonzero_gradient = self._semantic_gradient_norm(
@@ -315,9 +362,11 @@ class SemanticPPO:
                 "RSL rollout produced an unexpected number of PPO updates"
             )
         self.storage.clear()
+        self.last_gradient_diagnostics = tuple(gradient_diagnostics)
         result: dict[str, float | bool] = {
             key: value / updates for key, value in sums.items()
         }
         result["semantic_pipeline_has_nonzero_gradient"] = any_semantic_gradient
         result["ppo_updates"] = float(updates)
+        result["contact_bearing_minibatches"] = float(len(gradient_diagnostics))
         return result

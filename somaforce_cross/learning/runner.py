@@ -7,7 +7,7 @@ import importlib.metadata
 import inspect
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import torch
 
@@ -92,9 +92,23 @@ class Phase5Runner:
         if not torch.isfinite(value).all():
             raise FloatingPointError(f"non-finite {name}")
 
-    def run(self, *, iterations: int) -> dict[str, Any]:
+    def run(
+        self,
+        *,
+        iterations: int,
+        iteration_offset: int = 0,
+        transition_offset: int = 0,
+        step_observer: Callable[[Mapping[str, torch.Tensor], torch.Tensor], None]
+        | None = None,
+        iteration_observer: Callable[
+            [int, int, Mapping[str, float | bool], tuple[dict[str, float], ...]], None
+        ]
+        | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(iterations, int) or iterations <= 0:
             raise ValueError("iterations must be positive")
+        if iteration_offset < 0 or transition_offset < 0:
+            raise ValueError("runner offsets must be nonnegative")
         observations, _ = self.env.reset()
         observations = _require_observations(observations, num_envs=self.env.num_envs)
         iteration_records: list[dict[str, Any]] = []
@@ -116,6 +130,8 @@ class Phase5Runner:
                 self._finite("action", actions)
                 self._finite("value", values)
                 self._finite("log_prob", log_prob)
+                if step_observer is not None:
+                    step_observer(observations, actions)
                 observations, rewards, terminated, time_outs, extras = self.env.step(
                     actions
                 )
@@ -155,9 +171,23 @@ class Phase5Runner:
                     "update": update,
                 }
             )
+            if iteration_observer is not None:
+                transition_count = (
+                    transition_offset
+                    + (iteration + 1) * self.env.num_envs * steps_per_env
+                )
+                iteration_observer(
+                    iteration_offset + iteration + 1,
+                    transition_count,
+                    update,
+                    self.algorithm.last_gradient_diagnostics,
+                )
         last_update = iteration_records[-1]["update"]
         return {
             "iterations": iterations,
+            "iteration_offset": iteration_offset,
+            "transition_count": transition_offset
+            + iterations * self.env.num_envs * steps_per_env,
             "num_steps_per_env": steps_per_env,
             "actor_input_dim": ACTOR_INPUT_DIM,
             "critic_input_dim": CRITIC_DIM,

@@ -1,0 +1,52 @@
+{
+  "bindings": {
+    "phase4_canonical_sha256": "214b5328f0705b467f0fe305ec5eec78dc91f3ced163cf1d410ea00d43889ab3",
+    "phase5_canonical_sha256": "e95eca5f3c1332965967555f81cd33a78f9144280d0aa446e5eefaf5b83ae1f8",
+    "phase5_raw_sha256": "ac3ca17ef7b0f5cd800c2c967c7242eec94a2fdaf59eb8ba465e8f3697d9f200"
+  },
+  "checkpoints": {
+    "interval_transitions": 250000,
+    "strict_same_source_restore": true
+  },
+  "contract_version": "phase5_learning_acceptance_v4",
+  "evaluation": {
+    "c1_episodes": 256,
+    "deterministic_actor_mean": true,
+    "nominal_paired_episodes": 128
+  },
+  "probe": {
+    "loss_history_windows": 3,
+    "samples": 4096,
+    "zero_residual": true
+  },
+  "run": {
+    "episode_horizon": 508,
+    "evaluation_seed": 20262801,
+    "iterations": 2442,
+    "num_envs": 64,
+    "num_steps_per_env": 32,
+    "semantic_probe_seed": 20261801,
+    "stage": "C1",
+    "task": "push_door_hand",
+    "train_seed": 20260801,
+    "transitions": 5001216
+  },
+  "thresholds": {
+    "aux_gradient_min": 0.0,
+    "contact_bearing_rms_gradient_ratio_max": 1.0,
+    "contact_bearing_saturation_window_max": 0.1,
+    "contact_bearing_training_transitions_min": 50000,
+    "evaluation_episode_invalid_max": 0,
+    "evaluation_failure_max": 0.05,
+    "evaluation_success_min": 0.75,
+    "nominal_retention_ratio_min": 0.95,
+    "prediction_entropy_target_ratio_min": 0.8,
+    "prediction_max_probability_allowance": 0.05,
+    "prediction_max_probability_cap": 0.95,
+    "residual_contact_fraction_min": 0.25,
+    "residual_contact_norm_min": 0.005,
+    "residual_mean_norm_min": 0.01,
+    "semantic_loss_final_to_initial_max": 0.9,
+    "target_aggregate_entropy_min": 0.05
+  }
+}
