@@ -1,0 +1,96 @@
+{
+  "bindings": {
+    "phase6_canonical_sha256": "8e733479baada2334636106ee352aeb8ab8bf8dc7ad4ce3b39b844019c74df42",
+    "phase6_raw_sha256": "f26f8e118decb13066362b7a8612b1e2c5fbba37050a38b7ab3880f796c2131d",
+    "phase5_initial_checkpoint_sha256": "46d76e722e0422bfa1f00e5d815d80f4a328b0cf169f7104a16c6fbdeebf723a",
+    "roster_canonical_sha256": "14dfe15db96daa6c8d0bac93965fcdca3d9e815a1ac69a7adaa44d9f0db45bc4",
+    "roster_raw_sha256": "8ddcdd05f423138eb855d9c7cb3478ffb373f718484f0a948512f9bce1492fdb"
+  },
+  "checkpoint": {
+    "checkpoint_version": "phase6_learning_checkpoint_v1",
+    "latest_pointer": "latest.json",
+    "pre_evaluation_required": true,
+    "post_evaluation_atomic": true,
+    "persist_rank_rng_states": true,
+    "resume_strict": true
+  },
+  "contract_version": "phase6_learning_acceptance_v1",
+  "crossing": {
+    "actual_transitions_per_iteration": 8192,
+    "formula": "target_iteration=ceil(logical_crossing/8192)",
+    "interval_transitions": 250000,
+    "record_logical_and_actual": true,
+    "reject_duplicate_or_skipped": true
+  },
+  "curriculum": {
+    "promotion_windows": 3,
+    "rollback_windows": 2,
+    "promotion_eligibility": {
+      "C1": 5000000,
+      "C2": 10000000
+    },
+    "gates": {
+      "C1": {"failure_max": 0.05, "retention_min": 0.95, "success_min": 0.75},
+      "C2": {"failure_max": 0.08, "retention_min": 0.95, "success_min": 0.65},
+      "C3": {"failure_max": 0.08, "retention_min": 0.95, "success_min": 0.65}
+    },
+    "rollback": {"failure_margin": 0.05, "retention_min": 0.90, "success_margin": 0.15}
+  },
+  "evaluation": {
+    "deterministic_actor_mean": true,
+    "forbid_gradient_optimizer_normalizer_update": true,
+    "horizons": {"move_largebox": 199, "move_suitcase": 472, "push_box": 792, "push_door_hand": 508},
+    "nominal_atom": "nominal",
+    "nominal_pair_seeds_per_task": 128,
+    "pair_seeds_per_task": 256,
+    "paired_modes": ["residual", "scaffold_only"],
+    "rank_zero_aggregate": true,
+    "stage": "current_global_stage",
+    "stage_pair_seed_base": 20262806,
+    "evaluation_seed": 20262806,
+    "logical_interval_transitions": 250000
+  },
+  "final_acceptance": {
+    "final_stage": "C3",
+    "final_iteration": 2442,
+    "task_transition_fraction": 0.25,
+    "nominal_retention_min": 0.95,
+    "nominal_invalid_max": 0,
+    "nominal_saturation_max": 0.10,
+    "residual_mean_norm_min": 0.01,
+    "contact_bearing_residual_fraction_min": 0.25,
+    "benefit_task_count_min": 2,
+    "benefit_mismatch_family_count_min": 2,
+    "benefit_success_delta_min": 0.05,
+    "benefit_progress_delta_min": 0.05,
+    "benefit_force_p95_ratio_max": 0.95,
+    "stability_degradation_max": 0.05,
+    "task_normalized_reward_share_max": 0.60,
+    "task_semantic_total_share_max": 0.60,
+    "semantic_total_sum_zero_share": 0.0
+  },
+  "profiles": {
+    "pilot": {
+      "total_iterations": 31,
+      "global_transitions": 253952,
+      "per_task_transitions": 63488,
+      "optimizer_steps": 744
+    },
+    "main": {
+      "total_iterations": 2442,
+      "global_transitions": 20004864,
+      "per_task_transitions": 5001216,
+      "optimizer_steps": 58608
+    }
+  },
+  "runtime": {
+    "global_transitions_per_iteration": 8192,
+    "num_envs_per_rank": 64,
+    "num_steps_per_env": 32,
+    "optimizer_steps_per_iteration": 24,
+    "world_size": 4,
+    "initial_stage": "C1",
+    "train_seed": 20260806,
+    "evaluation_seed": 20262806
+  }
+}

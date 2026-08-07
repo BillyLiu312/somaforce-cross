@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import torch
@@ -74,6 +74,63 @@ _DEFAULT_NUMERIC_CONTRACT = (
     Path(__file__).resolve().parents[2] / "configs/phase4b5_numeric_contract.json"
 )
 _STAGE_INDEX = {"C1": 1, "C2": 2, "C3": 3}
+
+
+class EvaluationScheduleOwner:
+    """Own row-local evaluation slots and park rows after exhaustion."""
+
+    def __init__(self) -> None:
+        self._queues: dict[int, list[Mapping[str, object]]] = {}
+        self.mode: str | None = None
+        self.schedule_sha256: str | None = None
+        self.active = False
+
+    def bind(self, schedule: Mapping[str, object], *, mode: str) -> None:
+        if mode not in {"residual", "scaffold_only"}:
+            raise ValueError("evaluation schedule mode is invalid")
+        rows = schedule.get("rows")
+        if not isinstance(rows, Mapping) or not rows:
+            raise ValueError("evaluation schedule rows are required")
+        num_envs = schedule.get("num_envs")
+        if isinstance(num_envs, bool) or not isinstance(num_envs, int) or num_envs <= 0:
+            raise ValueError("evaluation schedule environment count is invalid")
+        expected_rows = {str(index) for index in range(num_envs)}
+        self._queues = {}
+        for key, values in rows.items():
+            env_id = int(key)
+            if not isinstance(values, list) or any(
+                not isinstance(value, Mapping) for value in values
+            ):
+                raise ValueError("evaluation schedule row is invalid")
+            self._queues[env_id] = list(values)
+        if set(rows) != expected_rows:
+            raise ValueError("evaluation schedule rows do not match environment batch")
+        self.mode = mode
+        schedule_sha256 = schedule.get("schedule_sha256")
+        if not isinstance(schedule_sha256, str) or len(schedule_sha256) != 64:
+            raise ValueError("evaluation schedule hash is required")
+        self.schedule_sha256 = schedule_sha256
+        self.active = True
+
+    def take(self, env_id: int) -> Mapping[str, object] | None:
+        if not self.active or env_id not in self._queues:
+            raise ValueError("evaluation schedule row is not bound")
+        if not self._queues[env_id]:
+            return None
+        return self._queues[env_id].pop(0)
+
+    def pending(self, env_id: int) -> int:
+        if env_id not in self._queues:
+            raise ValueError("evaluation schedule row is not bound")
+        return len(self._queues[env_id])
+
+    def exhausted(self) -> bool:
+        return self.active and all(not queue for queue in self._queues.values())
+
+    def remaining(self) -> int:
+        if not self.active:
+            raise ValueError("evaluation schedule row is not bound")
+        return sum(len(queue) for queue in self._queues.values())
 
 
 class FrozenScaffoldState:
@@ -373,6 +430,15 @@ class SomaForceResidualEnv(DirectRLEnv):
         self.episode_index = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.long
         )
+        self._evaluation_enabled = False
+        self._evaluation_schedule_owner = EvaluationScheduleOwner()
+        self._evaluation_mode: str | None = None
+        self._evaluation_id: str | None = None
+        self._evaluation_subset: list[str] = ["parked"] * self.num_envs
+        self._evaluation_parked = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.bool
+        )
+        self._evaluation_completed: list[dict[str, object]] = []
         self.requested_physics = torch.zeros(
             self.num_envs, 39, device=self.device, dtype=torch.float32
         )
@@ -673,15 +739,17 @@ class SomaForceResidualEnv(DirectRLEnv):
 
     def set_curriculum_stage(self, stage: str) -> None:
         """Accept a stage selected by the external training coordinator."""
-        if not self.is_residual or self.curriculum is None:
-            raise RuntimeError("only residual mode accepts a curriculum stage")
         if stage not in _STAGE_INDEX:
             raise ValueError("stage must be C1, C2, or C3")
+        if not self.is_residual or self.curriculum is None:
+            raise RuntimeError("only residual training accepts an external stage")
         self.curriculum.stage = stage
         self.scaffold_stage = stage
 
     def _reset_episode_metrics(self, env_ids: torch.Tensor) -> None:
-        if not self.is_residual or self.episode_termination is None:
+        if (
+            not self.is_residual and not self._evaluation_enabled
+        ) or self.episode_termination is None:
             return
         self.episode_termination.reset(env_ids)
         self._episode_active[env_ids] = True
@@ -717,9 +785,57 @@ class SomaForceResidualEnv(DirectRLEnv):
         self._last_terminated[env_ids] = False
         self._last_time_outs[env_ids] = False
 
+    def bind_evaluation_schedule(
+        self, schedule: Mapping[str, object], *, mode: str
+    ) -> None:
+        """Enable evaluation-only schedule ownership without changing training reset."""
+        if self.is_c0:
+            raise ValueError("C0 cannot bind an evaluation schedule")
+        if self.mismatch_sampler is None:
+            raise AssertionError("evaluation schedule requires the mismatch sampler")
+        self._evaluation_schedule_owner.bind(schedule, mode=mode)
+        self._evaluation_enabled = True
+        self._evaluation_mode = mode
+        self._evaluation_id = str(schedule.get("schedule_sha256"))
+        if self.curriculum is None:
+            self.curriculum = Phase4B5Curriculum(
+                self.numeric_contract, stage=self.scaffold_stage
+            )
+        if self.reward_manager is None:
+            self.reward_manager = Phase4B5RewardManager(
+                self.numeric_contract, self.task_spec.task
+            )
+        if self.episode_termination is None:
+            self.episode_termination = EpisodeTermination(
+                self.numeric_contract, self.num_envs, device=self.device
+            )
+        if self.episode_metric_log is None:
+            self.episode_metric_log = EpisodeMetricLog(self.numeric_contract)
+        self._evaluation_completed.clear()
+
+    def evaluation_nominal_probe(self, env_id: int, episode_index: int) -> bool:
+        """Probe sampler truth without mutating simulator or evaluation state."""
+        if self.mismatch_sampler is None:
+            raise AssertionError("nominal probe requires the mismatch sampler")
+        ids = torch.tensor([env_id], dtype=torch.long, device=self.device)
+        indices = torch.tensor([episode_index], dtype=torch.long, device=self.device)
+        sample = self.mismatch_sampler.sample(
+            task=self.task_spec.task,
+            stage=self.scaffold_stage,
+            env_ids=ids,
+            episode_indices=indices,
+        )
+        return bool(sample.nominal[0].item())
+
+    def drain_evaluation_completions(self) -> tuple[Mapping[str, object], ...]:
+        completed = tuple(self._evaluation_completed)
+        self._evaluation_completed.clear()
+        return completed
+
     def _record_completed_episodes(self, env_ids: torch.Tensor) -> None:
         if (
             not self.is_residual
+            and not self._evaluation_enabled
             or self.episode_metric_log is None
             or self.episode_termination is None
             or self.curriculum is None
@@ -728,6 +844,7 @@ class SomaForceResidualEnv(DirectRLEnv):
         completed = env_ids[
             self._episode_active[env_ids]
             & (self._last_terminated[env_ids] | self._last_time_outs[env_ids])
+            & ~self._evaluation_parked[env_ids]
         ]
         for env_id in completed.tolist():
             steps = int(self._episode_reward_steps[env_id].item())
@@ -794,6 +911,15 @@ class SomaForceResidualEnv(DirectRLEnv):
                     "diagnostics": diagnostics,
                 }
             )
+            if self._evaluation_enabled:
+                self._evaluation_completed.append(
+                    {
+                        "env_id": int(env_id),
+                        "mode": self._evaluation_mode,
+                        "seed": int(self._episode_seed[env_id].item()),
+                        "subset": self._evaluation_subset[env_id],
+                    }
+                )
             self.curriculum.complete_episode(
                 self.task_spec.task, nominal=bool(self._episode_nominal[env_id].item())
             )
@@ -808,7 +934,7 @@ class SomaForceResidualEnv(DirectRLEnv):
         stage: str,
         evaluation_id: str | None,
     ) -> None:
-        if not self.is_residual:
+        if not self.is_residual and not self._evaluation_enabled:
             return
         self._episode_nominal[env_ids] = nominal
         self._episode_seed[env_ids] = seeds
@@ -864,16 +990,44 @@ class SomaForceResidualEnv(DirectRLEnv):
         if self.mismatch_sampler is None:
             raise AssertionError("non-C0 runtime was not initialized")
         count = ids.numel()
-        episodes = self.episode_index.index_select(0, ids)
         stage = self.curriculum.stage if self.is_residual else self.scaffold_stage
         if stage is None:
             raise AssertionError("non-C0 runtime has no curriculum stage")
+        slots: list[Mapping[str, object] | None] = [None] * count
+        staged_evaluation_subsets: list[str] = ["parked"] * count
+        staged_evaluation_parked: list[bool] = [False] * count
+        episode_indices = self.episode_index.index_select(0, ids)
+        if self._evaluation_schedule_owner.active:
+            for local, env_id in enumerate(ids.tolist()):
+                slots[local] = self._evaluation_schedule_owner.take(env_id)
+                if slots[local] is not None:
+                    if int(slots[local]["env_id"]) != env_id:
+                        raise ValueError("evaluation schedule row identity changed")
+                    if slots[local]["subset"] not in {"stage", "nominal"}:
+                        raise ValueError("evaluation schedule subset is invalid")
+                    episode_indices[local] = int(slots[local]["episode_index"])
         sample = self.mismatch_sampler.sample(
             task=self.task_spec.task,
             stage=stage,
             env_ids=ids,
-            episode_indices=episodes,
+            episode_indices=episode_indices,
         )
+        if self._evaluation_schedule_owner.active:
+            for local, slot in enumerate(slots):
+                if slot is None:
+                    staged_evaluation_parked[local] = True
+                    continue
+                if int(sample.episode_seeds[local].item()) != int(slot["seed"]):
+                    raise ValueError("evaluation schedule seed does not match sampler")
+                if bool(sample.nominal[local].item()) != bool(slot["nominal"]):
+                    raise ValueError(
+                        "evaluation schedule nominal atom does not match sampler"
+                    )
+                if slot["subset"] == "nominal" and not bool(
+                    sample.nominal[local].item()
+                ):
+                    raise ValueError("evaluation nominal slot is not sampler-authentic")
+                staged_evaluation_subsets[local] = str(slot["subset"])
         # Validate every sampled/runtime row before scene, PhysX, buffer, seed,
         # or history mutation.  Requested rows remain distinct from critic rows.
         prepared = self.parameter_store.validate_rows(
@@ -891,7 +1045,15 @@ class SomaForceResidualEnv(DirectRLEnv):
         if count == 0:
             return
 
+        # DirectRLEnv invokes this reset after done.  Completion must observe
+        # the old row metadata before the next slot (or parked state) commits.
         self._record_completed_episodes(ids)
+        if self._evaluation_schedule_owner.active:
+            for local, subset in enumerate(staged_evaluation_subsets):
+                self._evaluation_subset[int(ids[local].item())] = subset
+            self._evaluation_parked[ids] = torch.tensor(
+                staged_evaluation_parked, device=self.device, dtype=torch.bool
+            )
         self._reset_episode_metrics(ids)
         self.requested_physics[ids] = sample.physics
         self.requested_scaffold[ids] = sample.scaffold
@@ -931,7 +1093,7 @@ class SomaForceResidualEnv(DirectRLEnv):
             nominal=sample.nominal,
             seeds=sample.episode_seeds,
             stage=stage,
-            evaluation_id=sample.evaluation_id,
+            evaluation_id=self._evaluation_id or sample.evaluation_id,
         )
         self._last_observations = self._assemble_observations()
         self.episode_index[ids] += 1
@@ -1110,7 +1272,7 @@ class SomaForceResidualEnv(DirectRLEnv):
         for value in tensors:
             nonfinite |= ~torch.isfinite(value).reshape(self.num_envs, -1).all(dim=1)
         signals = self.adapter.progress_signals()
-        if not self.is_residual:
+        if not self.is_residual and not self._evaluation_enabled:
             dones = smoke_done_flags(
                 nonfinite,
                 signals.failure,
@@ -1148,7 +1310,7 @@ class SomaForceResidualEnv(DirectRLEnv):
         *,
         signals: TaskProgressSignals,
     ) -> None:
-        if not self.is_residual:
+        if not self.is_residual and not self._evaluation_enabled:
             return
 
         batch = self.num_envs
@@ -1231,7 +1393,7 @@ class SomaForceResidualEnv(DirectRLEnv):
         self._episode_reward_steps += 1
 
     def _get_rewards(self) -> torch.Tensor:
-        if not self.is_residual:
+        if not self.is_residual and not self._evaluation_enabled:
             return torch.full(
                 (self.num_envs,),
                 self.cfg.smoke_profile.smoke_reward,

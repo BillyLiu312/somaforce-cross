@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import torch
 import torch.distributed as distributed
@@ -28,6 +28,24 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PHASE6_CONTRACT_VERSION = "phase6_joint_training_v1"
 PHASE6_ROSTER_VERSION = "phase6_task_roster_v1"
 PHASE6_CHECKPOINT_VERSION = "phase6_joint_checkpoint_v1"
+PHASE6_LEARNING_ACCEPTANCE_VERSION = "phase6_learning_acceptance_v1"
+PHASE6_LEARNING_CHECKPOINT_VERSION = "phase6_learning_checkpoint_v1"
+PHASE6_LEARNING_CONFIG = REPO_ROOT / "configs/phase6_learning_acceptance_v1.json"
+_LEARNING_PHASE6_RAW_SHA256 = (
+    "f26f8e118decb13066362b7a8612b1e2c5fbba37050a38b7ab3880f796c2131d"
+)
+_LEARNING_PHASE6_CANONICAL_SHA256 = (
+    "8e733479baada2334636106ee352aeb8ab8bf8dc7ad4ce3b39b844019c74df42"
+)
+_LEARNING_ROSTER_RAW_SHA256 = (
+    "8ddcdd05f423138eb855d9c7cb3478ffb373f718484f0a948512f9bce1492fdb"
+)
+_LEARNING_ROSTER_CANONICAL_SHA256 = (
+    "14dfe15db96daa6c8d0bac93965fcdca3d9e815a1ac69a7adaa44d9f0db45bc4"
+)
+_LEARNING_PHASE5_CHECKPOINT_SHA256 = (
+    "46d76e722e0422bfa1f00e5d815d80f4a328b0cf169f7104a16c6fbdeebf723a"
+)
 
 _PHASE4_BINDING = {
     "canonical_sha256": "214b5328f0705b467f0fe305ec5eec78dc91f3ced163cf1d410ea00d43889ab3",
@@ -576,6 +594,798 @@ def load_phase6_task_roster(
     )
 
 
+@dataclass(frozen=True)
+class LearningAcceptanceConfig:
+    """严格绑定 Phase 6、roster 与 Phase 5 初始 checkpoint 的合同。"""
+
+    payload: Mapping[str, Any]
+    raw_sha256: str
+    canonical_sha256: str
+
+
+def _validate_learning_bindings(bindings: object, *, repo_root: Path) -> None:
+    expected = {
+        "phase6_canonical_sha256": _LEARNING_PHASE6_CANONICAL_SHA256,
+        "phase6_raw_sha256": _LEARNING_PHASE6_RAW_SHA256,
+        "phase5_initial_checkpoint_sha256": _LEARNING_PHASE5_CHECKPOINT_SHA256,
+        "roster_canonical_sha256": _LEARNING_ROSTER_CANONICAL_SHA256,
+        "roster_raw_sha256": _LEARNING_ROSTER_RAW_SHA256,
+    }
+    values = _exact_keys(bindings, "learning.bindings", set(expected))
+    if dict(values) != expected:
+        raise ValueError("learning acceptance bindings are not admitted")
+    files = {
+        "configs/phase6_joint_training_v1.json": expected["phase6_raw_sha256"],
+        "configs/phase6_task_roster_v1.json": expected["roster_raw_sha256"],
+        _INITIAL_CHECKPOINT["path"]: expected["phase5_initial_checkpoint_sha256"],
+    }
+    for relative, digest in files.items():
+        source = repo_root / relative
+        if not source.is_file() or sha256_file(source) != digest:
+            raise ValueError(
+                f"learning acceptance binding checksum mismatch: {relative}"
+            )
+
+
+def validate_learning_acceptance_config(
+    payload: Mapping[str, Any], *, repo_root: str | Path = REPO_ROOT
+) -> None:
+    """Validate the frozen production learning contract and all arithmetic."""
+    canonical_json_bytes(payload)
+    root = _exact_keys(
+        payload,
+        "learning",
+        {
+            "bindings",
+            "checkpoint",
+            "contract_version",
+            "crossing",
+            "curriculum",
+            "evaluation",
+            "final_acceptance",
+            "profiles",
+            "runtime",
+        },
+    )
+    if root["contract_version"] != PHASE6_LEARNING_ACCEPTANCE_VERSION:
+        raise ValueError("unexpected Phase 6 learning acceptance version")
+    _validate_learning_bindings(root["bindings"], repo_root=Path(repo_root))
+    runtime = _exact_keys(
+        root["runtime"],
+        "learning.runtime",
+        {
+            "evaluation_seed",
+            "global_transitions_per_iteration",
+            "initial_stage",
+            "num_envs_per_rank",
+            "num_steps_per_env",
+            "optimizer_steps_per_iteration",
+            "train_seed",
+            "world_size",
+        },
+    )
+    expected_runtime = {
+        "evaluation_seed": 20262806,
+        "global_transitions_per_iteration": 8192,
+        "initial_stage": "C1",
+        "num_envs_per_rank": 64,
+        "num_steps_per_env": 32,
+        "optimizer_steps_per_iteration": 24,
+        "train_seed": 20260806,
+        "world_size": 4,
+    }
+    if dict(runtime) != expected_runtime:
+        raise ValueError("Phase 6 learning runtime arithmetic or seed changed")
+    if (
+        runtime["world_size"]
+        * runtime["num_envs_per_rank"]
+        * runtime["num_steps_per_env"]
+        != runtime["global_transitions_per_iteration"]
+        or runtime["optimizer_steps_per_iteration"] != 3 * 8
+    ):
+        raise ValueError("Phase 6 learning per-iteration arithmetic is invalid")
+    profiles = _exact_keys(root["profiles"], "learning.profiles", {"main", "pilot"})
+    for name, expected in {
+        "pilot": (31, 253952, 63488, 744),
+        "main": (2442, 20004864, 5001216, 58608),
+    }.items():
+        row = _exact_keys(
+            profiles[name],
+            f"learning.profiles.{name}",
+            {
+                "global_transitions",
+                "optimizer_steps",
+                "per_task_transitions",
+                "total_iterations",
+            },
+        )
+        if dict(row) != dict(
+            zip(
+                (
+                    "total_iterations",
+                    "global_transitions",
+                    "per_task_transitions",
+                    "optimizer_steps",
+                ),
+                expected,
+                strict=True,
+            )
+        ):
+            raise ValueError(f"Phase 6 {name} profile arithmetic is invalid")
+        if (
+            row["global_transitions"]
+            != row["total_iterations"] * runtime["global_transitions_per_iteration"]
+            or row["per_task_transitions"] * 4 != row["global_transitions"]
+            or row["optimizer_steps"]
+            != row["total_iterations"] * runtime["optimizer_steps_per_iteration"]
+        ):
+            raise ValueError(f"Phase 6 {name} transition balance is invalid")
+    crossing = _exact_keys(
+        root["crossing"],
+        "learning.crossing",
+        {
+            "actual_transitions_per_iteration",
+            "formula",
+            "interval_transitions",
+            "record_logical_and_actual",
+            "reject_duplicate_or_skipped",
+        },
+    )
+    if dict(crossing) != {
+        "actual_transitions_per_iteration": 8192,
+        "formula": "target_iteration=ceil(logical_crossing/8192)",
+        "interval_transitions": 250000,
+        "record_logical_and_actual": True,
+        "reject_duplicate_or_skipped": True,
+    }:
+        raise ValueError("Phase 6 crossing contract is frozen")
+    checkpoint = _exact_keys(
+        root["checkpoint"],
+        "learning.checkpoint",
+        {
+            "checkpoint_version",
+            "latest_pointer",
+            "persist_rank_rng_states",
+            "post_evaluation_atomic",
+            "pre_evaluation_required",
+            "resume_strict",
+        },
+    )
+    if dict(checkpoint) != {
+        "checkpoint_version": PHASE6_LEARNING_CHECKPOINT_VERSION,
+        "latest_pointer": "latest.json",
+        "persist_rank_rng_states": True,
+        "post_evaluation_atomic": True,
+        "pre_evaluation_required": True,
+        "resume_strict": True,
+    }:
+        raise ValueError("Phase 6 learning checkpoint policy is frozen")
+    evaluation = _exact_keys(
+        root["evaluation"],
+        "learning.evaluation",
+        {
+            "deterministic_actor_mean",
+            "evaluation_seed",
+            "forbid_gradient_optimizer_normalizer_update",
+            "horizons",
+            "logical_interval_transitions",
+            "nominal_atom",
+            "nominal_pair_seeds_per_task",
+            "paired_modes",
+            "pair_seeds_per_task",
+            "rank_zero_aggregate",
+            "stage",
+            "stage_pair_seed_base",
+        },
+    )
+    if (
+        evaluation["evaluation_seed"] != 20262806
+        or evaluation["stage_pair_seed_base"] != 20262806
+    ):
+        raise ValueError("Phase 6 evaluation seed is frozen")
+    if (
+        evaluation["logical_interval_transitions"] != 250000
+        or evaluation["pair_seeds_per_task"] != 256
+        or evaluation["nominal_pair_seeds_per_task"] != 128
+    ):
+        raise ValueError("Phase 6 evaluation quota is frozen")
+    if evaluation["paired_modes"] != ["residual", "scaffold_only"] or not all(
+        evaluation[name] is True
+        for name in (
+            "deterministic_actor_mean",
+            "forbid_gradient_optimizer_normalizer_update",
+            "rank_zero_aggregate",
+        )
+    ):
+        raise ValueError("Phase 6 evaluation isolation is frozen")
+    if dict(evaluation["horizons"]) != {
+        "move_largebox": 199,
+        "move_suitcase": 472,
+        "push_box": 792,
+        "push_door_hand": 508,
+    }:
+        raise ValueError("Phase 6 evaluation horizons are frozen")
+    curriculum = _exact_keys(
+        root["curriculum"],
+        "learning.curriculum",
+        {
+            "gates",
+            "promotion_eligibility",
+            "promotion_windows",
+            "rollback",
+            "rollback_windows",
+        },
+    )
+    if (
+        curriculum["promotion_windows"] != 3
+        or curriculum["rollback_windows"] != 2
+        or curriculum["promotion_eligibility"] != {"C1": 5000000, "C2": 10000000}
+    ):
+        raise ValueError("Phase 6 curriculum eligibility is frozen")
+    final = _mapping(root["final_acceptance"], "learning.final_acceptance")
+    required_final = {
+        "final_stage",
+        "final_iteration",
+        "task_transition_fraction",
+        "nominal_retention_min",
+        "nominal_invalid_max",
+        "nominal_saturation_max",
+        "residual_mean_norm_min",
+        "contact_bearing_residual_fraction_min",
+        "benefit_task_count_min",
+        "benefit_mismatch_family_count_min",
+        "benefit_success_delta_min",
+        "benefit_progress_delta_min",
+        "benefit_force_p95_ratio_max",
+        "stability_degradation_max",
+        "task_normalized_reward_share_max",
+        "task_semantic_total_share_max",
+        "semantic_total_sum_zero_share",
+    }
+    if (
+        set(final) != required_final
+        or final["final_stage"] != "C3"
+        or final["final_iteration"] != 2442
+    ):
+        raise ValueError("Phase 6 final acceptance contract is frozen")
+
+
+def load_learning_acceptance_config(
+    path: str | Path = PHASE6_LEARNING_CONFIG, *, repo_root: str | Path = REPO_ROOT
+) -> LearningAcceptanceConfig:
+    source = Path(path)
+    try:
+        raw = source.read_bytes()
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"unable to load Phase 6 learning acceptance {source}"
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise TypeError("Phase 6 learning acceptance root must be an object")
+    validate_learning_acceptance_config(payload, repo_root=repo_root)
+    return LearningAcceptanceConfig(
+        payload, hashlib.sha256(raw).hexdigest(), canonical_sha256(payload)
+    )
+
+
+def learning_transition_arithmetic(
+    *,
+    iterations: int,
+    world_size: int = 4,
+    num_envs_per_rank: int = 64,
+    num_steps_per_env: int = 32,
+) -> dict[str, int]:
+    iterations = _positive_int(iterations, "iterations")
+    global_transitions = transition_accounting(
+        world_size=world_size,
+        num_envs=num_envs_per_rank,
+        num_steps_per_env=num_steps_per_env,
+        iterations=iterations,
+    )
+    return {
+        "iterations": iterations,
+        "global_transitions": global_transitions,
+        "per_task_transitions": global_transitions // 4,
+        "optimizer_steps": iterations * 24,
+    }
+
+
+@dataclass(frozen=True)
+class CrossingRecord:
+    logical_transitions: int
+    target_iteration: int
+    actual_transitions: int
+
+
+@dataclass(frozen=True)
+class LearningSegment:
+    segment_index: int
+    start_iteration: int
+    end_iteration: int
+    start_transitions: int
+    end_transitions: int
+    crossing: CrossingRecord
+
+
+def crossing_target_iteration(
+    logical_crossing: int, *, transitions_per_iteration: int = 8192
+) -> int:
+    logical_crossing = _positive_int(logical_crossing, "logical_crossing")
+    transitions_per_iteration = _positive_int(
+        transitions_per_iteration, "transitions_per_iteration"
+    )
+    return (
+        logical_crossing + transitions_per_iteration - 1
+    ) // transitions_per_iteration
+
+
+def plan_learning_segments(
+    *,
+    total_iterations: int,
+    interval_transitions: int = 250000,
+    transitions_per_iteration: int = 8192,
+) -> tuple[LearningSegment, ...]:
+    total_iterations = _positive_int(total_iterations, "total_iterations")
+    interval_transitions = _positive_int(interval_transitions, "interval_transitions")
+    transitions_per_iteration = _positive_int(
+        transitions_per_iteration, "transitions_per_iteration"
+    )
+    records: list[LearningSegment] = []
+    previous_iteration = 0
+    previous_transitions = 0
+    logical = interval_transitions
+    index = 0
+    while True:
+        target = crossing_target_iteration(
+            logical, transitions_per_iteration=transitions_per_iteration
+        )
+        if target > total_iterations:
+            break
+        actual = target * transitions_per_iteration
+        records.append(
+            LearningSegment(
+                index,
+                previous_iteration,
+                target,
+                previous_transitions,
+                actual,
+                CrossingRecord(logical, target, actual),
+            )
+        )
+        previous_iteration, previous_transitions = target, actual
+        logical += interval_transitions
+        index += 1
+    if not records or records[-1].end_iteration != total_iterations:
+        raise ValueError("learning total iterations must end at a recorded crossing")
+    if len({item.crossing.logical_transitions for item in records}) != len(records):
+        raise ValueError("learning segment plan contains duplicate crossings")
+    if tuple(item.crossing.target_iteration for item in records) != tuple(
+        sorted(item.crossing.target_iteration for item in records)
+    ):
+        raise ValueError("learning segment plan skips or reorders a crossing")
+    return tuple(records)
+
+
+def next_learning_crossing(
+    actual_transitions: int, *, interval_transitions: int = 250000
+) -> int | None:
+    actual_transitions = _nonnegative_int(actual_transitions, "actual_transitions")
+    interval_transitions = _positive_int(interval_transitions, "interval_transitions")
+    candidate = (
+        (actual_transitions // interval_transitions) + 1
+    ) * interval_transitions
+    return candidate
+
+
+@dataclass(frozen=True)
+class PairedSeed:
+    seed: int
+    residual_mode: str = "residual"
+    scaffold_mode: str = "scaffold_only"
+
+
+@dataclass(frozen=True)
+class PairedEvaluationSlot:
+    """One deterministic environment-row episode in a paired evaluation."""
+
+    env_id: int
+    episode_index: int
+    seed: int
+    subset: str
+    nominal: bool
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "env_id": self.env_id,
+            "episode_index": self.episode_index,
+            "seed": self.seed,
+            "subset": self.subset,
+            "nominal": self.nominal,
+        }
+
+
+def paired_evaluation_rank_seed(evaluation_seed: int, rank: int) -> int:
+    """Return the globally disjoint sampler base seed for one evaluation rank."""
+    for value, name in ((evaluation_seed, "evaluation_seed"), (rank, "rank")):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a nonnegative integer")
+    return evaluation_seed + rank * 1_000_000_000
+
+
+def paired_evaluation_schedule(
+    *,
+    task: str,
+    stage: str,
+    evaluation_seed: int,
+    rank: int,
+    num_envs: int,
+    stage_quota: int,
+    nominal_quota: int,
+    nominal_probe: Callable[[int, int], bool],
+) -> dict[str, object]:
+    """Build a row-balanced schedule whose nominal rows are sampler-proven."""
+    if not isinstance(task, str) or not task:
+        raise ValueError("schedule task must be non-empty")
+    if stage not in {"C1", "C2", "C3"}:
+        raise ValueError("schedule stage must be C1, C2, or C3")
+    for value, name in (
+        (evaluation_seed, "evaluation_seed"),
+        (rank, "rank"),
+        (num_envs, "num_envs"),
+        (stage_quota, "stage_quota"),
+        (nominal_quota, "nominal_quota"),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a nonnegative integer")
+    if num_envs <= 0 or stage_quota <= 0 or nominal_quota <= 0:
+        raise ValueError("schedule dimensions must be positive")
+    if stage_quota % num_envs or nominal_quota % num_envs:
+        raise ValueError("stage and nominal quotas must divide num_envs")
+    if not callable(nominal_probe):
+        raise TypeError("nominal_probe must be callable")
+    stage_per_row = stage_quota // num_envs
+    nominal_per_row = nominal_quota // num_envs
+    task_base = paired_evaluation_rank_seed(evaluation_seed, rank)
+    rows: dict[str, list[dict[str, object]]] = {}
+    for env_id in range(num_envs):
+        row: list[dict[str, object]] = []
+        for episode_index in range(stage_per_row):
+            row.append(
+                PairedEvaluationSlot(
+                    env_id,
+                    episode_index,
+                    task_base + env_id + 1_000_003 * episode_index,
+                    "stage",
+                    bool(nominal_probe(env_id, episode_index)),
+                ).as_dict()
+            )
+        accepted = 0
+        candidate = stage_per_row
+        scanned = 0
+        while accepted < nominal_per_row and scanned < 4096:
+            scanned += 1
+            if nominal_probe(env_id, candidate):
+                row.append(
+                    PairedEvaluationSlot(
+                        env_id,
+                        candidate,
+                        task_base + env_id + 1_000_003 * candidate,
+                        "nominal",
+                        True,
+                    ).as_dict()
+                )
+                accepted += 1
+            candidate += 1
+        if accepted != nominal_per_row:
+            raise ValueError("nominal sampler did not provide the requested quota")
+        rows[str(env_id)] = row
+    batches = []
+    for subset, count in (("stage", stage_per_row), ("nominal", nominal_per_row)):
+        for offset in range(count):
+            batches.append(
+                {
+                    "subset": subset,
+                    "slots": [
+                        rows[str(env_id)][
+                            offset if subset == "stage" else stage_per_row + offset
+                        ]
+                        for env_id in range(num_envs)
+                    ],
+                }
+            )
+    canonical = {
+        "evaluation_seed": evaluation_seed,
+        "num_envs": num_envs,
+        "nominal_quota": nominal_quota,
+        "rank": rank,
+        "stage": stage,
+        "stage_quota": stage_quota,
+        "task": task,
+        "task_base": task_base,
+        "rows": rows,
+    }
+    schedule = {
+        **canonical,
+        "batches": batches,
+        "schedule_sha256": canonical_sha256(canonical),
+    }
+    validate_paired_evaluation_schedule(schedule)
+    return schedule
+
+
+def validate_paired_evaluation_schedule(schedule: Mapping[str, object]) -> None:
+    """Reject quota, seed, nominal-authenticity, or row-order mutations."""
+    required = {
+        "batches",
+        "evaluation_seed",
+        "nominal_quota",
+        "num_envs",
+        "rank",
+        "rows",
+        "schedule_sha256",
+        "stage",
+        "stage_quota",
+        "task",
+        "task_base",
+    }
+    if not isinstance(schedule, Mapping) or set(schedule) != required:
+        raise ValueError("paired evaluation schedule schema is not strict")
+    if not isinstance(schedule["rows"], Mapping):
+        raise ValueError("paired evaluation schedule rows are invalid")
+    num_envs = schedule["num_envs"]
+    stage_quota = schedule["stage_quota"]
+    nominal_quota = schedule["nominal_quota"]
+    if (
+        isinstance(num_envs, bool)
+        or not isinstance(num_envs, int)
+        or num_envs <= 0
+        or not isinstance(stage_quota, int)
+        or stage_quota <= 0
+        or stage_quota % num_envs
+        or not isinstance(nominal_quota, int)
+        or nominal_quota <= 0
+        or nominal_quota % num_envs
+    ):
+        raise ValueError("paired evaluation schedule quotas are invalid")
+    expected_sha = canonical_sha256(
+        {
+            key: schedule[key]
+            for key in (
+                "evaluation_seed",
+                "num_envs",
+                "nominal_quota",
+                "rank",
+                "stage",
+                "stage_quota",
+                "task",
+                "task_base",
+                "rows",
+            )
+        }
+    )
+    if schedule["schedule_sha256"] != expected_sha:
+        raise ValueError("paired evaluation schedule hash is invalid")
+    if schedule["task_base"] != paired_evaluation_rank_seed(
+        schedule["evaluation_seed"], schedule["rank"]
+    ):
+        raise ValueError("paired evaluation task base is invalid")
+    rows = schedule["rows"]
+    if set(rows) != {str(index) for index in range(num_envs)}:
+        raise ValueError("paired evaluation schedule rows are incomplete")
+    all_slots: list[Mapping[str, object]] = []
+    stage_per_row = stage_quota // num_envs
+    nominal_per_row = nominal_quota // num_envs
+    for env_id in range(num_envs):
+        row = rows[str(env_id)]
+        if not isinstance(row, list) or len(row) != stage_per_row + nominal_per_row:
+            raise ValueError("paired evaluation row quota is invalid")
+        for offset, slot in enumerate(row):
+            if not isinstance(slot, Mapping) or set(slot) != {
+                "env_id",
+                "episode_index",
+                "nominal",
+                "seed",
+                "subset",
+            }:
+                raise ValueError("paired evaluation slot schema is invalid")
+            if slot["env_id"] != env_id:
+                raise ValueError("paired evaluation slot row identity changed")
+            expected_subset = "stage" if offset < stage_per_row else "nominal"
+            if slot["subset"] != expected_subset:
+                raise ValueError("paired evaluation subset order changed")
+            if expected_subset == "nominal" and slot["nominal"] is not True:
+                raise ValueError("nominal schedule slot was not sampler-proven")
+            episode_index = slot["episode_index"]
+            if not isinstance(episode_index, int) or episode_index < 0:
+                raise ValueError("paired evaluation episode index is invalid")
+            expected_seed = (
+                int(schedule["task_base"]) + env_id + 1_000_003 * episode_index
+            )
+            if slot["seed"] != expected_seed:
+                raise ValueError("paired evaluation seed formula changed")
+            all_slots.append(slot)
+    if len({int(slot["seed"]) for slot in all_slots}) != len(all_slots):
+        raise ValueError("paired evaluation seeds are repeated")
+    stage_batches = stage_per_row
+    nominal_batches = nominal_per_row
+    batches = schedule["batches"]
+    if not isinstance(batches, list) or len(batches) != stage_batches + nominal_batches:
+        raise ValueError("paired evaluation batches are incomplete")
+    expected_batches = [
+        ("stage", offset, stage_per_row) for offset in range(stage_batches)
+    ] + [("nominal", offset, nominal_per_row) for offset in range(nominal_batches)]
+    for batch, (subset, offset, per_row) in zip(batches, expected_batches, strict=True):
+        if not isinstance(batch, Mapping) or set(batch) != {"slots", "subset"}:
+            raise ValueError("paired evaluation batch schema is invalid")
+        if batch["subset"] != subset or not isinstance(batch["slots"], list):
+            raise ValueError("paired evaluation batch order changed")
+        if len(batch["slots"]) != num_envs:
+            raise ValueError("paired evaluation batch row count is invalid")
+        expected_index = offset if subset == "stage" else stage_per_row + offset
+        for env_id, slot in enumerate(batch["slots"]):
+            if slot != rows[str(env_id)][expected_index]:
+                raise ValueError(
+                    "paired evaluation batch slot differs from row schedule"
+                )
+
+
+def paired_evaluation_plan(
+    roster: Phase6Roster,
+    *,
+    stage: str = "C1",
+    evaluation_seed: int = 20262806,
+    stage_quota: int = 256,
+    nominal_quota: int = 128,
+) -> dict[str, object]:
+    """Create equal, seed-paired residual/scaffold episodes per roster task."""
+    if stage not in {"C1", "C2", "C3"}:
+        raise ValueError("paired evaluation stage must be C1, C2, or C3")
+    evaluation_seed = _nonnegative_int(evaluation_seed, "evaluation_seed")
+    stage_quota = _positive_int(stage_quota, "stage_quota")
+    nominal_quota = _positive_int(nominal_quota, "nominal_quota")
+    horizon = {
+        "push_door_hand": 508,
+        "push_box": 792,
+        "move_suitcase": 472,
+        "move_largebox": 199,
+    }
+    tasks: dict[str, object] = {}
+    for task_index, task in enumerate(roster.tasks):
+        if task.task not in horizon:
+            raise ValueError(f"evaluation horizon is missing for {task.task}")
+        stage_seeds = tuple(
+            PairedSeed(evaluation_seed + task_index * 1000000 + seed)
+            for seed in range(stage_quota)
+        )
+        nominal_seeds = tuple(
+            PairedSeed(evaluation_seed + 100000000 + task_index * 1000000 + seed)
+            for seed in range(nominal_quota)
+        )
+        tasks[task.task] = {
+            "rank": task_index,
+            "stage": stage,
+            "horizon": horizon[task.task],
+            "stage_pairs": tuple(stage_seeds),
+            "nominal_pairs": tuple(nominal_seeds),
+        }
+    return {
+        "stage": stage,
+        "evaluation_seed": evaluation_seed,
+        "tasks": tasks,
+        "pair_quota": {"stage": stage_quota, "nominal": nominal_quota},
+        "modes": ("residual", "scaffold_only"),
+        "rank_assignment": "roster_order",
+    }
+
+
+def validate_paired_evaluation_plan(
+    plan: Mapping[str, object], *, roster: Phase6Roster
+) -> None:
+    root = _exact_keys(
+        plan,
+        "paired_evaluation",
+        {"evaluation_seed", "modes", "pair_quota", "rank_assignment", "stage", "tasks"},
+    )
+    if root["stage"] not in {"C1", "C2", "C3"} or root["modes"] != (
+        "residual",
+        "scaffold_only",
+    ):
+        raise ValueError("paired evaluation plan mode or stage is invalid")
+    tasks = _exact_keys(
+        root["tasks"], "paired_evaluation.tasks", {task.task for task in roster.tasks}
+    )
+    global_pair_seeds: dict[str, set[int]] = {
+        "stage_pairs": set(),
+        "nominal_pairs": set(),
+    }
+    for index, task in enumerate(roster.tasks):
+        record = _exact_keys(
+            tasks[task.task],
+            f"paired_evaluation.{task.task}",
+            {"horizon", "nominal_pairs", "rank", "stage", "stage_pairs"},
+        )
+        if record["rank"] != index or record["stage"] != root["stage"]:
+            raise ValueError("paired evaluation rank assignment is invalid")
+        if record["horizon"] not in {199, 472, 792, 508}:
+            raise ValueError("paired evaluation horizon is invalid")
+        for name in ("stage_pairs", "nominal_pairs"):
+            pairs = record[name]
+            if not isinstance(pairs, (tuple, list)) or not pairs:
+                raise ValueError("paired evaluation quota is empty")
+            seeds: list[int] = []
+            for pair in pairs:
+                if isinstance(pair, PairedSeed):
+                    seed = pair.seed
+                    if (
+                        pair.residual_mode != "residual"
+                        or pair.scaffold_mode != "scaffold_only"
+                    ):
+                        raise ValueError("paired seed modes are not actor-clean")
+                elif isinstance(pair, Mapping):
+                    expected = _exact_keys(
+                        pair, "paired_seed", {"residual_mode", "scaffold_mode", "seed"}
+                    )
+                    if (
+                        expected["residual_mode"] != "residual"
+                        or expected["scaffold_mode"] != "scaffold_only"
+                    ):
+                        raise ValueError("paired seed modes are not actor-clean")
+                    seed = _nonnegative_int(expected["seed"], "paired_seed.seed")
+                else:
+                    raise TypeError("paired seed record is invalid")
+                seeds.append(seed)
+            if len(seeds) != len(set(seeds)):
+                raise ValueError("paired evaluation seed is repeated")
+            if global_pair_seeds[name].intersection(seeds):
+                raise ValueError("paired evaluation seed is reused across tasks")
+            global_pair_seeds[name].update(seeds)
+
+
+def _task_gate(stage: str) -> dict[str, float]:
+    if stage == "C1":
+        return {"success_min": 0.75, "failure_max": 0.05, "retention_min": 0.95}
+    if stage in {"C2", "C3"}:
+        return {"success_min": 0.65, "failure_max": 0.08, "retention_min": 0.95}
+    raise ValueError("stage must be C1, C2, or C3")
+
+
+def _window_passes(
+    stage: str, task_metrics: Mapping[str, Mapping[str, object]]
+) -> bool:
+    gate = _task_gate(stage)
+    if not task_metrics:
+        raise ValueError("curriculum window has no task metrics")
+    for task, metrics in task_metrics.items():
+        success = _finite(metrics.get("success"), f"{task}.success")
+        failure = _finite(metrics.get("failure"), f"{task}.failure")
+        retention = _finite(metrics.get("retention"), f"{task}.retention")
+        if (
+            success < gate["success_min"]
+            or failure > gate["failure_max"]
+            or retention < gate["retention_min"]
+        ):
+            return False
+    return True
+
+
+def _window_rolls_back(
+    stage: str, task_metrics: Mapping[str, Mapping[str, object]]
+) -> bool:
+    gate = _task_gate(stage)
+    for task, metrics in task_metrics.items():
+        success = _finite(metrics.get("success"), f"{task}.success")
+        failure = _finite(metrics.get("failure"), f"{task}.failure")
+        retention = _finite(metrics.get("retention"), f"{task}.retention")
+        if (
+            success < gate["success_min"] - 0.15
+            or failure > gate["failure_max"] + 0.05
+            or retention < 0.90
+        ):
+            return True
+    return False
+
+
 def _validate_p_cross_trace(value: object, *, path: str) -> None:
     if not isinstance(value, list) or not value:
         raise ValueError(f"{path} must contain one trace entry per control step")
@@ -1118,6 +1928,54 @@ class JointCurriculum:
             rolled_back = True
         return CurriculumDecision(self.stage, promoted, rolled_back, crossing)
 
+    def evaluate_window(
+        self, *, crossing: int, task_metrics: Mapping[str, Mapping[str, object]]
+    ) -> CurriculumDecision:
+        """Apply learning-acceptance eligibility, promotion, and adjacent rollback."""
+        crossing = _positive_int(crossing, "crossing")
+        if crossing % 250000 or crossing <= self.last_evaluation_transition:
+            raise ValueError("learning evaluation crossing is invalid")
+        passed = _window_passes(self.stage, task_metrics)
+        rollback = _window_rolls_back(self.stage, task_metrics)
+        self.transitions = crossing
+        self.last_evaluation_transition = crossing
+        if not passed:
+            self.passes = 0
+        elif self.stage != "C3" and (
+            (self.stage == "C1" and crossing >= 5000000)
+            or (self.stage == "C2" and crossing >= 10000000)
+        ):
+            self.passes += 1
+        else:
+            self.passes = 0
+        if rollback and self.stage != "C1":
+            self.rollbacks += 1
+        else:
+            self.rollbacks = 0
+        promoted = False
+        rolled_back = False
+        if self.stage == "C1" and self.passes >= 3:
+            self.stage = "C2"
+            self.passes = 0
+            self.rollbacks = 0
+            promoted = True
+        elif self.stage == "C2" and self.passes >= 3:
+            self.stage = "C3"
+            self.passes = 0
+            self.rollbacks = 0
+            promoted = True
+        elif self.stage == "C2" and self.rollbacks >= 2:
+            self.stage = "C1"
+            self.passes = 0
+            self.rollbacks = 0
+            rolled_back = True
+        elif self.stage == "C3" and self.rollbacks >= 2:
+            self.stage = "C2"
+            self.passes = 0
+            self.rollbacks = 0
+            rolled_back = True
+        return CurriculumDecision(self.stage, promoted, rolled_back, crossing)
+
 
 def broadcast_curriculum_state(
     curriculum: JointCurriculum,
@@ -1484,3 +2342,436 @@ def restore_joint_checkpoint(
 
 def process_group_timeout(config: Phase6Config) -> timedelta:
     return timedelta(seconds=int(config.payload["runtime"]["process_group_timeout_s"]))
+
+
+def _learning_contracts(
+    config: Phase6Config,
+    roster: Phase6Roster,
+    acceptance: LearningAcceptanceConfig,
+    phase5_checkpoint_sha256: str,
+) -> dict[str, object]:
+    if phase5_checkpoint_sha256 != _LEARNING_PHASE5_CHECKPOINT_SHA256:
+        raise ValueError(
+            "learning checkpoint must bind the admitted Phase 5 checkpoint"
+        )
+    return {
+        "phase6": {
+            "canonical_sha256": config.canonical_sha256,
+            "raw_sha256": config.raw_sha256,
+            "contract_version": PHASE6_CONTRACT_VERSION,
+        },
+        "roster": {
+            "canonical_sha256": roster.canonical_sha256,
+            "raw_sha256": roster.raw_sha256,
+            "contract_version": PHASE6_ROSTER_VERSION,
+        },
+        "learning_acceptance": {
+            "canonical_sha256": acceptance.canonical_sha256,
+            "raw_sha256": acceptance.raw_sha256,
+            "contract_version": PHASE6_LEARNING_ACCEPTANCE_VERSION,
+        },
+        "phase5_checkpoint_sha256": phase5_checkpoint_sha256,
+    }
+
+
+def learning_checkpoint_payload(
+    *,
+    config: Phase6Config,
+    roster: Phase6Roster,
+    acceptance: LearningAcceptanceConfig,
+    policy: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    iteration: int,
+    task_transitions: Mapping[str, int],
+    curriculum: JointCurriculum,
+    next_crossing: Mapping[str, object] | None,
+    evaluation_history: Sequence[Mapping[str, object]],
+    rank_rng: Mapping[str, object],
+    source_manifest: Mapping[str, str],
+    metrics: Mapping[str, object],
+    pre_evaluation: bool,
+    phase5_checkpoint_sha256: str = _LEARNING_PHASE5_CHECKPOINT_SHA256,
+) -> dict[str, object]:
+    iteration = _positive_int(iteration, "learning checkpoint.iteration")
+    arithmetic = learning_transition_arithmetic(iterations=iteration)
+    expected_tasks = {
+        task.task: arithmetic["per_task_transitions"] for task in roster.tasks
+    }
+    if dict(task_transitions) != expected_tasks:
+        raise ValueError(
+            "learning checkpoint task transitions are not exactly balanced"
+        )
+    if set(rank_rng) != {str(index) for index in range(4)}:
+        raise ValueError("learning checkpoint must persist four rank RNG states")
+    source_manifest = _exact_keys(
+        source_manifest, "learning checkpoint.source_manifest", set(source_manifest)
+    )
+    if not source_manifest or any(
+        not isinstance(value, str) or len(value) != 64
+        for value in source_manifest.values()
+    ):
+        raise ValueError(
+            "learning checkpoint source manifest must contain SHA256 values"
+        )
+    if not isinstance(pre_evaluation, bool):
+        raise TypeError("learning checkpoint pre_evaluation must be bool")
+    hashes = {
+        "policy": state_dict_sha256(policy.state_dict()),
+        "optimizer": state_dict_sha256(optimizer.state_dict()),
+        "step": optimizer_step(optimizer),
+    }
+    if hashes["step"] != arithmetic["optimizer_steps"]:
+        raise ValueError("learning checkpoint optimizer step arithmetic is invalid")
+    return {
+        "checkpoint_version": PHASE6_LEARNING_CHECKPOINT_VERSION,
+        "contracts": _learning_contracts(
+            config, roster, acceptance, phase5_checkpoint_sha256
+        ),
+        "evaluation_history": [dict(item) for item in evaluation_history],
+        "iteration": iteration,
+        "metrics": dict(metrics),
+        "next_crossing": None if next_crossing is None else dict(next_crossing),
+        "optimizer": optimizer.state_dict(),
+        "optimizer_sha256": hashes["optimizer"],
+        "optimizer_step": hashes["step"],
+        "policy": policy.state_dict(),
+        "policy_sha256": hashes["policy"],
+        "pre_evaluation": pre_evaluation,
+        "rank_rng": dict(rank_rng),
+        "source_manifest": dict(source_manifest),
+        "task_transitions": dict(task_transitions),
+        "actual_global_transitions": arithmetic["global_transitions"],
+        "actual_per_task_transitions": arithmetic["per_task_transitions"],
+        "curriculum": curriculum.state_dict(),
+    }
+
+
+def atomic_learning_checkpoint(
+    path: str | Path,
+    payload: Mapping[str, object],
+    *,
+    latest_path: str | Path | None = None,
+) -> str:
+    if payload.get("checkpoint_version") != PHASE6_LEARNING_CHECKPOINT_VERSION:
+        raise ValueError("only phase6_learning_checkpoint_v1 may be written")
+    digest = atomic_torch_save(path, payload)
+    if latest_path is not None and not payload.get("pre_evaluation", True):
+        latest = Path(latest_path)
+        latest.parent.mkdir(parents=True, exist_ok=True)
+        temporary = latest.with_name(f".{latest.name}.{os.getpid()}.tmp")
+        temporary.write_text(
+            json.dumps(
+                {"checkpoint": str(Path(path)), "sha256": digest}, sort_keys=True
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, latest)
+    return digest
+
+
+def restore_learning_checkpoint(
+    path: str | Path,
+    *,
+    config: Phase6Config,
+    roster: Phase6Roster,
+    acceptance: LearningAcceptanceConfig,
+    policy: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    source_manifest: Mapping[str, str],
+    expected_iteration: int | None = None,
+    expected_next_crossing: Mapping[str, object] | None = None,
+    device: torch.device | str = "cpu",
+) -> dict[str, object]:
+    value = torch.load(Path(path), map_location=device, weights_only=False)
+    required = {
+        "actual_global_transitions",
+        "actual_per_task_transitions",
+        "checkpoint_version",
+        "contracts",
+        "curriculum",
+        "evaluation_history",
+        "iteration",
+        "metrics",
+        "next_crossing",
+        "optimizer",
+        "optimizer_sha256",
+        "optimizer_step",
+        "policy",
+        "policy_sha256",
+        "pre_evaluation",
+        "rank_rng",
+        "source_manifest",
+        "task_transitions",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError("learning checkpoint schema is not strict")
+    if value["checkpoint_version"] != PHASE6_LEARNING_CHECKPOINT_VERSION:
+        raise ValueError("learning checkpoint version mismatch")
+    if value["contracts"] != _learning_contracts(
+        config, roster, acceptance, _LEARNING_PHASE5_CHECKPOINT_SHA256
+    ):
+        raise ValueError("learning checkpoint contract binding mismatch")
+    if dict(value["source_manifest"]) != dict(source_manifest):
+        raise ValueError("learning checkpoint source manifest mismatch")
+    iteration = _positive_int(value["iteration"], "checkpoint.iteration")
+    if expected_iteration is not None and iteration != _positive_int(
+        expected_iteration, "expected_iteration"
+    ):
+        raise ValueError("learning resume iteration mismatch")
+    arithmetic = learning_transition_arithmetic(iterations=iteration)
+    if (
+        value["actual_global_transitions"] != arithmetic["global_transitions"]
+        or value["actual_per_task_transitions"] != arithmetic["per_task_transitions"]
+    ):
+        raise ValueError("learning checkpoint transition arithmetic mismatch")
+    expected_tasks = {
+        task.task: arithmetic["per_task_transitions"] for task in roster.tasks
+    }
+    if value["task_transitions"] != expected_tasks:
+        raise ValueError("learning checkpoint task balance mismatch")
+    if expected_next_crossing is not None and value["next_crossing"] != dict(
+        expected_next_crossing
+    ):
+        raise ValueError("learning resume crossing mismatch")
+    policy.load_state_dict(value["policy"], strict=True)
+    optimizer.load_state_dict(value["optimizer"])
+    if (
+        state_dict_sha256(policy.state_dict()) != value["policy_sha256"]
+        or state_dict_sha256(optimizer.state_dict()) != value["optimizer_sha256"]
+    ):
+        raise ValueError("learning checkpoint policy or optimizer hash mismatch")
+    if optimizer_step(optimizer) != value["optimizer_step"]:
+        raise ValueError("learning checkpoint optimizer step mismatch")
+    restored = JointCurriculum()
+    restored.load_state_dict(_mapping(value["curriculum"], "checkpoint.curriculum"))
+    if restored.transitions != arithmetic["global_transitions"]:
+        raise ValueError("learning checkpoint curriculum transition mismatch")
+    return dict(value)
+
+
+def validate_learning_evaluation_summary(
+    summary: Mapping[str, object],
+    *,
+    roster: Phase6Roster,
+    expected_iteration: int,
+    expected_stage_quota: int = 256,
+    expected_nominal_quota: int = 128,
+) -> dict[str, object]:
+    """Require all rank/episode close evidence before curriculum mutation."""
+    if isinstance(summary, Mapping) and "schedule_sha256" not in summary:
+        root = _exact_keys(
+            summary,
+            "learning.evaluation_summary.legacy",
+            {"iteration", "rank_results", "status", "task_metrics"},
+        )
+        if root["status"] != "ok" or root["iteration"] != expected_iteration:
+            raise ValueError(
+                "learning evaluation summary status or iteration is incomplete"
+            )
+        results = root["rank_results"]
+        if not isinstance(results, list) or len(results) != 4:
+            raise ValueError("learning evaluation requires four rank results")
+        seen: set[str] = set()
+        for index, result in enumerate(results):
+            row = _exact_keys(
+                result,
+                f"legacy.rank_results[{index}]",
+                {"episodes", "rank", "status", "task"},
+            )
+            if (
+                row["rank"] != index
+                or row["status"] != "ok"
+                or row["task"] in seen
+                or row["task"] not in {task.task for task in roster.tasks}
+                or row["episodes"]
+                != (expected_stage_quota + expected_nominal_quota) * 2
+            ):
+                raise ValueError("learning evaluation episode quota is incomplete")
+            seen.add(str(row["task"]))
+        if seen != {task.task for task in roster.tasks} or not isinstance(
+            root["task_metrics"], Mapping
+        ):
+            raise ValueError("learning evaluation did not cover every roster task")
+        return {
+            "rank_results": results,
+            "task_metrics": dict(root["task_metrics"]),
+            "iteration": expected_iteration,
+            "status": "ok",
+        }
+    root = _exact_keys(
+        summary,
+        "learning.evaluation_summary",
+        {"iteration", "rank_results", "schedule_sha256", "status", "task_metrics"},
+    )
+    if root["status"] != "ok" or root["iteration"] != expected_iteration:
+        raise ValueError(
+            "learning evaluation summary status or iteration is incomplete"
+        )
+    results = root["rank_results"]
+    if not isinstance(results, list) or len(results) != 4:
+        raise ValueError("learning evaluation requires four rank results")
+    seen: set[str] = set()
+    schedule_sha = root["schedule_sha256"]
+    if not isinstance(schedule_sha, str) or len(schedule_sha) != 64:
+        raise ValueError("learning evaluation schedule hash is invalid")
+    rank_schedule_hashes: list[str] = []
+    for index, result in enumerate(results):
+        row = _exact_keys(
+            result,
+            f"rank_results[{index}]",
+            {
+                "control_steps",
+                "episodes",
+                "mode_counts",
+                "rank",
+                "schedule_sha256",
+                "status",
+                "subset_counts",
+                "task",
+                "unique_seeds",
+            },
+        )
+        if row["rank"] != index or row["status"] != "ok" or row["task"] in seen:
+            raise ValueError("learning evaluation rank result is incomplete")
+        if (
+            row["task"] not in {task.task for task in roster.tasks}
+            or row["episodes"] != (expected_stage_quota + expected_nominal_quota) * 2
+            or not isinstance(row["schedule_sha256"], str)
+            or len(row["schedule_sha256"]) != 64
+            or row["unique_seeds"] != expected_stage_quota + expected_nominal_quota
+            or row["mode_counts"]
+            != {
+                "residual": expected_stage_quota + expected_nominal_quota,
+                "scaffold_only": expected_stage_quota + expected_nominal_quota,
+            }
+            or row["subset_counts"]
+            != {
+                "nominal": expected_nominal_quota * 2,
+                "stage": expected_stage_quota * 2,
+            }
+        ):
+            raise ValueError("learning evaluation episode quota is incomplete")
+        if (
+            isinstance(row["control_steps"], bool)
+            or not isinstance(row["control_steps"], int)
+            or row["control_steps"] <= 0
+        ):
+            raise ValueError("learning evaluation control-step evidence is incomplete")
+        rank_schedule_hashes.append(str(row["schedule_sha256"]))
+        seen.add(str(row["task"]))
+    aggregate = hashlib.sha256(
+        json.dumps(rank_schedule_hashes, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if schedule_sha != aggregate:
+        raise ValueError("learning evaluation aggregate schedule hash is invalid")
+    if seen != {task.task for task in roster.tasks} or not isinstance(
+        root["task_metrics"], Mapping
+    ):
+        raise ValueError("learning evaluation did not cover every roster task")
+    return {
+        "rank_results": results,
+        "schedule_sha256": schedule_sha,
+        "task_metrics": dict(root["task_metrics"]),
+        "iteration": expected_iteration,
+        "status": "ok",
+    }
+
+
+def validate_learning_final_acceptance(
+    metrics: Mapping[str, object], *, config: LearningAcceptanceConfig
+) -> dict[str, bool]:
+    """Validate C3 closeout, equal-task accounting, retention and two benefits."""
+    final = _mapping(config.payload["final_acceptance"], "final_acceptance")
+    if (
+        metrics.get("stage") != final["final_stage"]
+        or metrics.get("iteration") != final["final_iteration"]
+    ):
+        raise AssertionError("Phase 6 final stage or iteration gate failed")
+    arithmetic = learning_transition_arithmetic(iterations=2442)
+    if (
+        metrics.get("global_transitions") != arithmetic["global_transitions"]
+        or metrics.get("optimizer_steps") != arithmetic["optimizer_steps"]
+    ):
+        raise AssertionError("Phase 6 final arithmetic gate failed")
+    tasks = _mapping(metrics.get("tasks"), "final.tasks")
+    if set(tasks) != set(_CURRENT_TASKS):
+        raise ValueError("Phase 6 final metrics do not cover exactly four tasks")
+    task_fractions: list[float] = []
+    benefits: list[Mapping[str, object]] = []
+    families: set[str] = set()
+    reward_shares: list[float] = []
+    semantic_shares: list[float] = []
+    for task, row_value in tasks.items():
+        row = _mapping(row_value, f"final.tasks.{task}")
+        fraction = _finite(
+            row.get("transition_fraction"), f"{task}.transition_fraction"
+        )
+        task_fractions.append(fraction)
+        if not math.isclose(
+            fraction,
+            float(final["task_transition_fraction"]),
+            rel_tol=0.0,
+            abs_tol=1.0e-12,
+        ):
+            raise AssertionError("Phase 6 task transition fraction is not exactly 0.25")
+        if (
+            _finite(row.get("nominal_retention"), f"{task}.nominal_retention")
+            < float(final["nominal_retention_min"])
+            or int(row.get("nominal_invalid", -1)) != int(final["nominal_invalid_max"])
+            or _finite(row.get("nominal_saturation"), f"{task}.nominal_saturation")
+            > float(final["nominal_saturation_max"])
+        ):
+            raise AssertionError(f"Phase 6 nominal gate failed for {task}")
+        if _finite(row.get("residual_mean_norm"), f"{task}.residual_mean_norm") < float(
+            final["residual_mean_norm_min"]
+        ) or _finite(
+            row.get("contact_bearing_residual_fraction"),
+            f"{task}.contact_bearing_residual_fraction",
+        ) < float(final["contact_bearing_residual_fraction_min"]):
+            raise AssertionError(f"Phase 6 residual gate failed for {task}")
+        reward_shares.append(
+            _finite(
+                row.get("normalized_reward_share"), f"{task}.normalized_reward_share"
+            )
+        )
+        semantic_shares.append(
+            _finite(row.get("semantic_total_share"), f"{task}.semantic_total_share")
+        )
+        benefit = row.get("benefit")
+        if isinstance(benefit, Mapping) and bool(benefit.get("passes")):
+            benefits.append(benefit)
+            families.add(str(benefit.get("mismatch_family")))
+    if max(reward_shares) > float(final["task_normalized_reward_share_max"]) or max(
+        semantic_shares
+    ) > float(final["task_semantic_total_share_max"]):
+        raise AssertionError("Phase 6 task dominance share gate failed")
+    if len(benefits) < int(final["benefit_task_count_min"]) or len(families) < int(
+        final["benefit_mismatch_family_count_min"]
+    ):
+        raise AssertionError(
+            "Phase 6 requires two tasks and two mismatch families with benefit"
+        )
+    for benefit in benefits:
+        success_delta = _finite(
+            benefit.get("success_delta", 0.0), "benefit.success_delta"
+        )
+        progress_delta = _finite(
+            benefit.get("progress_delta", 0.0), "benefit.progress_delta"
+        )
+        force_ratio = _finite(
+            benefit.get("force_p95_ratio", 1.0), "benefit.force_p95_ratio"
+        )
+        if not (success_delta >= 0.05 or progress_delta >= 0.05 or force_ratio <= 0.95):
+            raise AssertionError("Phase 6 residual benefit threshold failed")
+        if _finite(
+            benefit.get("stability_degradation", 1.0), "benefit.stability_degradation"
+        ) > float(final["stability_degradation_max"]):
+            raise AssertionError("Phase 6 stability nondominance gate failed")
+    return {
+        "c3": True,
+        "arithmetic": True,
+        "retention": True,
+        "nondominance": True,
+        "two_benefits": True,
+    }
