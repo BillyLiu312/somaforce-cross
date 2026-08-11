@@ -1929,15 +1929,24 @@ class JointCurriculum:
         return CurriculumDecision(self.stage, promoted, rolled_back, crossing)
 
     def evaluate_window(
-        self, *, crossing: int, task_metrics: Mapping[str, Mapping[str, object]]
+        self,
+        *,
+        crossing: int,
+        task_metrics: Mapping[str, Mapping[str, object]],
+        actual_transitions: int | None = None,
     ) -> CurriculumDecision:
         """Apply learning-acceptance eligibility, promotion, and adjacent rollback."""
         crossing = _positive_int(crossing, "crossing")
         if crossing % 250000 or crossing <= self.last_evaluation_transition:
             raise ValueError("learning evaluation crossing is invalid")
+        if actual_transitions is None:
+            actual_transitions = crossing
+        actual_transitions = _positive_int(actual_transitions, "actual_transitions")
+        if actual_transitions < crossing:
+            raise ValueError("curriculum actual transitions precede logical crossing")
         passed = _window_passes(self.stage, task_metrics)
         rollback = _window_rolls_back(self.stage, task_metrics)
-        self.transitions = crossing
+        self.transitions = actual_transitions
         self.last_evaluation_transition = crossing
         if not passed:
             self.passes = 0
@@ -2159,6 +2168,77 @@ def rank_rng_state() -> dict[str, object]:
         if torch.cuda.is_available()
         else [],
     }
+
+
+def validate_rank_rng_states(
+    rank_rng: Mapping[str, object], *, cuda_state_count: int = 4
+) -> None:
+    """Validate the exact four-rank RNG checkpoint boundary without restoring it."""
+    if cuda_state_count <= 0:
+        raise ValueError("CUDA RNG state count must be positive")
+    expected_ranks = {str(rank) for rank in range(4)}
+    if set(rank_rng) != expected_ranks:
+        raise ValueError("learning checkpoint must persist RNG state for ranks 0..3")
+    for rank in range(4):
+        state = _exact_keys(rank_rng[str(rank)], f"rank_rng.{rank}", {"cpu", "cuda"})
+        cpu = state["cpu"]
+        if (
+            not isinstance(cpu, torch.Tensor)
+            or cpu.dtype != torch.uint8
+            or cpu.ndim != 1
+            or cpu.numel() <= 0
+        ):
+            raise ValueError(f"rank_rng.{rank}.cpu must be a nonempty uint8 state")
+        cuda = state["cuda"]
+        if not isinstance(cuda, list) or len(cuda) != cuda_state_count:
+            raise ValueError(
+                f"rank_rng.{rank}.cuda must contain {cuda_state_count} device states"
+            )
+        for device_index, device_state in enumerate(cuda):
+            if (
+                not isinstance(device_state, torch.Tensor)
+                or device_state.dtype != torch.uint8
+                or device_state.ndim != 1
+                or device_state.numel() <= 0
+            ):
+                raise ValueError(
+                    f"rank_rng.{rank}.cuda[{device_index}] must be a nonempty uint8 state"
+                )
+
+
+def restore_rank_rng_state(
+    rank_rng: Mapping[str, object],
+    *,
+    rank: int,
+    local_device_index: int,
+    cuda_state_count: int = 4,
+) -> None:
+    """Restore one rank's CPU and local CUDA RNG before stochastic PPO work."""
+    if isinstance(rank, bool) or not isinstance(rank, int) or rank not in range(4):
+        raise ValueError("rank RNG restore requires a rank in 0..3")
+    if (
+        isinstance(local_device_index, bool)
+        or not isinstance(local_device_index, int)
+        or local_device_index < 0
+        or local_device_index >= cuda_state_count
+    ):
+        raise ValueError("rank RNG restore local CUDA device index is invalid")
+    validate_rank_rng_states(rank_rng, cuda_state_count=cuda_state_count)
+    state = _exact_keys(rank_rng[str(rank)], f"rank_rng.{rank}", {"cpu", "cuda"})
+    cpu_state = state["cpu"]
+    cuda_states = state["cuda"]
+    assert isinstance(cpu_state, torch.Tensor)
+    assert isinstance(cuda_states, list)
+    torch.set_rng_state(cpu_state.detach().cpu().contiguous())
+    if not torch.cuda.is_available() or torch.cuda.device_count() != cuda_state_count:
+        raise RuntimeError(
+            "rank RNG restore requires exactly the contracted CUDA devices"
+        )
+    cuda_state = cuda_states[local_device_index]
+    assert isinstance(cuda_state, torch.Tensor)
+    torch.cuda.set_rng_state(
+        cuda_state.detach().cpu().contiguous(), device=local_device_index
+    )
 
 
 def _checkpoint_contracts(
@@ -2401,8 +2481,7 @@ def learning_checkpoint_payload(
         raise ValueError(
             "learning checkpoint task transitions are not exactly balanced"
         )
-    if set(rank_rng) != {str(index) for index in range(4)}:
-        raise ValueError("learning checkpoint must persist four rank RNG states")
+    validate_rank_rng_states(rank_rng)
     source_manifest = _exact_keys(
         source_manifest, "learning checkpoint.source_manifest", set(source_manifest)
     )
@@ -2454,6 +2533,11 @@ def atomic_learning_checkpoint(
 ) -> str:
     if payload.get("checkpoint_version") != PHASE6_LEARNING_CHECKPOINT_VERSION:
         raise ValueError("only phase6_learning_checkpoint_v1 may be written")
+    target = Path(path)
+    if target.exists():
+        raise FileExistsError(f"learning checkpoint already exists: {target}")
+    if latest_path is not None and Path(latest_path).exists():
+        raise FileExistsError(f"learning latest pointer already exists: {latest_path}")
     digest = atomic_torch_save(path, payload)
     if latest_path is not None and not payload.get("pre_evaluation", True):
         latest = Path(latest_path)
@@ -2530,6 +2614,7 @@ def restore_learning_checkpoint(
     }
     if value["task_transitions"] != expected_tasks:
         raise ValueError("learning checkpoint task balance mismatch")
+    validate_rank_rng_states(value["rank_rng"])
     if expected_next_crossing is not None and value["next_crossing"] != dict(
         expected_next_crossing
     ):

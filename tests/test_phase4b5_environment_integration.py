@@ -183,6 +183,22 @@ def test_evaluation_exhausted_row_records_final_episode_before_parking() -> None
     assert "& ~self._evaluation_parked[env_ids]" in record
 
 
+def test_evaluation_completion_records_preserve_business_fields() -> None:
+    record = _method_source("_record_completed_episodes")
+    for field in (
+        '"task": self.task_spec.task',
+        '"mode": self._evaluation_mode',
+        '"stage": self._episode_stage[env_id]',
+        '"subset": self._evaluation_subset[env_id]',
+        '"family": self._episode_family[env_id]',
+        '"invalid": outcome["episode_invalid"]',
+        '"raw_reward_sums": {',
+        '"weighted_reward_sums": {',
+        '"diagnostics": {',
+    ):
+        assert field in record
+
+
 def test_evaluation_schedule_rejects_seed_nominal_and_exhaustion_mutations() -> None:
     bind = _method_source("bind_evaluation_schedule")
     probe = _method_source("evaluation_nominal_probe")

@@ -5,6 +5,9 @@ import copy
 import inspect
 import json
 import hashlib
+import os
+import subprocess
+import sys
 from argparse import Namespace
 from pathlib import Path
 
@@ -13,6 +16,7 @@ import torch
 import torch.distributed as distributed
 import torch.multiprocessing as multiprocessing
 
+import scripts.train_phase6 as train_phase6
 from scripts.train_phase6 import (
     HARNESS_REBIND_FUNCTIONS,
     PAIREDBATCH_ENV_SNAPSHOT_SHA256,
@@ -26,14 +30,15 @@ from scripts.train_phase6 import (
     _ast_function_dumps,
     _aggregate_evaluation_progress,
     _aggregate_modeprocess_progress,
-    _current_pairedbatch_source_manifest,
+    _current_mainrunner_source_manifest,
     _evaluation_devicefix_ast_proof,
     _evaluation_devicefix_invariants,
     _episodeorder_ast_proof_for_sources,
+    _mainrunner_ast_source_proof,
     _merge_modeprocess_evaluation,
     _modeprocess_ast_proof,
     _module_ast_sha256,
-    _pairedbatch_ast_proof,
+    _pairedbatch_ast_proof_for_sources,
     _pairedbatch_source_manifest_for_sources,
     _validate_rankseed_failed_smoke_manifest,
     _validate_episodeorder_failed_smoke_manifest,
@@ -92,6 +97,7 @@ from somaforce_cross.learning.joint_runner import (
     validate_paired_evaluation_schedule,
     validate_phase6_joint_metrics,
     validate_phase6_config,
+    validate_rank_rng_states,
 )
 from somaforce_cross.learning.semantic_ppo import SemanticPPO
 
@@ -398,7 +404,13 @@ def test_joint_checkpoint_restore_rejects_repeated_or_skipped_window(
         slot_transitions=64,
         task_transitions={task.task: 64 for task in roster.tasks},
         curriculum=curriculum,
-        rank_rng={str(rank): {"cpu": torch.arange(2)} for rank in range(4)},
+        rank_rng={
+            str(rank): {
+                "cpu": torch.arange(2, dtype=torch.uint8),
+                "cuda": [torch.arange(2, dtype=torch.uint8) for _ in range(4)],
+            }
+            for rank in range(4)
+        },
         metrics=_joint_metrics(config, roster),
         hashes={"policy": policy_hash, "optimizer": optimizer_hash, "step": 0},
     )
@@ -633,6 +645,7 @@ def test_wrapper_requires_result_order_exit_zero_and_env_closed_last_marker(
             "result_status": "ok",
             "signal": None,
             "timed_out": False,
+            "timeout_kind": None,
             "vmhwm_kib": 1,
             "warning_counts": {
                 "headless_glfw": 0,
@@ -652,6 +665,30 @@ def test_wrapper_requires_result_order_exit_zero_and_env_closed_last_marker(
     assert summary["status"] == "ok"
     assert len(summary["rank_results"]) == len(summary["wrapper_summaries"]) == 4
     rank_dir = tmp_path / "rank_3"
+    valid_wrapper = json.loads((rank_dir / "wrapper.json").read_text(encoding="utf-8"))
+    for timeout_kind in ("wall_clock", "progress_stall"):
+        invalid_wrapper = copy.deepcopy(valid_wrapper)
+        invalid_wrapper["timeout_kind"] = timeout_kind
+        (rank_dir / "wrapper.json").write_text(
+            json.dumps(invalid_wrapper), encoding="utf-8"
+        )
+        with pytest.raises(ValueError, match="rank wrapper close evidence"):
+            summarize_phase6_run(args)
+    missing_timeout_kind = copy.deepcopy(valid_wrapper)
+    del missing_timeout_kind["timeout_kind"]
+    (rank_dir / "wrapper.json").write_text(
+        json.dumps(missing_timeout_kind), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="unknown or missing schema keys"):
+        summarize_phase6_run(args)
+    unknown_wrapper_key = copy.deepcopy(valid_wrapper)
+    unknown_wrapper_key["unknown"] = True
+    (rank_dir / "wrapper.json").write_text(
+        json.dumps(unknown_wrapper_key), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="unknown or missing schema keys"):
+        summarize_phase6_run(args)
+    (rank_dir / "wrapper.json").write_text(json.dumps(valid_wrapper), encoding="utf-8")
     (rank_dir / "worker.log").write_text(
         "Multiple Installable Client Drivers\n", encoding="utf-8"
     )
@@ -793,6 +830,893 @@ def test_learning_segment_plan_hits_each_crossing_once() -> None:
         and current.start_transitions == previous.end_transitions
         for previous, current in zip(main, main[1:])
     )
+    for actual, expected in (
+        (
+            253952,
+            {
+                "logical_transitions": 250000,
+                "target_iteration": 31,
+                "actual_transitions": 253952,
+            },
+        ),
+        (
+            507904,
+            {
+                "logical_transitions": 500000,
+                "target_iteration": 62,
+                "actual_transitions": 507904,
+            },
+        ),
+        (
+            753664,
+            {
+                "logical_transitions": 750000,
+                "target_iteration": 92,
+                "actual_transitions": 753664,
+            },
+        ),
+        (
+            20004864,
+            {
+                "logical_transitions": 20000000,
+                "target_iteration": 2442,
+                "actual_transitions": 20004864,
+            },
+        ),
+    ):
+        assert train_phase6._current_evaluation_crossing(actual) == expected
+    assert (
+        train_phase6._current_evaluation_crossing(507904)["logical_transitions"]
+        != 750000
+    )
+    for segment in main:
+        assert train_phase6._current_evaluation_crossing(segment.end_transitions) == {
+            "logical_transitions": segment.crossing.logical_transitions,
+            "target_iteration": segment.crossing.target_iteration,
+            "actual_transitions": segment.crossing.actual_transitions,
+        }
+    for invalid in (0, True, "507904", 507903, 507905):
+        with pytest.raises(ValueError, match="evaluation crossing"):
+            train_phase6._current_evaluation_crossing(invalid)  # type: ignore[arg-type]
+    worker_source = inspect.getsource(train_phase6._worker_main)
+    assert "_current_evaluation_crossing(global_transitions)" in worker_source
+    assert "((global_transitions // 250000) + 1) * 250000" not in worker_source
+
+
+def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _current_mainrunner_source_manifest()
+    assert len(manifest) == 7
+    assert set(manifest) == {
+        str(Path(path).resolve())
+        for path in (
+            "configs/phase6_learning_acceptance_v1.json",
+            "configs/phase6_joint_training_v1.json",
+            "configs/phase6_task_roster_v1.json",
+            "somaforce_cross/learning/acceptance.py",
+            "somaforce_cross/learning/joint_runner.py",
+            "scripts/train_phase6.py",
+            "somaforce_cross/envs/residual_env.py",
+        )
+    }
+    live_sources = {
+        "train_phase6": Path("scripts/train_phase6.py").resolve(),
+        "joint_runner": Path("somaforce_cross/learning/joint_runner.py").resolve(),
+        "residual_env": Path("somaforce_cross/envs/residual_env.py").resolve(),
+    }
+    for path in live_sources.values():
+        assert manifest[str(path)] == hashlib.sha256(path.read_bytes()).hexdigest()
+    recovery = Path(
+        "outputs/phase6_learning_acceptance/"
+        "phase6-learning-pilot-4gpu-64env-31iter-20260806_042940/"
+        "segment_0000/recovery"
+    )
+    snapshot_dir = recovery / "source_snapshot"
+    proof = _mainrunner_ast_source_proof(snapshot_dir)
+    expected_snapshots = {
+        "train_phase6_pre_mainrunner.py": (
+            "3db545b1cf8e3436e658151b29b91679e09056bf8bd9e981f58589f36650c2dc"
+        ),
+        "joint_runner_pre_mainrunner.py": (
+            "4cf86dda401494a0793351ce99de775872d52d91647184f0a5a30702e7b16d2c"
+        ),
+        "residual_env_pre_mainrunner.py": (
+            "86aa99b303290a3b746af65936baf93b93fcb00ae99ce6632721df997185293f"
+        ),
+    }
+    assert {
+        Path(value["path"]).name: value["sha256"]
+        for value in proof["snapshots"].values()
+    } == expected_snapshots
+    assert {name: value["path"] for name, value in proof["current"].items()} == {
+        name: str(path) for name, path in live_sources.items()
+    }
+    copied_snapshot_dir = tmp_path / "source_snapshot"
+    copied_snapshot_dir.mkdir()
+    for name in expected_snapshots:
+        (copied_snapshot_dir / name).write_bytes((snapshot_dir / name).read_bytes())
+    (copied_snapshot_dir / "train_phase6_pre_mainrunner.py").write_bytes(b"broken")
+    with pytest.raises(ValueError, match="frozen snapshot differs"):
+        _mainrunner_ast_source_proof(copied_snapshot_dir)
+    (copied_snapshot_dir / "train_phase6_pre_mainrunner.py").write_bytes(
+        (snapshot_dir / "joint_runner_pre_mainrunner.py").read_bytes()
+    )
+    with pytest.raises(ValueError, match="frozen snapshot differs"):
+        _mainrunner_ast_source_proof(copied_snapshot_dir)
+    states = {
+        str(rank): {
+            "cpu": torch.arange(4, dtype=torch.uint8),
+            "cuda": [torch.arange(4, dtype=torch.uint8) for _ in range(4)],
+        }
+        for rank in range(4)
+    }
+    validate_rank_rng_states(states)
+    states["3"] = {"cpu": torch.arange(4, dtype=torch.uint8), "cuda": []}
+    with pytest.raises(ValueError, match="device states"):
+        validate_rank_rng_states(states)
+    source = Path("scripts/train_phase6.py").read_text(encoding="utf-8")
+    assert '"--source-rebind"' in inspect.getsource(_run_production)
+    assert '"--max-segments"' in source
+    assert "restore_rank_rng_state(" in source
+    production_source = inspect.getsource(_run_production)
+    assert production_source.index("_validate_mainrunner_completed_segments(") < (
+        production_source.index("_update_mainrunner_progress(")
+    )
+    assert "_validate_mainrunner_completed_train(" in source
+    assert "_merge_mainrunner_evaluation(" in source
+    assert "_validate_mainrunner_stage_evidence(" in source
+    worker_source = inspect.getsource(train_phase6._worker_main)
+    assert "transition_offset=previous_task_transitions[task.task]" in worker_source
+    assert "_canonical_task_metrics(task_metrics, roster=roster)" in worker_source
+    wrapper_source = inspect.getsource(train_phase6._run_rank_wrapper)
+    assert wrapper_source.count("_aggregate_rank_wrapper_progress(") == 2
+
+    segment = plan_learning_segments(total_iterations=2442)[1]
+    resume_checkpoint = tmp_path / "resume.pt"
+    source_rebind = tmp_path / "source_rebind_mainrunner.json"
+
+    def outer_command(*, worker_mode: str, paired_mode: str | None = None) -> list[str]:
+        start = (
+            segment.start_iteration
+            if worker_mode == "train-segment"
+            else segment.end_iteration
+        )
+        end = segment.end_iteration if worker_mode == "train-segment" else start + 1
+        command = [
+            str(train_phase6.ISAAC_PYTHON),
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            "--nnodes=1",
+            "--nproc_per_node=4",
+            str(Path("scripts/train_phase6.py").resolve()),
+            "--mode",
+            "rank-wrapper",
+            "--worker-mode",
+            worker_mode,
+            "--output-dir",
+            str(tmp_path / worker_mode / str(paired_mode)),
+            "--profile",
+            "production_segment",
+            "--timeout-s",
+            "1",
+            "--segment-start",
+            str(start),
+            "--segment-end",
+            str(end),
+            "--resume",
+            str(resume_checkpoint),
+            "--source-rebind",
+            str(source_rebind),
+            "--acceptance-config",
+            str(PHASE6_LEARNING_CONFIG),
+            "--phase6-config",
+            str(PHASE6_CONFIG),
+            "--roster",
+            str(PHASE6_ROSTER),
+        ]
+        if paired_mode is not None:
+            command.extend(("--paired-mode", paired_mode))
+        return command
+
+    outer_train = outer_command(worker_mode="train-segment")
+    train_output = Path(
+        train_phase6._mainrunner_command_argument(outer_train, "--output-dir")
+    )
+    train_phase6._validate_mainrunner_worker_stage_command(
+        outer_train,
+        worker_mode="train-segment",
+        output_dir=train_output,
+        segment=segment,
+        resume_checkpoint=resume_checkpoint,
+        source_rebind=source_rebind,
+    )
+    for paired_mode in ("residual", "scaffold_only"):
+        outer_evaluation = outer_command(
+            worker_mode="evaluate", paired_mode=paired_mode
+        )
+        evaluation_output = Path(
+            train_phase6._mainrunner_command_argument(outer_evaluation, "--output-dir")
+        )
+        train_phase6._validate_mainrunner_worker_stage_command(
+            outer_evaluation,
+            worker_mode="evaluate",
+            output_dir=evaluation_output,
+            segment=segment,
+            resume_checkpoint=resume_checkpoint,
+            source_rebind=source_rebind,
+            paired_mode=paired_mode,
+        )
+    for argument, value in (
+        ("--headless", None),
+        ("--worker-mode", "evaluate"),
+        ("--segment-end", "63"),
+        ("--resume", str(tmp_path / "wrong_resume.pt")),
+        ("--source-rebind", str(tmp_path / "wrong_source_rebind.json")),
+    ):
+        invalid_outer = [*outer_train]
+        if value is None:
+            invalid_outer.append(argument)
+        else:
+            invalid_outer[invalid_outer.index(argument) + 1] = value
+        with pytest.raises(ValueError):
+            train_phase6._validate_mainrunner_worker_stage_command(
+                invalid_outer,
+                worker_mode="train-segment",
+                output_dir=train_output,
+                segment=segment,
+                resume_checkpoint=resume_checkpoint,
+                source_rebind=source_rebind,
+            )
+    invalid_paired = outer_command(worker_mode="evaluate", paired_mode="residual")
+    invalid_paired[invalid_paired.index("--paired-mode") + 1] = "scaffold_only"
+    with pytest.raises(ValueError):
+        train_phase6._validate_mainrunner_worker_stage_command(
+            invalid_paired,
+            worker_mode="evaluate",
+            output_dir=Path(
+                train_phase6._mainrunner_command_argument(
+                    invalid_paired, "--output-dir"
+                )
+            ),
+            segment=segment,
+            resume_checkpoint=resume_checkpoint,
+            source_rebind=source_rebind,
+            paired_mode="residual",
+        )
+    inner_args = Namespace(
+        acceptance_config=PHASE6_LEARNING_CONFIG,
+        cycle_index=segment.segment_index,
+        evaluation_seed=20262806,
+        output_dir=tmp_path / "inner",
+        paired_mode="residual",
+        paired_nominal_quota=128,
+        paired_num_envs=None,
+        paired_stage_quota=256,
+        phase6_config=PHASE6_CONFIG,
+        profile="production_segment",
+        progress_stall_timeout_s=1,
+        resume=resume_checkpoint,
+        roster=PHASE6_ROSTER,
+        segment_end=segment.end_iteration,
+        segment_start=segment.start_iteration,
+        source_rebind=source_rebind,
+        stage="C1",
+        timeout_s=2,
+        window_index=0,
+        worker_mode="train-segment",
+    )
+    inner = train_phase6._worker_command(inner_args)
+    assert "--headless" in inner
+    train_phase6._validate_production_command(
+        {"command": inner, "local_rank": 0, "rank": 0, "world_size": 4},
+        rank=0,
+        output_dir=tmp_path / "inner",
+        worker_mode="train-segment",
+        iteration=segment.end_iteration,
+    )
+    inner_evaluation_args = copy.copy(inner_args)
+    inner_evaluation_args.worker_mode = "evaluate"
+    inner_evaluation_args.output_dir = tmp_path / "inner_evaluation"
+    inner_evaluation_args.segment_start = segment.end_iteration
+    inner_evaluation_args.segment_end = segment.end_iteration + 1
+    assert "--headless" in train_phase6._worker_command(inner_evaluation_args)
+    inner_without_headless = [value for value in inner if value != "--headless"]
+    with pytest.raises(ValueError, match="production rank command"):
+        train_phase6._validate_production_command(
+            {
+                "command": inner_without_headless,
+                "local_rank": 0,
+                "rank": 0,
+                "world_size": 4,
+            },
+            rank=0,
+            output_dir=tmp_path / "inner",
+            worker_mode="train-segment",
+            iteration=segment.end_iteration,
+        )
+    aggregate_calls: list[tuple[str, Path, int]] = []
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            train_phase6,
+            "_aggregate_evaluation_progress",
+            lambda output_dir, world_size: aggregate_calls.append(
+                ("evaluation", output_dir, world_size)
+            ),
+        )
+        patched.setattr(
+            train_phase6,
+            "_aggregate_modeprocess_progress",
+            lambda output_dir, world_size: aggregate_calls.append(
+                ("modeprocess", output_dir, world_size)
+            ),
+        )
+        train_phase6._aggregate_rank_wrapper_progress(
+            Namespace(
+                output_dir=tmp_path / "train",
+                paired_mode=None,
+                worker_mode="train-segment",
+            ),
+            rank=0,
+            world_size=4,
+        )
+        assert aggregate_calls == []
+        train_phase6._aggregate_rank_wrapper_progress(
+            Namespace(
+                output_dir=tmp_path / "evaluation",
+                paired_mode=None,
+                worker_mode="evaluate",
+            ),
+            rank=0,
+            world_size=4,
+        )
+        assert aggregate_calls == [("evaluation", tmp_path / "evaluation", 4)]
+        aggregate_calls.clear()
+        train_phase6._aggregate_rank_wrapper_progress(
+            Namespace(
+                output_dir=tmp_path / "evaluation" / "residual",
+                paired_mode="residual",
+                worker_mode="evaluate",
+            ),
+            rank=0,
+            world_size=4,
+        )
+        assert aggregate_calls == [
+            ("evaluation", tmp_path / "evaluation" / "residual", 4),
+            ("modeprocess", tmp_path / "evaluation", 4),
+        ]
+
+    direct_attempt = tmp_path / "direct_mainrunner_attempt"
+    direct_environment = os.environ.copy()
+    direct_environment.pop("PYTHONPATH", None)
+    direct_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    direct_entrypoint = subprocess.run(
+        [
+            sys.executable,
+            str(Path("scripts/train_phase6.py").resolve()),
+            "--mode",
+            "mainrunner-rebind",
+            "--input-checkpoint",
+            str(tmp_path / "missing_input.pt"),
+            "--input-source-record",
+            str(tmp_path / "missing_source_record.json"),
+            "--attempt-dir",
+            str(direct_attempt),
+        ],
+        capture_output=True,
+        cwd=tmp_path,
+        env=direct_environment,
+        text=True,
+    )
+    assert direct_entrypoint.returncode != 0
+    assert "mainrunner input checkpoint checksum mismatch" in direct_entrypoint.stderr
+    assert "ModuleNotFoundError" not in direct_entrypoint.stderr
+    assert not direct_attempt.exists()
+
+    config, roster = _roster()
+    acceptance = load_learning_acceptance_config()
+    metric_schema = config.payload["metrics"]
+
+    class MetricCollector:
+        def __init__(self, transitions: int) -> None:
+            self.transitions = transitions
+
+        def transition_metrics(self) -> dict[str, float]:
+            return {
+                name: 1.0
+                for name in metric_schema["transition_metric_names"]
+                if name != "reward" and name not in metric_schema["ppo_metric_names"]
+            }
+
+        def raw_samples(self) -> dict[str, object]:
+            return {}
+
+        def p_cross_trace(self) -> list[list[list[float]]]:
+            return _uniform_p_cross_trace()
+
+    def local_run(transition_count: int) -> dict[str, object]:
+        return {
+            "iteration_records": [
+                {
+                    "mean_reward": 1.0,
+                    "update": {name: 1.0 for name in metric_schema["ppo_metric_names"]},
+                }
+            ],
+            "transition_count": transition_count,
+        }
+
+    segment_delta = 31 * 64 * 32
+    fresh = train_phase6._local_metrics(
+        task="push_door_hand",
+        run=local_run(segment_delta),
+        transition_offset=0,
+        collector=MetricCollector(segment_delta),
+        episode_snapshot=(),
+        metric_schema=metric_schema,
+    )
+    assert fresh["record"]["task_transitions"] == segment_delta
+    resumed = train_phase6._local_metrics(
+        task="push_door_hand",
+        run=local_run(segment_delta * 2),
+        transition_offset=segment_delta,
+        collector=MetricCollector(segment_delta),
+        episode_snapshot=(),
+        metric_schema=metric_schema,
+    )
+    assert resumed["record"]["task_transitions"] == segment_delta
+    for incorrect_count in (segment_delta, segment_delta * 3):
+        with pytest.raises(ValueError, match="runner transition count"):
+            train_phase6._local_metrics(
+                task="push_door_hand",
+                run=local_run(incorrect_count),
+                transition_offset=segment_delta,
+                collector=MetricCollector(segment_delta),
+                episode_snapshot=(),
+                metric_schema=metric_schema,
+            )
+    for invalid_offset in (True, -1, "63488"):
+        with pytest.raises(ValueError, match="transition offset"):
+            train_phase6._local_metrics(
+                task="push_door_hand",
+                run=local_run(segment_delta),
+                transition_offset=invalid_offset,
+                collector=MetricCollector(segment_delta),
+                episode_snapshot=(),
+                metric_schema=metric_schema,
+            )
+
+    def production_metrics(per_task_transitions: int) -> dict[str, object]:
+        records = {
+            task.task: {
+                "episode_count": 0,
+                "episode_metrics": {
+                    name: None for name in metric_schema["episode_metric_names"]
+                },
+                "p_cross_trace": _uniform_p_cross_trace(),
+                "task_transitions": per_task_transitions,
+                "transition_metrics": {
+                    name: 1.0 for name in metric_schema["transition_metric_names"]
+                },
+            }
+            for task in roster.tasks
+        }
+        metrics = {
+            "pooled": pooled_macro_metrics(records)["pooled"],
+            "task_records": records,
+        }
+        validate_phase6_joint_metrics(
+            metrics,
+            config=config,
+            roster=roster,
+            expected_global_transitions=per_task_transitions * 4,
+        )
+        return metrics
+
+    def production_result(
+        *,
+        end_iteration: int,
+        local_transitions: int,
+        per_task_transitions: int,
+        cycle_index: int,
+        rank: int,
+    ) -> dict[str, object]:
+        global_transitions = end_iteration * 8192
+        slot = JointTaskScheduler(task_count=4, world_size=4).assignment(
+            cycle_index=cycle_index,
+            window_index=0,
+            rank=rank,
+        )
+        return {
+            "checkpoint": {"path": "/tmp/pre_evaluation.pt", "sha256": "a" * 64},
+            "contracts": {
+                "phase6_canonical_sha256": config.canonical_sha256,
+                "phase6_raw_sha256": config.raw_sha256,
+                "roster_canonical_sha256": roster.canonical_sha256,
+                "roster_raw_sha256": roster.raw_sha256,
+            },
+            "curriculum": JointCurriculum(transitions=global_transitions).state_dict(),
+            "global_transitions": global_transitions,
+            "local_transitions": local_transitions,
+            "metrics": production_metrics(per_task_transitions),
+            "optimizer_sha256": "b" * 64,
+            "optimizer_step": end_iteration * 24,
+            "per_task_transitions": {
+                task.task: per_task_transitions for task in roster.tasks
+            },
+            "policy_sha256": "c" * 64,
+            "profile": "production_segment",
+            "rank": rank,
+            "schedule": {
+                "cycle_index": cycle_index,
+                "task": roster.tasks[slot.task_index].task,
+                "task_index": slot.task_index,
+                "window_index": 0,
+            },
+            "status": "ok",
+            "task_fraction": {task.task: 0.25 for task in roster.tasks},
+        }
+
+    segment_delta = 31 * 64 * 32
+    fresh_results = [
+        production_result(
+            end_iteration=31,
+            local_transitions=segment_delta,
+            per_task_transitions=segment_delta,
+            cycle_index=0,
+            rank=rank,
+        )
+        for rank in range(4)
+    ]
+    resumed_results = [
+        production_result(
+            end_iteration=62,
+            local_transitions=segment_delta,
+            per_task_transitions=segment_delta * 2,
+            cycle_index=1,
+            rank=rank,
+        )
+        for rank in range(4)
+    ]
+    for result_set, end_iteration, per_task, local, cycle in (
+        (fresh_results, 31, segment_delta, segment_delta, 0),
+        (resumed_results, 62, segment_delta * 2, segment_delta, 1),
+    ):
+        for rank, result in enumerate(result_set):
+            record = train_phase6._validate_production_train_result(
+                result,
+                rank=rank,
+                config=config,
+                roster=roster,
+                expected_global=end_iteration * 8192,
+                expected_per_task=per_task,
+                expected_local_transitions=local,
+                expected_cycle_index=cycle,
+                expected_window_index=0,
+            )
+            assert "task" not in record
+            assert record["schedule"]["task"] == roster.tasks[(rank + cycle) % 4].task
+
+    for wrong_local in (segment_delta * 2, segment_delta * 3):
+        with pytest.raises(ValueError, match="production rank result accounting"):
+            train_phase6._validate_production_train_result(
+                resumed_results[0],
+                rank=0,
+                config=config,
+                roster=roster,
+                expected_global=507904,
+                expected_per_task=126976,
+                expected_local_transitions=wrong_local,
+                expected_cycle_index=1,
+                expected_window_index=0,
+            )
+    wrong_cumulative = copy.deepcopy(resumed_results[0])
+    wrong_cumulative["per_task_transitions"] = {
+        task.task: segment_delta for task in roster.tasks
+    }
+    with pytest.raises(ValueError, match="production rank result accounting"):
+        train_phase6._validate_production_train_result(
+            wrong_cumulative,
+            rank=0,
+            config=config,
+            roster=roster,
+            expected_global=507904,
+            expected_per_task=126976,
+            expected_local_transitions=segment_delta,
+            expected_cycle_index=1,
+            expected_window_index=0,
+        )
+    for field, value in (
+        ("cycle_index", 0),
+        ("window_index", 1),
+        ("task_index", 0),
+        ("task", "push_door_hand"),
+    ):
+        mutated = copy.deepcopy(resumed_results[0])
+        mutated["schedule"][field] = value
+        with pytest.raises(ValueError, match="production rank result task assignment"):
+            train_phase6._validate_production_train_result(
+                mutated,
+                rank=0,
+                config=config,
+                roster=roster,
+                expected_global=507904,
+                expected_per_task=126976,
+                expected_local_transitions=segment_delta,
+                expected_cycle_index=1,
+                expected_window_index=0,
+            )
+    summary_source = inspect.getsource(train_phase6._run_production_summary)
+    assert 'task = result["task"]' in summary_source
+    assert 'task = record["schedule"]["task"]' in summary_source
+    assert 'task = result.get("task")' not in summary_source
+
+    def ordered_metric_record(reward: float) -> dict[str, object]:
+        transition_metrics = {
+            name: 1.0 for name in metric_schema["transition_metric_names"]
+        }
+        transition_metrics["reward"] = reward
+        return {
+            "episode_count": 0,
+            "episode_metrics": {
+                name: None for name in metric_schema["episode_metric_names"]
+            },
+            "p_cross_trace": _uniform_p_cross_trace(),
+            "task_transitions": segment_delta * 2,
+            "transition_metrics": transition_metrics,
+        }
+
+    rank_order = (
+        "push_box",
+        "move_suitcase",
+        "move_largebox",
+        "push_door_hand",
+    )
+    rewards = dict(zip(rank_order, (1.0e16, 1.0, -1.0e16, 1.0), strict=True))
+    rank_order_records = {
+        task: ordered_metric_record(rewards[task]) for task in rank_order
+    }
+    records_before = copy.deepcopy(rank_order_records)
+    rank_pooled = pooled_macro_metrics(rank_order_records)["pooled"]
+    assert rank_pooled["transition_mean"]["reward"] == 0.25
+    canonical_records = train_phase6._canonical_task_metrics(
+        rank_order_records, roster=roster
+    )
+    expected_order = tuple(task.task for task in roster.tasks)
+    assert tuple(canonical_records) == expected_order
+    assert rank_order_records == records_before
+    for task in expected_order:
+        assert canonical_records[task] is rank_order_records[task]
+        assert canonical_records[task] == records_before[task]
+    canonical_pooled = pooled_macro_metrics(canonical_records)["pooled"]
+    assert canonical_pooled["transition_mean"]["reward"] == 0.0
+    validate_phase6_joint_metrics(
+        {"pooled": canonical_pooled, "task_records": canonical_records},
+        config=config,
+        roster=roster,
+        expected_global_transitions=segment_delta * 2 * len(roster.tasks),
+    )
+    reversed_records = {
+        task: ordered_metric_record(rewards[task]) for task in reversed(rank_order)
+    }
+    canonical_reversed = train_phase6._canonical_task_metrics(
+        reversed_records, roster=roster
+    )
+    assert tuple(canonical_reversed) == expected_order
+    assert pooled_macro_metrics(canonical_reversed)["pooled"] == canonical_pooled
+    missing_records = dict(rank_order_records)
+    missing_records.pop("push_box")
+    with pytest.raises(ValueError, match="keys do not match"):
+        train_phase6._canonical_task_metrics(missing_records, roster=roster)
+    extra_records = {**rank_order_records, "unknown": ordered_metric_record(1.0)}
+    with pytest.raises(ValueError, match="keys do not match"):
+        train_phase6._canonical_task_metrics(extra_records, roster=roster)
+    duplicate_roster = Namespace(tasks=(roster.tasks[0], roster.tasks[0]))
+    with pytest.raises(ValueError, match="duplicate"):
+        train_phase6._canonical_task_metrics(
+            rank_order_records, roster=duplicate_roster
+        )
+    bootstrap = tmp_path / "post_evaluation_mainrunner_rebound.pt"
+    bootstrap.write_bytes(b"bootstrap")
+
+    def fake_rebind(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"checkpoint": {"output_path": str(bootstrap)}}
+
+    def latest(segment: object) -> dict[str, object]:
+        index = int(getattr(segment, "segment_index"))
+        return {
+            "actual_global_transitions": int(getattr(segment, "end_transitions")),
+            "checkpoint": str(tmp_path / f"post_{index}.pt"),
+            "checkpoint_sha256": f"{index:064x}",
+            "curriculum_stage": "C1",
+            "iteration": int(getattr(segment, "end_iteration")),
+            "logical_crossing": int(getattr(segment, "crossing").logical_transitions),
+            "segment": index,
+            "source_manifest_sha256": "a" * 64,
+        }
+
+    with monkeypatch.context() as patched:
+        patched.setattr(train_phase6, "_validate_mainrunner_rebind_record", fake_rebind)
+        patched.setattr(
+            train_phase6,
+            "_validate_mainrunner_completed_segment",
+            lambda *, segment, **_kwargs: latest(segment),
+        )
+        closed = tmp_path / "closed"
+        (closed / "segment_0001").mkdir(parents=True)
+        (closed / "latest.json").write_text(
+            json.dumps(latest(plan_learning_segments(total_iterations=2442)[1])),
+            encoding="utf-8",
+        )
+        train_phase6._validate_mainrunner_completed_segments(
+            closed,
+            current_iteration=62,
+            target_iteration=2442,
+            source_rebind=tmp_path / "source_rebind_mainrunner.json",
+            config=config,
+            roster=roster,
+            acceptance=acceptance,
+        )
+
+        broken_history = tmp_path / "broken_history"
+        (broken_history / "segment_0001").mkdir(parents=True)
+        (broken_history / "segment_0002").mkdir(parents=True)
+        (broken_history / "latest.json").write_text(
+            json.dumps(latest(plan_learning_segments(total_iterations=2442)[2])),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="latest history"):
+            train_phase6._validate_mainrunner_completed_segments(
+                broken_history,
+                current_iteration=92,
+                target_iteration=2442,
+                source_rebind=tmp_path / "source_rebind_mainrunner.json",
+                config=config,
+                roster=roster,
+                acceptance=acceptance,
+            )
+
+    with monkeypatch.context() as patched:
+        patched.setattr(train_phase6, "_validate_mainrunner_rebind_record", fake_rebind)
+        missing_checkpoint = tmp_path / "missing_checkpoint"
+        (missing_checkpoint / "segment_0001").mkdir(parents=True)
+        with pytest.raises(FileNotFoundError, match="train checkpoint"):
+            train_phase6._validate_mainrunner_completed_segments(
+                missing_checkpoint,
+                current_iteration=62,
+                target_iteration=2442,
+                source_rebind=tmp_path / "source_rebind_mainrunner.json",
+                config=config,
+                roster=roster,
+                acceptance=acceptance,
+            )
+        illegal_bootstrap = tmp_path / "illegal_bootstrap"
+        (illegal_bootstrap / "segment_0000").mkdir(parents=True)
+        with pytest.raises(ValueError, match="bootstrap"):
+            train_phase6._validate_mainrunner_completed_segments(
+                illegal_bootstrap,
+                current_iteration=31,
+                target_iteration=2442,
+                source_rebind=tmp_path / "source_rebind_mainrunner.json",
+                config=config,
+                roster=roster,
+                acceptance=acceptance,
+            )
+
+    stage_log = tmp_path / "finalize.log"
+    stage_log.write_text("ok\n", encoding="utf-8")
+    stage_log.with_suffix(".command.json").write_text(
+        json.dumps({"command": [], "stage": "finalize-checkpoint", "timeout_s": 1}),
+        encoding="utf-8",
+    )
+    stage_status = {
+        "elapsed_s": 1.0,
+        "exit_code": 0,
+        "signal": None,
+        "stage": "finalize-checkpoint",
+        "timeout": False,
+        "vmhwm_kib": 1,
+    }
+    stage_log.with_suffix(".status.json").write_text(
+        json.dumps(stage_status), encoding="utf-8"
+    )
+    assert (
+        train_phase6._validate_mainrunner_stage_evidence(
+            stage_log, stage="finalize-checkpoint"
+        )
+        == []
+    )
+    stage_status["exit_code"] = 1
+    stage_log.with_suffix(".status.json").write_text(
+        json.dumps(stage_status), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="stage evidence"):
+        train_phase6._validate_mainrunner_stage_evidence(
+            stage_log, stage="finalize-checkpoint"
+        )
+
+    segment = plan_learning_segments(total_iterations=2442)[1]
+    evaluation_dir = tmp_path / "evaluation"
+    (evaluation_dir / "residual").mkdir(parents=True)
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            train_phase6,
+            "_validate_mainrunner_stage_evidence",
+            lambda *_args, **_kwargs: [],
+        )
+        patched.setattr(
+            train_phase6,
+            "_validate_mainrunner_worker_stage_command",
+            lambda *_args, **_kwargs: None,
+        )
+        with pytest.raises(FileNotFoundError, match="scaffold_only"):
+            train_phase6._validate_mainrunner_completed_evaluation(
+                segment_dir=tmp_path,
+                segment=segment,
+                pre_checkpoint=bootstrap,
+                stage="C1",
+                source_rebind=tmp_path / "source_rebind_mainrunner.json",
+                roster=roster,
+                source_manifest=manifest,
+            )
+
+    (evaluation_dir / "scaffold_only").mkdir()
+    (evaluation_dir / "evaluation_summary.json").write_text(
+        json.dumps({"status": "tampered"}), encoding="utf-8"
+    )
+
+    def evaluation_stage_command(_log_path: Path, *, stage: str) -> list[str]:
+        if stage != "evaluation-summary":
+            return []
+        return [
+            str(train_phase6.ISAAC_PYTHON),
+            str(Path(train_phase6.__file__).resolve()),
+            "--mode",
+            "mainrunner-evaluation-merge",
+            "--evaluation-dir",
+            str(evaluation_dir),
+            "--pre-checkpoint",
+            str(bootstrap),
+            "--iteration",
+            str(segment.end_iteration),
+            "--stage",
+            "C1",
+            "--source-rebind",
+            str(tmp_path / "source_rebind_mainrunner.json"),
+        ]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            train_phase6,
+            "_validate_mainrunner_stage_evidence",
+            evaluation_stage_command,
+        )
+        patched.setattr(
+            train_phase6,
+            "_validate_mainrunner_worker_stage_command",
+            lambda *_args, **_kwargs: None,
+        )
+        patched.setattr(
+            train_phase6,
+            "_validate_mainrunner_evaluation_summary",
+            lambda summary, **_kwargs: dict(summary),
+        )
+        patched.setattr(
+            train_phase6,
+            "_merge_mainrunner_evaluation",
+            lambda **_kwargs: {"status": "expected"},
+        )
+        with pytest.raises(ValueError, match="summary SHA"):
+            train_phase6._validate_mainrunner_completed_evaluation(
+                segment_dir=tmp_path,
+                segment=segment,
+                pre_checkpoint=bootstrap,
+                stage="C1",
+                source_rebind=tmp_path / "source_rebind_mainrunner.json",
+                roster=roster,
+                source_manifest=manifest,
+            )
 
 
 def test_learning_checkpoint_resume_preserves_balance_hash_rng_and_stage(
@@ -824,7 +1748,13 @@ def test_learning_checkpoint_resume_preserves_balance_hash_rng_and_stage(
             "actual_transitions": 253952,
         },
         evaluation_history=[],
-        rank_rng={str(rank): {"cpu": torch.arange(2)} for rank in range(4)},
+        rank_rng={
+            str(rank): {
+                "cpu": torch.arange(2, dtype=torch.uint8),
+                "cuda": [torch.arange(2, dtype=torch.uint8) for _ in range(4)],
+            }
+            for rank in range(4)
+        },
         source_manifest=source_manifest,
         metrics={"status": "pre_evaluation"},
         pre_evaluation=True,
@@ -876,7 +1806,8 @@ def test_learning_checkpoint_resume_preserves_balance_hash_rng_and_stage(
         / "phase6-learning-pilot-4gpu-64env-31iter-20260806_042940"
         / "segment_0000/recovery/source_snapshot/train_phase6_pre_pairedbatchfix.py"
     )
-    current = Path("scripts/train_phase6.py")
+    recovery = pairedbatch_snapshot.parents[1]
+    current = recovery / "source_snapshot/train_phase6_pre_mainrunner.py"
     stepboundary_ast = _ast_function_dumps(
         stepboundary_snapshot, WORKER_CRITICAL_FUNCTIONS
     )
@@ -906,16 +1837,18 @@ def test_learning_checkpoint_resume_preserves_balance_hash_rng_and_stage(
         pairedbatch_ast["_run_paired_evaluation_rank"]
         != current_ast["_run_paired_evaluation_rank"]
     )
-    recovery = pairedbatch_snapshot.parents[1]
-    pairedbatch_proof = _pairedbatch_ast_proof(
+    pairedbatch_proof = _pairedbatch_ast_proof_for_sources(
         pairedbatch_snapshot,
         recovery / "source_snapshot/joint_runner_pre_pairedbatchfix.py",
         recovery / "source_snapshot/residual_env_pre_pairedbatchfix.py",
+        candidate_train=current,
+        candidate_joint=recovery / "source_snapshot/joint_runner_pre_mainrunner.py",
+        candidate_env=recovery / "source_snapshot/residual_env_pre_mainrunner.py",
     )
     assert pairedbatch_proof["approved_changed_paths"] == [
-        str(current.resolve()),
-        str(Path("somaforce_cross/learning/joint_runner.py").resolve()),
-        str(Path("somaforce_cross/envs/residual_env.py").resolve()),
+        str(current),
+        str(recovery / "source_snapshot/joint_runner_pre_mainrunner.py"),
+        str(recovery / "source_snapshot/residual_env_pre_mainrunner.py"),
     ]
     mutated = tmp_path / "worker_critical_mutation.py"
     mutated.write_text(
@@ -1838,6 +2771,9 @@ def test_summaryschema_rebind_preserves_checkpoint_and_updates_train_joint_sourc
         recovery / "source_snapshot/train_phase6_pre_summaryschemafix.py",
         recovery / "source_snapshot/joint_runner_pre_summaryschemafix.py",
         recovery / "source_snapshot/residual_env_pre_summaryschemafix.py",
+        candidate_train=recovery / "source_snapshot/train_phase6_pre_mainrunner.py",
+        candidate_joint=recovery / "source_snapshot/joint_runner_pre_mainrunner.py",
+        candidate_env=recovery / "source_snapshot/residual_env_pre_mainrunner.py",
     )
     assert proof["changed_joint_functions"] == ["validate_learning_evaluation_summary"]
     assert proof["changed_train_functions"] == [
@@ -1879,7 +2815,11 @@ def test_summaryschema_rebind_preserves_checkpoint_and_updates_train_joint_sourc
     assert isinstance(old_payload_value, dict)
     old_payload = dict(old_payload_value)
     new_payload = dict(old_payload)
-    new_manifest = _current_pairedbatch_source_manifest()
+    new_manifest = _pairedbatch_source_manifest_for_sources(
+        recovery / "source_snapshot/train_phase6_pre_mainrunner.py",
+        recovery / "source_snapshot/joint_runner_pre_mainrunner.py",
+        recovery / "source_snapshot/residual_env_pre_mainrunner.py",
+    )
     new_payload["source_manifest"] = new_manifest
     changed = sorted(
         key
@@ -2188,14 +3128,19 @@ def test_pairedbatch_rebind_binds_snapshots_and_cancelled_attempt() -> None:
         hashlib.sha256(path.read_bytes()).hexdigest() == digest
         for path, digest in snapshots.items()
     )
-    proof = _pairedbatch_ast_proof(*snapshots)
+    proof = _pairedbatch_ast_proof_for_sources(
+        *snapshots,
+        candidate_train=recovery / "source_snapshot/train_phase6_pre_mainrunner.py",
+        candidate_joint=recovery / "source_snapshot/joint_runner_pre_mainrunner.py",
+        candidate_env=recovery / "source_snapshot/residual_env_pre_mainrunner.py",
+    )
     assert proof["approved_changed_paths"] == [
-        str(Path("scripts/train_phase6.py").resolve()),
-        str(Path("somaforce_cross/learning/joint_runner.py").resolve()),
-        str(Path("somaforce_cross/envs/residual_env.py").resolve()),
+        str(recovery / "source_snapshot/train_phase6_pre_mainrunner.py"),
+        str(recovery / "source_snapshot/joint_runner_pre_mainrunner.py"),
+        str(recovery / "source_snapshot/residual_env_pre_mainrunner.py"),
     ]
     assert proof["module_ast_sha256"]["train_phase6_current"] == _module_ast_sha256(
-        Path("scripts/train_phase6.py")
+        recovery / "source_snapshot/train_phase6_pre_mainrunner.py"
     )
 
 

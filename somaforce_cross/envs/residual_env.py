@@ -914,10 +914,31 @@ class SomaForceResidualEnv(DirectRLEnv):
             if self._evaluation_enabled:
                 self._evaluation_completed.append(
                     {
-                        "env_id": int(env_id),
+                        "task": self.task_spec.task,
                         "mode": self._evaluation_mode,
-                        "seed": int(self._episode_seed[env_id].item()),
+                        "stage": self._episode_stage[env_id],
                         "subset": self._evaluation_subset[env_id],
+                        "family": self._episode_family[env_id],
+                        "seed": int(self._episode_seed[env_id].item()),
+                        "env_id": int(env_id),
+                        "steps": steps,
+                        "success": outcome["success"],
+                        "failure": outcome["failure"],
+                        "timeout": outcome["timeout"],
+                        "invalid": outcome["episode_invalid"],
+                        "return": float(self._episode_return[env_id].item()),
+                        "raw_reward_sums": {
+                            name: float(values[env_id].item())
+                            for name, values in self._episode_raw_sums.items()
+                        },
+                        "weighted_reward_sums": {
+                            name: float(values[env_id].item())
+                            for name, values in self._episode_weighted_sums.items()
+                        },
+                        "diagnostics": {
+                            name: float(value.item())
+                            for name, value in diagnostics.items()
+                        },
                     }
                 )
             self.curriculum.complete_episode(
