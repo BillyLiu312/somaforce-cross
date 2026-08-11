@@ -8547,6 +8547,19 @@ def _validate_mainrunner_completed_train(
         wrappers.append(wrapper)
     if tasks != {task.task for task in roster.tasks}:
         raise ValueError("mainrunner train ranks do not cover the roster")
+    resume_policy = ResidualActorCritic()
+    resume_optimizer = torch.optim.Adam(resume_policy.parameters(), lr=3.0e-4)
+    resume_restored = restore_learning_checkpoint(
+        resume_checkpoint,
+        config=config,
+        roster=roster,
+        acceptance=acceptance,
+        policy=resume_policy,
+        optimizer=resume_optimizer,
+        source_manifest=source_manifest,
+        expected_iteration=int(getattr(segment, "start_iteration")),
+        device="cpu",
+    )
     policy = ResidualActorCritic()
     optimizer = torch.optim.Adam(policy.parameters(), lr=3.0e-4)
     restored = restore_learning_checkpoint(
@@ -8577,6 +8590,19 @@ def _validate_mainrunner_completed_train(
         )
     ):
         raise ValueError("mainrunner pre-evaluation checkpoint restore is invalid")
+    if (
+        resume_restored["pre_evaluation"] is not False
+        or not isinstance(resume_restored["evaluation_history"], list)
+        or not all(
+            isinstance(item, Mapping) for item in resume_restored["evaluation_history"]
+        )
+        or not isinstance(restored["evaluation_history"], list)
+        or not all(isinstance(item, Mapping) for item in restored["evaluation_history"])
+        or not _semantic_equal(
+            resume_restored["evaluation_history"], restored["evaluation_history"]
+        )
+    ):
+        raise ValueError("mainrunner resume evaluation history is not continuous")
     summary_command = _validate_mainrunner_stage_evidence(
         segment_dir / "summary.log", stage="summarize"
     )
@@ -11405,6 +11431,7 @@ def _worker_main(argv: list[str]) -> int:
         previous_task_transitions: dict[str, int] = {
             item.task: 0 for item in roster.tasks
         }
+        resume_evaluation_history: list[dict[str, object]] = []
         if is_production and args.resume is not None:
             assert acceptance is not None and source_manifest is not None
             restored = restore_learning_checkpoint(
@@ -11423,6 +11450,13 @@ def _worker_main(argv: list[str]) -> int:
                 str(name): int(value)
                 for name, value in restored["task_transitions"].items()
             }
+            if not isinstance(restored["evaluation_history"], list) or not all(
+                isinstance(item, Mapping) for item in restored["evaluation_history"]
+            ):
+                raise ValueError("production resume evaluation history is invalid")
+            resume_evaluation_history = [
+                dict(item) for item in restored["evaluation_history"]
+            ]
             restore_rank_rng_state(
                 restored["rank_rng"],
                 rank=rank,
@@ -11584,7 +11618,7 @@ def _worker_main(argv: list[str]) -> int:
                     task_transitions=task_transitions,
                     curriculum=curriculum,
                     next_crossing=next_crossing,
-                    evaluation_history=[],
+                    evaluation_history=resume_evaluation_history,
                     rank_rng=rank_rng,
                     source_manifest=source_manifest,
                     metrics=metrics,

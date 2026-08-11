@@ -1517,6 +1517,195 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
         train_phase6._canonical_task_metrics(
             rank_order_records, roster=duplicate_roster
         )
+
+    worker_source = inspect.getsource(train_phase6._worker_main)
+    assert "evaluation_history=resume_evaluation_history" in worker_source
+    assert "evaluation_history=[]" not in worker_source
+
+    history_segment = plan_learning_segments(total_iterations=2442)[2]
+    history_segment_dir = tmp_path / "history_segment"
+    history_train_dir = history_segment_dir / "train"
+    history_train_dir.mkdir(parents=True)
+    history_resume = tmp_path / "history_resume.pt"
+    history_pre = history_train_dir / "pre_evaluation.pt"
+    history_source_rebind = tmp_path / "history_source_rebind.json"
+    history_resume.write_bytes(b"history resume")
+    history_pre.write_bytes(b"history pre")
+    history_source_rebind.write_text("{}\n", encoding="utf-8")
+    history = [
+        {"iteration": 31, "logical_crossing": 250000, "scope": "pilot"},
+        {"iteration": 62, "logical_crossing": 500000, "scope": "segment_0001"},
+    ]
+    history_metrics = {"status": "history-chain"}
+    history_rank_results = [
+        {
+            "checkpoint": {
+                "path": str(history_pre),
+                "sha256": hashlib.sha256(history_pre.read_bytes()).hexdigest(),
+            },
+            "metrics": history_metrics,
+            "optimizer_sha256": "history-state",
+            "optimizer_step": history_segment.end_iteration * 24,
+            "policy_sha256": "history-state",
+            "schedule": {
+                "cycle_index": history_segment.segment_index,
+                "task": roster.tasks[rank].task,
+            },
+        }
+        for rank in range(4)
+    ]
+    history_resume_payload = {
+        "actual_global_transitions": history_segment.start_iteration * 8192,
+        "actual_per_task_transitions": history_segment.start_iteration * 2048,
+        "evaluation_history": history,
+        "pre_evaluation": False,
+    }
+    history_pre_payload = {
+        "actual_global_transitions": history_segment.end_iteration * 8192,
+        "actual_per_task_transitions": history_segment.end_iteration * 2048,
+        "evaluation_history": copy.deepcopy(history),
+        "metrics": history_metrics,
+        "optimizer_sha256": "history-state",
+        "optimizer_step": history_segment.end_iteration * 24,
+        "policy_sha256": "history-state",
+        "pre_evaluation": True,
+    }
+
+    def history_restore(
+        path: Path,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        resolved = Path(path).resolve()
+        assert kwargs["config"] is config
+        assert kwargs["roster"] is roster
+        assert kwargs["acceptance"] is acceptance
+        assert kwargs["source_manifest"] == manifest
+        assert kwargs["device"] == "cpu"
+        if resolved == history_resume.resolve():
+            assert kwargs["expected_iteration"] == history_segment.start_iteration
+            return copy.deepcopy(history_resume_payload)
+        assert resolved == history_pre.resolve()
+        assert kwargs["expected_iteration"] == history_segment.end_iteration
+        return copy.deepcopy(history_pre_payload)
+
+    def history_read_json(path: Path) -> dict[str, object]:
+        if path == history_train_dir / "segment_summary.json":
+            return {
+                "checkpoint": {
+                    "path": str(history_pre),
+                    "sha256": hashlib.sha256(history_pre.read_bytes()).hexdigest(),
+                },
+                "iteration": history_segment.end_iteration,
+                "rank_results": [dict(result) for result in history_rank_results],
+                "source_manifest_sha256": train_phase6._source_manifest_digest(
+                    manifest
+                ),
+                "source_rebind": {
+                    "path": str(history_source_rebind),
+                    "sha256": hashlib.sha256(
+                        history_source_rebind.read_bytes()
+                    ).hexdigest(),
+                },
+                "status": "ok",
+                "task_metrics": history_metrics,
+            }
+        if path == history_train_dir / "production_evidence_summary.json":
+            return {
+                "iteration": history_segment.end_iteration,
+                "rank_wrappers": [{"vmhwm_kib": 1} for _ in range(4)],
+                "status": "ok",
+                "topology": "per_rank_wrapper",
+                "worker_mode": "train-segment",
+            }
+        return {}
+
+    def history_command_path(_values: list[str], name: str) -> Path:
+        paths = {
+            "--output-dir": history_train_dir,
+            "--resume": history_resume,
+            "--source-rebind": history_source_rebind,
+        }
+        return paths[name].resolve()
+
+    def history_command_argument(_values: list[str], name: str) -> str:
+        assert name == "--iteration"
+        return str(history_segment.end_iteration)
+
+    with monkeypatch.context() as patched:
+        import somaforce_cross.learning.joint_runner as joint_runner
+
+        patched.setattr(joint_runner, "restore_learning_checkpoint", history_restore)
+        patched.setattr(
+            joint_runner, "state_dict_sha256", lambda _state: "history-state"
+        )
+        patched.setattr(
+            joint_runner,
+            "optimizer_step",
+            lambda _optimizer: history_segment.end_iteration * 24,
+        )
+        patched.setattr(train_phase6, "_read_json", history_read_json)
+        patched.setattr(
+            train_phase6,
+            "_validate_mainrunner_stage_evidence",
+            lambda *_args, **_kwargs: [],
+        )
+        patched.setattr(
+            train_phase6,
+            "_validate_mainrunner_worker_stage_command",
+            lambda *_args, **_kwargs: None,
+        )
+        patched.setattr(
+            train_phase6,
+            "_validate_mainrunner_utility_stage_command",
+            lambda *_args, **_kwargs: None,
+        )
+        patched.setattr(
+            train_phase6,
+            "_validate_production_command",
+            lambda *_args, **_kwargs: {"command": []},
+        )
+        patched.setattr(
+            train_phase6,
+            "_validate_summary_wrapper",
+            lambda *_args, **_kwargs: {"vmhwm_kib": 1},
+        )
+        patched.setattr(
+            train_phase6,
+            "_validate_production_train_result",
+            lambda _value, *, rank, **_kwargs: history_rank_results[rank],
+        )
+        patched.setattr(train_phase6, "_mainrunner_command_path", history_command_path)
+        patched.setattr(
+            train_phase6, "_mainrunner_command_argument", history_command_argument
+        )
+
+        train_phase6._validate_mainrunner_completed_train(
+            segment_dir=history_segment_dir,
+            segment=history_segment,
+            resume_checkpoint=history_resume,
+            source_rebind=history_source_rebind,
+            config=config,
+            roster=roster,
+            acceptance=acceptance,
+            source_manifest=manifest,
+        )
+        for invalid_history in (
+            [],
+            list(reversed(history)),
+            [*history, copy.deepcopy(history[-1])],
+        ):
+            history_pre_payload["evaluation_history"] = invalid_history
+            with pytest.raises(ValueError, match="resume evaluation history"):
+                train_phase6._validate_mainrunner_completed_train(
+                    segment_dir=history_segment_dir,
+                    segment=history_segment,
+                    resume_checkpoint=history_resume,
+                    source_rebind=history_source_rebind,
+                    config=config,
+                    roster=roster,
+                    acceptance=acceptance,
+                    source_manifest=manifest,
+                )
     bootstrap = tmp_path / "post_evaluation_mainrunner_rebound.pt"
     bootstrap.write_bytes(b"bootstrap")
 
