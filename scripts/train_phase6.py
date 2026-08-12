@@ -557,7 +557,7 @@ def _rank_wrapper_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--segment-start", type=int, default=0)
     parser.add_argument("--segment-end", type=int)
-    parser.add_argument("--stage", choices=("C1", "C2", "C3"), default="C1")
+    parser.add_argument("--stage", choices=("C1", "C2", "C3"))
     parser.add_argument("--evaluation-seed", type=int, default=20262806)
     parser.add_argument("--paired-num-envs", type=int)
     parser.add_argument("--paired-stage-quota", type=int, default=256)
@@ -636,7 +636,7 @@ def _worker_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--segment-start", type=int, default=0)
     parser.add_argument("--segment-end", type=int)
-    parser.add_argument("--stage", choices=("C1", "C2", "C3"), default="C1")
+    parser.add_argument("--stage", choices=("C1", "C2", "C3"), required=True)
     parser.add_argument("--evaluation-seed", type=int, default=20262806)
     parser.add_argument("--paired-num-envs", type=int)
     parser.add_argument("--paired-stage-quota", type=int, default=256)
@@ -681,6 +681,8 @@ def _validate_worker_paths(args: argparse.Namespace) -> None:
             raise ValueError("production worker segment bounds are invalid")
         if args.acceptance_config.resolve() != PHASE6_LEARNING_CONFIG.resolve():
             raise ValueError("production worker requires the Phase 6 learning contract")
+        if args.stage not in {"C1", "C2", "C3"}:
+            raise ValueError("production worker requires an explicit curriculum stage")
     if args.mode == "evaluate":
         num_envs = args.paired_num_envs or 64
         if (
@@ -1322,6 +1324,7 @@ def _production_summary_parser() -> argparse.ArgumentParser:
     parser.add_argument("--paired-stage-quota", type=int, default=256)
     parser.add_argument("--paired-nominal-quota", type=int, default=128)
     parser.add_argument("--source-rebind", type=Path)
+    parser.add_argument("--stage", choices=("C1", "C2", "C3"))
     return parser
 
 
@@ -1363,6 +1366,7 @@ def _mainrunner_finalize_parser() -> argparse.ArgumentParser:
     parser.add_argument("--iteration", type=int, required=True)
     parser.add_argument("--segment-index", type=int, required=True)
     parser.add_argument("--logical-crossing", type=int, required=True)
+    parser.add_argument("--stage", choices=("C1", "C2", "C3"), required=True)
     parser.add_argument("--source-rebind", type=Path, required=True)
     parser.add_argument("--phase6-config", type=Path, default=PHASE6_CONFIG)
     parser.add_argument("--roster", type=Path, default=PHASE6_ROSTER)
@@ -1736,6 +1740,7 @@ def _validate_production_command(
     output_dir: Path,
     worker_mode: str,
     iteration: int,
+    stage: str | None = None,
 ) -> Mapping[str, object]:
     payload = _require_exact_mapping(
         command,
@@ -1762,6 +1767,13 @@ def _validate_production_command(
         or "--headless" not in values
     ):
         raise ValueError("production rank command does not bind the frozen contracts")
+    if (
+        values.count("--stage") != 1
+        or _command_argument(values, "--stage") not in {"C1", "C2", "C3"}
+        or stage is not None
+        and _command_argument(values, "--stage") != stage
+    ):
+        raise ValueError("production rank command stage is invalid")
     start = int(_command_argument(values, "--segment-start"))
     end = int(_command_argument(values, "--segment-end"))
     if worker_mode == "train-segment":
@@ -2000,6 +2012,7 @@ def _run_production_summary(args: argparse.Namespace) -> int:
             output_dir=args.output_dir,
             worker_mode="evaluate" if args.evaluation else "train-segment",
             iteration=args.iteration,
+            stage=args.stage,
         )
         wrapper = _validate_summary_wrapper(
             _read_json(rank_dir / "wrapper.json"),
@@ -2080,6 +2093,8 @@ def _run_production_summary(args: argparse.Namespace) -> int:
             expected_iteration=args.iteration,
             device="cpu",
         )
+        if args.stage is not None and restored["curriculum"]["stage"] != args.stage:
+            raise ValueError("production summary checkpoint stage is invalid")
         if (
             restored["pre_evaluation"] is not True
             or restored["policy_sha256"] != rank_results[0]["policy_sha256"]
@@ -2305,14 +2320,56 @@ def _mainrunner_rebind_invariants(
     }
 
 
+def _mainrunner_rebind_checkpoint_invariants(
+    restored: Mapping[str, object], *, segments: tuple[object, ...]
+) -> dict[str, object]:
+    iteration = restored.get("iteration")
+    stage = (
+        restored.get("curriculum", {}).get("stage")
+        if isinstance(restored.get("curriculum"), Mapping)
+        else None
+    )
+    endpoints = {
+        int(getattr(segment, "end_iteration")): segment for segment in segments
+    }
+    history = restored.get("evaluation_history")
+    if (
+        isinstance(iteration, bool)
+        or not isinstance(iteration, int)
+        or iteration not in endpoints
+        or restored.get("pre_evaluation") is not False
+        or stage not in {"C1", "C2", "C3"}
+        or not isinstance(history, list)
+        or len(history) != int(getattr(endpoints[iteration], "segment_index")) + 1
+    ):
+        raise ValueError("mainrunner rebind requires a completed endpoint checkpoint")
+    if int(restored.get("actual_global_transitions", -1)) != iteration * 8192:
+        raise ValueError("mainrunner rebind endpoint transition accounting is invalid")
+    if int(restored.get("actual_per_task_transitions", -1)) != iteration * 2048:
+        raise ValueError("mainrunner rebind endpoint task accounting is invalid")
+    if int(restored.get("optimizer_step", -1)) != iteration * 24:
+        raise ValueError("mainrunner rebind endpoint optimizer accounting is invalid")
+    if not all(isinstance(item, Mapping) for item in history):
+        raise ValueError("mainrunner rebind endpoint history is invalid")
+    return {
+        "history_length": len(history),
+        "iteration": iteration,
+        "optimizer_step": restored["optimizer_step"],
+        "segment": int(getattr(endpoints[iteration], "segment_index")),
+        "stage": stage,
+        "transitions": restored["actual_global_transitions"],
+    }
+
+
 def _run_mainrunner_rebind(args: argparse.Namespace) -> int:
-    """Rebind a completed pilot checkpoint on CPU without Isaac or CUDA workers."""
+    """Rebind a completed endpoint checkpoint on CPU without Isaac or CUDA workers."""
     from somaforce_cross.learning.actor_critic import ResidualActorCritic
     from somaforce_cross.learning.joint_runner import (
         atomic_learning_checkpoint,
         load_learning_acceptance_config,
         load_phase6_config,
         load_phase6_task_roster,
+        plan_learning_segments,
         restore_learning_checkpoint,
     )
 
@@ -2368,6 +2425,7 @@ def _run_mainrunner_rebind(args: argparse.Namespace) -> int:
     current_manifest = _current_mainrunner_source_manifest()
     old_policy = ResidualActorCritic()
     old_optimizer = torch.optim.Adam(old_policy.parameters(), lr=3.0e-4)
+    segments = plan_learning_segments(total_iterations=2442)
     old_restored = restore_learning_checkpoint(
         args.input_checkpoint,
         config=config,
@@ -2376,11 +2434,9 @@ def _run_mainrunner_rebind(args: argparse.Namespace) -> int:
         policy=old_policy,
         optimizer=old_optimizer,
         source_manifest=dict(old_manifest),
-        expected_iteration=31,
         device="cpu",
     )
-    if old_restored["pre_evaluation"] is not False:
-        raise ValueError("mainrunner rebind requires a completed post-evaluation pilot")
+    endpoint = _mainrunner_rebind_checkpoint_invariants(old_restored, segments=segments)
     new_payload = dict(old_payload)
     new_payload["source_manifest"] = current_manifest
     invariants = _mainrunner_rebind_invariants(old_payload, new_payload)
@@ -2397,7 +2453,7 @@ def _run_mainrunner_rebind(args: argparse.Namespace) -> int:
         policy=policy,
         optimizer=optimizer,
         source_manifest=current_manifest,
-        expected_iteration=31,
+        expected_iteration=int(endpoint["iteration"]),
         device="cpu",
     )
     if not _semantic_equal(restored, new_payload):
@@ -2429,6 +2485,7 @@ def _run_mainrunner_rebind(args: argparse.Namespace) -> int:
             "sha256": _sha256(args.input_source_record),
         },
         "invariants": invariants,
+        "endpoint": endpoint,
         "new_source_manifest": current_manifest,
         "new_source_manifest_sha256": _source_manifest_digest(current_manifest),
         "old_source_manifest": dict(old_manifest),
@@ -2454,6 +2511,7 @@ def _validate_mainrunner_rebind_record(
         LearningAcceptanceConfig,
         Phase6Config,
         Phase6Roster,
+        plan_learning_segments,
         restore_learning_checkpoint,
     )
 
@@ -2466,6 +2524,7 @@ def _validate_mainrunner_rebind_record(
         "checkpoint",
         "contracts",
         "current_source_proof",
+        "endpoint",
         "input_source_record",
         "invariants",
         "new_source_manifest",
@@ -2505,15 +2564,10 @@ def _validate_mainrunner_rebind_record(
         raise ValueError("mainrunner source rebind manifests are invalid")
     if (
         record["status"] != "ok"
-        or input_checkpoint.resolve() != MAINRUNNER_REBIND_INPUT_CHECKPOINT.resolve()
-        or checkpoint["input_sha256"] != MAINRUNNER_REBIND_INPUT_CHECKPOINT_SHA256
         or not input_checkpoint.is_file()
         or _sha256(input_checkpoint) != checkpoint["input_sha256"]
-        or Path(str(input_record["path"])).resolve()
-        != MAINRUNNER_REBIND_INPUT_RECORD.resolve()
-        or input_record["sha256"] != MAINRUNNER_REBIND_INPUT_RECORD_SHA256
-        or not MAINRUNNER_REBIND_INPUT_RECORD.is_file()
-        or _sha256(MAINRUNNER_REBIND_INPUT_RECORD) != input_record["sha256"]
+        or not Path(str(input_record["path"])).is_file()
+        or _sha256(Path(str(input_record["path"]))) != input_record["sha256"]
         or not output.is_file()
         or _sha256(output) != checkpoint["output_sha256"]
         or expected_checkpoint is not None
@@ -2525,13 +2579,30 @@ def _validate_mainrunner_rebind_record(
         or not all(record["invariants"].values())
     ):
         raise ValueError("mainrunner source rebind record binding is invalid")
-    source_record = _read_json(MAINRUNNER_REBIND_INPUT_RECORD)
+    if record["contracts"] != {
+        "learning_acceptance": {
+            "canonical_sha256": acceptance.canonical_sha256,
+            "raw_sha256": acceptance.raw_sha256,
+        },
+        "phase6": {
+            "canonical_sha256": config.canonical_sha256,
+            "raw_sha256": config.raw_sha256,
+        },
+        "roster": {
+            "canonical_sha256": roster.canonical_sha256,
+            "raw_sha256": roster.raw_sha256,
+        },
+    }:
+        raise ValueError("mainrunner source rebind contract binding is invalid")
+    source_record = _read_json(Path(str(input_record["path"])))
     input_payload = torch.load(input_checkpoint, map_location="cpu", weights_only=False)
     proof = _mainrunner_ast_source_proof(MAINRUNNER_SNAPSHOT_DIR)
     if (
         source_record is None
         or source_record.get("status") != "ok"
         or source_record.get("new_source_manifest") != dict(old_manifest)
+        or source_record.get("new_source_manifest_sha256")
+        != _source_manifest_digest(old_manifest)
         or not isinstance(input_payload, Mapping)
         or input_payload.get("source_manifest") != dict(old_manifest)
         or record["source_snapshots"] != proof["snapshots"]
@@ -2548,15 +2619,13 @@ def _validate_mainrunner_rebind_record(
         policy=input_policy,
         optimizer=input_optimizer,
         source_manifest=dict(old_manifest),
-        expected_iteration=31,
         device="cpu",
     )
-    if (
-        input_restored["pre_evaluation"] is not False
-        or not isinstance(input_restored["evaluation_history"], list)
-        or not input_restored["evaluation_history"]
-    ):
-        raise ValueError("mainrunner input checkpoint is not a completed pilot")
+    endpoint = _mainrunner_rebind_checkpoint_invariants(
+        input_restored, segments=plan_learning_segments(total_iterations=2442)
+    )
+    if record["endpoint"] != endpoint:
+        raise ValueError("mainrunner source rebind endpoint binding is invalid")
     policy = ResidualActorCritic()
     optimizer = torch.optim.Adam(policy.parameters(), lr=3.0e-4)
     restored = restore_learning_checkpoint(
@@ -2567,10 +2636,12 @@ def _validate_mainrunner_rebind_record(
         policy=policy,
         optimizer=optimizer,
         source_manifest=_current_mainrunner_source_manifest(),
-        expected_iteration=31,
+        expected_iteration=int(endpoint["iteration"]),
         device="cpu",
     )
-    if restored["pre_evaluation"] is not False or not all(
+    if _mainrunner_rebind_checkpoint_invariants(
+        restored, segments=plan_learning_segments(total_iterations=2442)
+    ) != endpoint or not all(
         _mainrunner_rebind_invariants(input_restored, restored).values()
     ):
         raise ValueError("mainrunner rebound checkpoint is not post-evaluation")
@@ -8384,6 +8455,7 @@ def _validate_mainrunner_worker_stage_command(
     resume_checkpoint: Path,
     source_rebind: Path,
     paired_mode: str | None = None,
+    stage: str | None = None,
 ) -> None:
     if len(values) < 7 or values[:6] != [
         str(ISAAC_PYTHON),
@@ -8409,6 +8481,10 @@ def _validate_mainrunner_worker_stage_command(
         != PHASE6_CONFIG.resolve()
         or _mainrunner_command_path(values, "--roster") != PHASE6_ROSTER.resolve()
         or "--headless" in values
+        or values.count("--stage") != 1
+        or _mainrunner_command_argument(values, "--stage") not in {"C1", "C2", "C3"}
+        or stage is not None
+        and _mainrunner_command_argument(values, "--stage") != stage
     ):
         raise ValueError("mainrunner distributed stage command binding is invalid")
     expected_end = int(getattr(segment, "end_iteration"))
@@ -8442,6 +8518,17 @@ def _validate_mainrunner_utility_stage_command(values: list[str], *, mode: str) 
         or _mainrunner_command_argument(values, "--mode") != mode
     ):
         raise ValueError("mainrunner utility stage command is invalid")
+
+
+def _validate_mainrunner_utility_stage(
+    values: list[str], *, stage: str, required: bool = True
+) -> None:
+    if values.count("--stage") != 1:
+        if required:
+            raise ValueError("mainrunner utility command stage is missing")
+        return
+    if _mainrunner_command_argument(values, "--stage") != stage:
+        raise ValueError("mainrunner utility command stage is inconsistent")
 
 
 def _validate_mainrunner_completed_train(
@@ -8603,12 +8690,24 @@ def _validate_mainrunner_completed_train(
         )
     ):
         raise ValueError("mainrunner resume evaluation history is not continuous")
+    expected_stage = str(resume_restored["curriculum"]["stage"])
+    if _mainrunner_command_argument(train_command, "--stage") != expected_stage:
+        raise ValueError("mainrunner train command stage does not match checkpoint")
+    for command in [
+        _read_json(train_dir / f"rank_{rank}" / "command.json") for rank in range(4)
+    ]:
+        if _command_argument(list(command["command"]), "--stage") != expected_stage:
+            raise ValueError("mainrunner train rank stage does not match checkpoint")
+    for result in rank_results:
+        if result.get("curriculum", {}).get("stage") != expected_stage:
+            raise ValueError("mainrunner train result stage is inconsistent")
     summary_command = _validate_mainrunner_stage_evidence(
         segment_dir / "summary.log", stage="summarize"
     )
     _validate_mainrunner_utility_stage_command(
         summary_command, mode="production-summarize"
     )
+    _validate_mainrunner_utility_stage(summary_command, stage=expected_stage)
     if (
         _mainrunner_command_path(summary_command, "--output-dir") != train_dir.resolve()
         or int(_mainrunner_command_argument(summary_command, "--iteration"))
@@ -8670,6 +8769,7 @@ def _validate_mainrunner_completed_evaluation(
             resume_checkpoint=pre_checkpoint,
             source_rebind=source_rebind,
             paired_mode=mode,
+            stage=stage,
         )
     summary_command = _validate_mainrunner_stage_evidence(
         segment_dir / "evaluation-summary.log", stage="evaluation-summary"
@@ -8677,6 +8777,7 @@ def _validate_mainrunner_completed_evaluation(
     _validate_mainrunner_utility_stage_command(
         summary_command, mode="mainrunner-evaluation-merge"
     )
+    _validate_mainrunner_utility_stage(summary_command, stage=stage)
     if (
         _mainrunner_command_path(summary_command, "--evaluation-dir")
         != evaluation_dir.resolve()
@@ -8742,6 +8843,9 @@ def _validate_mainrunner_completed_finalize(
         segment_dir / "finalize.log", stage="finalize-checkpoint"
     )
     _validate_mainrunner_utility_stage_command(command, mode="mainrunner-finalize")
+    _validate_mainrunner_utility_stage(
+        command, stage=str(pre_restored["curriculum"]["stage"])
+    )
     if (
         _mainrunner_command_path(command, "--run-dir") != run_dir.resolve()
         or _mainrunner_command_path(command, "--segment-dir") != segment_dir.resolve()
@@ -8924,12 +9028,28 @@ def _validate_mainrunner_completed_segments(
         source_rebind, config=config, roster=roster, acceptance=acceptance
     )
     bootstrap_checkpoint = Path(str(rebind["checkpoint"]["output_path"]))
+    endpoint = _require_exact_mapping(
+        rebind.get("endpoint"),
+        name="mainrunner.rebind.endpoint",
+        expected={
+            "history_length",
+            "iteration",
+            "optimizer_step",
+            "segment",
+            "stage",
+            "transitions",
+        },
+    )
+    bootstrap_iteration = endpoint["iteration"]
+    if bootstrap_iteration > current_iteration:
+        raise ValueError("mainrunner resume precedes the rebound bootstrap")
     if (run_dir / "segment_0000").exists():
         raise ValueError("mainrunner must not materialize pilot bootstrap segment_0000")
     completed = [
         segment
         for segment in segments
-        if segment.segment_index > 0 and segment.end_iteration <= current_iteration
+        if segment.end_iteration > bootstrap_iteration
+        and segment.end_iteration <= current_iteration
     ]
     expected_dirs = {f"segment_{segment.segment_index:04d}" for segment in completed}
     observed_dirs = (
@@ -10458,6 +10578,8 @@ def _run_production(args: argparse.Namespace) -> int:
                 str(segment.start_iteration),
                 "--segment-end",
                 str(segment.end_iteration),
+                "--stage",
+                stage,
                 "--cycle-index",
                 str(segment.segment_index),
                 "--window-index",
@@ -10489,6 +10611,8 @@ def _run_production(args: argparse.Namespace) -> int:
                     str(train_dir),
                     "--iteration",
                     str(segment.end_iteration),
+                    "--stage",
+                    stage,
                     "--source-rebind",
                     str(args.source_rebind),
                 ],
@@ -10540,6 +10664,8 @@ def _run_production(args: argparse.Namespace) -> int:
                         str(segment.end_iteration),
                         "--segment-end",
                         str(segment.end_iteration + 1),
+                        "--stage",
+                        stage,
                         "--resume",
                         str(train_dir / "pre_evaluation.pt"),
                         "--source-rebind",
@@ -10597,6 +10723,8 @@ def _run_production(args: argparse.Namespace) -> int:
                     str(segment.segment_index),
                     "--logical-crossing",
                     str(segment.crossing.logical_transitions),
+                    "--stage",
+                    stage,
                     "--source-rebind",
                     str(args.source_rebind),
                 ],

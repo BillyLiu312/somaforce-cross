@@ -30,6 +30,7 @@ from scripts.train_phase6 import (
     _ast_function_dumps,
     _aggregate_evaluation_progress,
     _aggregate_modeprocess_progress,
+    _command_argument,
     _current_mainrunner_source_manifest,
     _evaluation_devicefix_ast_proof,
     _evaluation_devicefix_invariants,
@@ -720,18 +721,23 @@ def test_wrapper_requires_result_order_exit_zero_and_env_closed_last_marker(
             "0",
             "--segment-end",
             "31",
+            "--stage",
+            "C1",
             "--headless",
         ],
         "local_rank": 0,
         "rank": 0,
         "world_size": 4,
     }
+    assert production_command["command"].count("--stage") == 1
+    assert _command_argument(production_command["command"], "--stage") == "C1"
     _validate_production_command(
         production_command,
         rank=0,
         output_dir=tmp_path,
         worker_mode="train-segment",
         iteration=31,
+        stage="C1",
     )
     production_command["command"].remove("--headless")
     with pytest.raises(ValueError, match="frozen contracts"):
@@ -741,6 +747,7 @@ def test_wrapper_requires_result_order_exit_zero_and_env_closed_last_marker(
             output_dir=tmp_path,
             worker_mode="train-segment",
             iteration=31,
+            stage="C1",
         )
     devicefix_source = inspect.getsource(_run_devicefix_recovery_evaluate)
     assert "evaluation_devicefix_attempt_0001" in devicefix_source
@@ -977,7 +984,9 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
     resume_checkpoint = tmp_path / "resume.pt"
     source_rebind = tmp_path / "source_rebind_mainrunner.json"
 
-    def outer_command(*, worker_mode: str, paired_mode: str | None = None) -> list[str]:
+    def outer_command(
+        *, worker_mode: str, paired_mode: str | None = None, stage: str = "C1"
+    ) -> list[str]:
         start = (
             segment.start_iteration
             if worker_mode == "train-segment"
@@ -1006,6 +1015,8 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
             str(start),
             "--segment-end",
             str(end),
+            "--stage",
+            stage,
             "--resume",
             str(resume_checkpoint),
             "--source-rebind",
@@ -1021,7 +1032,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
             command.extend(("--paired-mode", paired_mode))
         return command
 
-    outer_train = outer_command(worker_mode="train-segment")
+    outer_train = outer_command(worker_mode="train-segment", stage="C2")
     train_output = Path(
         train_phase6._mainrunner_command_argument(outer_train, "--output-dir")
     )
@@ -1032,10 +1043,11 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
         segment=segment,
         resume_checkpoint=resume_checkpoint,
         source_rebind=source_rebind,
+        stage="C2",
     )
     for paired_mode in ("residual", "scaffold_only"):
         outer_evaluation = outer_command(
-            worker_mode="evaluate", paired_mode=paired_mode
+            worker_mode="evaluate", paired_mode=paired_mode, stage="C2"
         )
         evaluation_output = Path(
             train_phase6._mainrunner_command_argument(outer_evaluation, "--output-dir")
@@ -1048,6 +1060,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
             resume_checkpoint=resume_checkpoint,
             source_rebind=source_rebind,
             paired_mode=paired_mode,
+            stage="C2",
         )
     for argument, value in (
         ("--headless", None),
@@ -1069,8 +1082,11 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
                 segment=segment,
                 resume_checkpoint=resume_checkpoint,
                 source_rebind=source_rebind,
+                stage="C2",
             )
-    invalid_paired = outer_command(worker_mode="evaluate", paired_mode="residual")
+    invalid_paired = outer_command(
+        worker_mode="evaluate", paired_mode="residual", stage="C3"
+    )
     invalid_paired[invalid_paired.index("--paired-mode") + 1] = "scaffold_only"
     with pytest.raises(ValueError):
         train_phase6._validate_mainrunner_worker_stage_command(
@@ -1085,6 +1101,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
             resume_checkpoint=resume_checkpoint,
             source_rebind=source_rebind,
             paired_mode="residual",
+            stage="C3",
         )
     inner_args = Namespace(
         acceptance_config=PHASE6_LEARNING_CONFIG,
@@ -1103,7 +1120,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
         segment_end=segment.end_iteration,
         segment_start=segment.start_iteration,
         source_rebind=source_rebind,
-        stage="C1",
+        stage="C2",
         timeout_s=2,
         window_index=0,
         worker_mode="train-segment",
@@ -1116,13 +1133,17 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
         output_dir=tmp_path / "inner",
         worker_mode="train-segment",
         iteration=segment.end_iteration,
+        stage="C2",
     )
     inner_evaluation_args = copy.copy(inner_args)
     inner_evaluation_args.worker_mode = "evaluate"
     inner_evaluation_args.output_dir = tmp_path / "inner_evaluation"
     inner_evaluation_args.segment_start = segment.end_iteration
     inner_evaluation_args.segment_end = segment.end_iteration + 1
-    assert "--headless" in train_phase6._worker_command(inner_evaluation_args)
+    inner_evaluation_args.stage = "C3"
+    inner_evaluation = train_phase6._worker_command(inner_evaluation_args)
+    assert "--headless" in inner_evaluation
+    assert train_phase6._command_argument(inner_evaluation, "--stage") == "C3"
     inner_without_headless = [value for value in inner if value != "--headless"]
     with pytest.raises(ValueError, match="production rank command"):
         train_phase6._validate_production_command(
@@ -1136,6 +1157,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
             output_dir=tmp_path / "inner",
             worker_mode="train-segment",
             iteration=segment.end_iteration,
+            stage="C2",
         )
     aggregate_calls: list[tuple[str, Path, int]] = []
     with monkeypatch.context() as patched:
@@ -1547,6 +1569,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
             "optimizer_sha256": "history-state",
             "optimizer_step": history_segment.end_iteration * 24,
             "policy_sha256": "history-state",
+            "curriculum": {"stage": "C2"},
             "schedule": {
                 "cycle_index": history_segment.segment_index,
                 "task": roster.tasks[rank].task,
@@ -1559,6 +1582,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
         "actual_per_task_transitions": history_segment.start_iteration * 2048,
         "evaluation_history": history,
         "pre_evaluation": False,
+        "curriculum": {"stage": "C2"},
     }
     history_pre_payload = {
         "actual_global_transitions": history_segment.end_iteration * 8192,
@@ -1569,6 +1593,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
         "optimizer_step": history_segment.end_iteration * 24,
         "policy_sha256": "history-state",
         "pre_evaluation": True,
+        "curriculum": {"stage": "C2"},
     }
 
     def history_restore(
@@ -1589,6 +1614,55 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
         return copy.deepcopy(history_pre_payload)
 
     def history_read_json(path: Path) -> dict[str, object]:
+        if path.name == "command.json" and path.parent.name.startswith("rank_"):
+            command = [
+                str(train_phase6.ISAAC_PYTHON),
+                str(Path("scripts/train_phase6.py").resolve()),
+                "--mode",
+                "train-segment",
+                "--output-dir",
+                str(history_train_dir),
+                "--profile",
+                "production_segment",
+                "--acceptance-config",
+                str(PHASE6_LEARNING_CONFIG),
+                "--phase6-config",
+                str(PHASE6_CONFIG),
+                "--roster",
+                str(PHASE6_ROSTER),
+                "--segment-start",
+                str(history_segment.start_iteration),
+                "--segment-end",
+                str(history_segment.end_iteration),
+                "--stage",
+                "C2",
+                "--resume",
+                str(history_resume),
+                "--source-rebind",
+                str(history_source_rebind),
+                "--headless",
+            ]
+            singleton_options = (
+                "--acceptance-config",
+                "--phase6-config",
+                "--roster",
+                "--mode",
+                "--output-dir",
+                "--profile",
+                "--segment-start",
+                "--segment-end",
+                "--stage",
+                "--resume",
+                "--source-rebind",
+            )
+            for option in singleton_options:
+                assert command.count(option) == 1
+            return {
+                "command": command,
+                "local_rank": int(path.parent.name.split("_")[-1]),
+                "rank": int(path.parent.name.split("_")[-1]),
+                "world_size": 4,
+            }
         if path == history_train_dir / "segment_summary.json":
             return {
                 "checkpoint": {
@@ -1628,8 +1702,11 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
         return paths[name].resolve()
 
     def history_command_argument(_values: list[str], name: str) -> str:
-        assert name == "--iteration"
-        return str(history_segment.end_iteration)
+        if name == "--iteration":
+            return str(history_segment.end_iteration)
+        if name == "--stage":
+            return "C2"
+        raise AssertionError(name)
 
     with monkeypatch.context() as patched:
         import somaforce_cross.learning.joint_runner as joint_runner
@@ -1647,22 +1724,56 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
         patched.setattr(
             train_phase6,
             "_validate_mainrunner_stage_evidence",
-            lambda *_args, **_kwargs: [],
-        )
-        patched.setattr(
-            train_phase6,
-            "_validate_mainrunner_worker_stage_command",
-            lambda *_args, **_kwargs: None,
-        )
-        patched.setattr(
-            train_phase6,
-            "_validate_mainrunner_utility_stage_command",
-            lambda *_args, **_kwargs: None,
-        )
-        patched.setattr(
-            train_phase6,
-            "_validate_production_command",
-            lambda *_args, **_kwargs: {"command": []},
+            lambda path, *, stage: (
+                [
+                    str(train_phase6.ISAAC_PYTHON),
+                    str(Path("scripts/train_phase6.py").resolve()),
+                    "--mode",
+                    "production-summarize",
+                    "--output-dir",
+                    str(history_train_dir),
+                    "--iteration",
+                    str(history_segment.end_iteration),
+                    "--stage",
+                    "C2",
+                    "--source-rebind",
+                    str(history_source_rebind),
+                ]
+                if path.name == "summary.log"
+                else [
+                    str(train_phase6.ISAAC_PYTHON),
+                    "-m",
+                    "torch.distributed.run",
+                    "--standalone",
+                    "--nnodes=1",
+                    "--nproc_per_node=4",
+                    str(Path("scripts/train_phase6.py").resolve()),
+                    "--mode",
+                    "rank-wrapper",
+                    "--worker-mode",
+                    "train-segment",
+                    "--output-dir",
+                    str(history_train_dir),
+                    "--profile",
+                    "production_segment",
+                    "--acceptance-config",
+                    str(PHASE6_LEARNING_CONFIG),
+                    "--phase6-config",
+                    str(PHASE6_CONFIG),
+                    "--roster",
+                    str(PHASE6_ROSTER),
+                    "--segment-start",
+                    str(history_segment.start_iteration),
+                    "--segment-end",
+                    str(history_segment.end_iteration),
+                    "--stage",
+                    "C2",
+                    "--resume",
+                    str(history_resume),
+                    "--source-rebind",
+                    str(history_source_rebind),
+                ]
+            ),
         )
         patched.setattr(
             train_phase6,
@@ -1674,11 +1785,6 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
             "_validate_production_train_result",
             lambda _value, *, rank, **_kwargs: history_rank_results[rank],
         )
-        patched.setattr(train_phase6, "_mainrunner_command_path", history_command_path)
-        patched.setattr(
-            train_phase6, "_mainrunner_command_argument", history_command_argument
-        )
-
         train_phase6._validate_mainrunner_completed_train(
             segment_dir=history_segment_dir,
             segment=history_segment,
@@ -1710,7 +1816,17 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
     bootstrap.write_bytes(b"bootstrap")
 
     def fake_rebind(*_args: object, **_kwargs: object) -> dict[str, object]:
-        return {"checkpoint": {"output_path": str(bootstrap)}}
+        return {
+            "checkpoint": {"output_path": str(bootstrap)},
+            "endpoint": {
+                "history_length": 1,
+                "iteration": 31,
+                "optimizer_step": 744,
+                "segment": 0,
+                "stage": "C1",
+                "transitions": 253952,
+            },
+        }
 
     def latest(segment: object) -> dict[str, object]:
         index = int(getattr(segment, "segment_index"))
@@ -1792,6 +1908,106 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
                 roster=roster,
                 acceptance=acceptance,
             )
+
+    external_bootstrap = tmp_path / "external_bootstrap.pt"
+    external_bootstrap.write_bytes(b"external bootstrap")
+    external_record = tmp_path / "external_source_rebind.json"
+    external_record.write_text("{}\n", encoding="utf-8")
+
+    def external_rebind(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "checkpoint": {"output_path": str(external_bootstrap)},
+            "endpoint": {
+                "history_length": 22,
+                "iteration": 672,
+                "optimizer_step": 16128,
+                "segment": 21,
+                "stage": "C2",
+                "transitions": 5505024,
+            },
+        }
+
+    def external_latest(segment: object) -> dict[str, object]:
+        return {
+            "actual_global_transitions": int(getattr(segment, "end_transitions")),
+            "checkpoint": str(tmp_path / f"external_post_{segment.segment_index}.pt"),
+            "checkpoint_sha256": f"{int(segment.segment_index):064x}",
+            "curriculum_stage": "C2",
+            "iteration": int(getattr(segment, "end_iteration")),
+            "logical_crossing": int(getattr(segment, "crossing").logical_transitions),
+            "segment": int(getattr(segment, "segment_index")),
+            "source_manifest_sha256": "a" * 64,
+        }
+
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            train_phase6, "_validate_mainrunner_rebind_record", external_rebind
+        )
+        empty_external = tmp_path / "empty_external"
+        train_phase6._validate_mainrunner_completed_segments(
+            empty_external,
+            current_iteration=672,
+            target_iteration=2442,
+            source_rebind=external_record,
+            config=config,
+            roster=roster,
+            acceptance=acceptance,
+        )
+        with pytest.raises(ValueError, match="precedes"):
+            train_phase6._validate_mainrunner_completed_segments(
+                tmp_path / "before_external",
+                current_iteration=641,
+                target_iteration=2442,
+                source_rebind=external_record,
+                config=config,
+                roster=roster,
+                acceptance=acceptance,
+            )
+        with pytest.raises(ValueError, match="segment boundary"):
+            train_phase6._validate_mainrunner_completed_segments(
+                tmp_path / "non_endpoint_before_external",
+                current_iteration=671,
+                target_iteration=2442,
+                source_rebind=external_record,
+                config=config,
+                roster=roster,
+                acceptance=acceptance,
+            )
+        before_external = tmp_path / "before_external_dir"
+        (before_external / "segment_0021").mkdir(parents=True)
+        with pytest.raises(ValueError, match="directory set"):
+            train_phase6._validate_mainrunner_completed_segments(
+                before_external,
+                current_iteration=672,
+                target_iteration=2442,
+                source_rebind=external_record,
+                config=config,
+                roster=roster,
+                acceptance=acceptance,
+            )
+        completed_external = tmp_path / "completed_external"
+        (completed_external / "segment_0022").mkdir(parents=True)
+        post = tmp_path / "external_post_22.pt"
+        post.write_bytes(b"post")
+        latest_22 = external_latest(plan_learning_segments(total_iterations=2442)[22])
+        latest_22["checkpoint"] = str(post)
+        (completed_external / "latest.json").write_text(
+            json.dumps(latest_22), encoding="utf-8"
+        )
+        patched.setattr(
+            train_phase6,
+            "_validate_mainrunner_completed_segment",
+            lambda *, segment, **_kwargs: latest_22,
+        )
+        train_phase6._validate_mainrunner_completed_segments(
+            completed_external,
+            current_iteration=702,
+            target_iteration=2442,
+            source_rebind=external_record,
+            config=config,
+            roster=roster,
+            acceptance=acceptance,
+        )
 
     stage_log = tmp_path / "finalize.log"
     stage_log.write_text("ok\n", encoding="utf-8")
