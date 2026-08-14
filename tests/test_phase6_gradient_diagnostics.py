@@ -1,0 +1,441 @@
+from __future__ import annotations
+
+import ast
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+import torch
+
+from somaforce_cross.learning.actor_critic import ResidualActorCritic
+from somaforce_cross.learning.semantic_ppo import SemanticPPO
+
+
+ROOT = Path(__file__).parents[1]
+PATH = ROOT / "scripts/diagnose_phase6_gradients.py"
+SHELL = (
+    ROOT.parents[0]
+    / "training-job-scripts/somaforce_cross/phase6_joint_training"
+    / "diagnose_segment47_gradients_4gpu.sh"
+)
+SPEC = importlib.util.spec_from_file_location("phase6_gradient_diagnostics", PATH)
+assert SPEC and SPEC.loader
+diagnostic = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(diagnostic)
+
+
+class FakeStorage:
+    """CPU implementation of the exact storage surface used by the diagnostic."""
+
+    def __init__(self, _kind, envs, steps, observations, _action_shape, device):
+        self.observations = {
+            name: value.clone() for name, value in observations.items()
+        }
+        self.envs, self.steps, self.device = envs, steps, device
+        self.rows = []
+
+    def add_transitions(self, transition):
+        self.rows.append(transition)
+
+    def compute_returns(self, *_args, **_kwargs):
+        pass
+
+    def mini_batch_generator(self, minibatches, epochs):
+        assert len(self.rows) == 32 and minibatches == 8 and epochs == 3
+        for _ in range(24):
+            batch = self.envs
+            policy = torch.zeros(batch, 668)
+            policy[:, 12] = 1.0
+            policy[:, 25] = 1.0
+            target = torch.zeros(batch, 31)
+            target[:, 12] = 1.0
+            target[:, 25] = 1.0
+            yield (
+                {
+                    "policy": policy,
+                    "critic": torch.zeros(batch, 845),
+                    "semantic_target": target,
+                },
+                torch.zeros(batch, 23),
+                torch.zeros(batch, 1),
+                torch.ones(batch, 1),
+                torch.zeros(batch, 1),
+                torch.zeros(batch, 1),
+                None,
+                None,
+                (None, None),
+                None,
+            )
+
+    def clear(self):
+        pass
+
+
+def _observations(batch: int = 2):
+    policy = torch.zeros(batch, 668)
+    policy[:, 12] = 1.0
+    policy[:, 25] = 1.0
+    target = torch.zeros(batch, 31)
+    target[:, 12] = 1.0
+    target[:, 25] = 1.0
+    return {
+        "policy": policy,
+        "critic": torch.zeros(batch, 845),
+        "semantic_target": target,
+    }
+
+
+def _outcome_rows():
+    diagnostics = {
+        "p50_wrench": 1.0,
+        "p95_wrench": 1.0,
+        "p99_wrench": 1.0,
+        "impulse": 1.0,
+        "p95_force_rate": 1.0,
+        "contact_fraction": 1.0,
+        "contact_loss": 0.0,
+        "sensor_quality": 1.0,
+        "stability_margin": 1.0,
+        "arms_residual_norm": 1.0,
+        "waist_residual_norm": 1.0,
+        "legs_residual_norm": 1.0,
+        "saturation": 0.0,
+        "dropout": 0.0,
+        "semantic_entropy": 1.0,
+        "semantic_kl": 0.0,
+    }
+    reward = {
+        "contact": 0.0,
+        "force": 0.0,
+        "nonfinite": 0.0,
+        "progress": 0.0,
+        "rate": 0.0,
+        "residual": 0.0,
+        "stability": 0.0,
+        "terminal_failure": 0.0,
+        "terminal_success": 0.0,
+    }
+    stage = [
+        {
+            "task": "move_suitcase",
+            "mode": "residual",
+            "stage": "C1",
+            "subset": "stage",
+            "family": "physical",
+            "seed": index,
+            "env_id": index % 64,
+            "steps": 10,
+            "return": 1.0,
+            "success": True,
+            "failure": False,
+            "invalid": False,
+            "timeout": False,
+            "raw_reward_sums": reward,
+            "weighted_reward_sums": reward,
+            "diagnostics": diagnostics,
+        }
+        for index in range(256)
+    ]
+    nominal = [
+        {**row, "subset": "nominal", "seed": 1_000 + index}
+        for index, row in enumerate(stage[:128])
+    ]
+    return [*stage, *nominal]
+
+
+def test_module_has_no_top_level_isaac_or_rsl_import() -> None:
+    imports = [
+        node
+        for node in ast.parse(PATH.read_text()).body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+    ]
+    assert "isaac" not in "\n".join(ast.unparse(node) for node in imports).lower()
+    assert "rsl" not in "\n".join(ast.unparse(node) for node in imports).lower()
+
+
+def test_parser_and_shell_argv_are_consistent() -> None:
+    shell = SHELL.read_text()
+    assert "--mode plan" in shell and "--mode rank-wrapper" in shell
+    assert "--headless" not in shell
+    assert "for PROBE in gradient residual scaffold_only; do" in shell
+    assert '--probe "${PROBE}"' in shell
+    wrapper = diagnostic._plain_parser("rank-wrapper")
+    parsed = wrapper.parse_args(
+        [
+            "--mode",
+            "rank-wrapper",
+            "--output-dir",
+            "x",
+            "--checkpoint",
+            "c",
+            "--stage",
+            "C1",
+            "--probe",
+            "gradient",
+            "--timeout-s",
+            "1",
+        ]
+    )
+    assert diagnostic._worker_command(parsed)[-1] == "--headless"
+    worker_source = ast.get_source_segment(
+        PATH.read_text(),
+        next(
+            node
+            for node in ast.parse(PATH.read_text()).body
+            if isinstance(node, ast.FunctionDef) and node.name == "_worker_main"
+        ),
+    )
+    assert worker_source is not None
+    assert worker_source.index(
+        'args.device = f"cuda:{local_rank}"'
+    ) < worker_source.index("launcher = AppLauncher(args)")
+    assert worker_source.index("args.num_envs = 64") < worker_source.index(
+        "launcher = AppLauncher(args)"
+    )
+    assert worker_source.index(
+        "torch.cuda.set_device(local_rank)"
+    ) < worker_source.index("launcher = AppLauncher(args)")
+    assert worker_source.count("_build_environment(") == 1
+    outcome_source = ast.get_source_segment(
+        PATH.read_text(),
+        next(
+            node
+            for node in ast.parse(PATH.read_text()).body
+            if isinstance(node, ast.FunctionDef) and node.name == "_run_outcome_mode"
+        ),
+    )
+    assert (
+        outcome_source is not None and outcome_source.count("_build_environment(") == 1
+    )
+
+
+def test_real_actor_critic_parameter_groups_use_log_std() -> None:
+    policy = ResidualActorCritic()
+    groups = diagnostic._parameter_groups(policy)
+    assert groups["log_std"] == (policy.log_std,)
+    assert set(groups) == set(diagnostic.GROUPS)
+
+
+def test_fake_storage_uses_production_32_step_and_24_minibatch_path() -> None:
+    policy = ResidualActorCritic()
+    algorithm = SemanticPPO(policy, storage_class=FakeStorage, device="cpu")
+    observations = _observations()
+    algorithm.init_storage(
+        num_envs=2, num_transitions_per_env=32, observations=observations
+    )
+    for _ in range(32):
+        algorithm.act(observations)
+        algorithm.process_env_step(
+            observations,
+            torch.zeros(2),
+            torch.zeros(2, dtype=torch.bool),
+            {"time_outs": torch.zeros(2)},
+        )
+    algorithm.compute_returns(observations)
+    records = diagnostic._gradient_probe(
+        algorithm=algorithm,
+        observations=observations,
+        ppo={
+            "num_mini_batches": 8,
+            "num_learning_epochs": 3,
+            "clip_param": 0.2,
+            "value_loss_coef": 1.0,
+            "entropy_coef": 0.001,
+        },
+    )
+    summary = diagnostic._summarize_gradient_records(records)
+    assert len(records) == 24 and len(summary["records"]) == 24
+    assert set(summary["losses"]) == set(diagnostic.OBJECTIVES)
+    assert all(parameter.grad is None for parameter in policy.parameters())
+
+
+def test_outcome_aggregation_rejects_zero_placeholder() -> None:
+    with pytest.raises(ValueError, match="quota"):
+        diagnostic._aggregate_outcomes(
+            [], task="move_suitcase", mode="residual", stage_name="C1"
+        )
+
+
+def test_outcome_aggregation_rejects_missing_schema() -> None:
+    rows = _outcome_rows()
+    del rows[0]["diagnostics"]
+    with pytest.raises(ValueError, match="schema"):
+        diagnostic._aggregate_outcomes(
+            rows, task="move_suitcase", mode="residual", stage_name="C1"
+        )
+
+
+def test_outcome_aggregation_requires_production_quotas() -> None:
+    residual = _outcome_rows()
+    scaffold = [{**row, "mode": "scaffold_only"} for row in residual]
+    summary = diagnostic._paired_outcome_summary(
+        residual, scaffold, task="move_suitcase", stage="C1"
+    )
+    assert summary["retention"] == 1.0 and summary["success"] == 1.0
+    with pytest.raises(ValueError, match="quota"):
+        diagnostic._aggregate_outcomes(
+            residual[:-1], task="move_suitcase", mode="residual", stage_name="C1"
+        )
+    assert "schedule_sha256" in PATH.read_text()
+
+
+def test_runtime_rng_capture_is_state_sensitive() -> None:
+    first = diagnostic._hash_object(torch.get_rng_state())
+    _ = torch.rand(1)
+    second = diagnostic._hash_object(torch.get_rng_state())
+    source = PATH.read_text()
+    assert first != second
+    assert "runtime_rng_start = _hash_object" in source
+    assert "runtime_rng_end = _hash_object" in source
+    assert source.count("torch.cuda.get_rng_state(local_rank)") == 3
+
+
+def test_wrapper_timeout_handles_silent_child(tmp_path: Path, monkeypatch) -> None:
+    script = tmp_path / "silent.py"
+    script.write_text("import time; time.sleep(10)\n")
+    monkeypatch.setattr(
+        diagnostic, "_worker_command", lambda _args: [sys.executable, str(script)]
+    )
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    args = diagnostic._plain_parser("rank-wrapper").parse_args(
+        [
+            "--mode",
+            "rank-wrapper",
+            "--output-dir",
+            str(tmp_path / "attempt"),
+            "--checkpoint",
+            "x",
+            "--stage",
+            "C1",
+            "--probe",
+            "gradient",
+            "--timeout-s",
+            "1",
+        ]
+    )
+    with pytest.raises(RuntimeError, match="wrapper evidence"):
+        diagnostic._run_rank_wrapper(args)
+    assert (
+        diagnostic._read_json(tmp_path / "attempt/C1/gradient/rank_0/wrapper.json")[
+            "timed_out"
+        ]
+        is True
+    )
+
+
+def test_plan_is_written_before_worker_launch(tmp_path: Path, monkeypatch) -> None:
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    monkeypatch.setattr(diagnostic, "CHECKPOINT_SHA256", diagnostic._sha256(checkpoint))
+    args = diagnostic._plain_parser("plan").parse_args(
+        [
+            "--mode",
+            "plan",
+            "--output-dir",
+            str(tmp_path / "attempt"),
+            "--checkpoint",
+            str(checkpoint),
+            "--timeout-s",
+            "1",
+        ]
+    )
+    diagnostic._run_plan(args)
+    assert (tmp_path / "attempt/plan.json").is_file() and diagnostic._read_json(
+        tmp_path / "attempt/progress.json"
+    )["status"] == "planned"
+
+
+def test_plan_refuses_to_overwrite_failed_attempt_and_stage_merge_rejects_bad_wrappers(
+    tmp_path: Path,
+) -> None:
+    args = diagnostic._plain_parser("plan").parse_args(
+        [
+            "--mode",
+            "plan",
+            "--output-dir",
+            str(tmp_path),
+            "--checkpoint",
+            "x",
+            "--timeout-s",
+            "1",
+        ]
+    )
+    with pytest.raises(FileExistsError, match="refuses"):
+        diagnostic._run_plan(args)
+    stage = tmp_path / "stage"
+    with pytest.raises(ValueError, match="missing or duplicated"):
+        diagnostic._stage_probe_records(stage)
+    for probe in diagnostic.PROBES:
+        for rank, task in enumerate(diagnostic.TASKS):
+            rank_dir = stage / probe / f"rank_{rank}"
+            rank_dir.mkdir(parents=True)
+            diagnostic._atomic_json(rank_dir / "command.json", {"probe": probe})
+            diagnostic._atomic_json(rank_dir / "progress.json", {"status": "complete"})
+            diagnostic._atomic_json(
+                rank_dir / "result.json",
+                {"status": "ok", "probe": probe, "rank": rank, "task": task},
+            )
+            diagnostic._atomic_json(
+                rank_dir / "wrapper.json",
+                {
+                    "passed": True,
+                    "exit_code": 0,
+                    "signal": None,
+                    "timed_out": False,
+                    "timeout_kind": None,
+                    "marker_order_valid": True,
+                },
+            )
+            (rank_dir / "worker.log").write_text("ok\n")
+    assert set(diagnostic._stage_probe_records(stage)) == set(diagnostic.PROBES)
+    wrapper = stage / "residual/rank_1/wrapper.json"
+    payload = diagnostic._read_json(wrapper)
+    payload["timed_out"] = True
+    diagnostic._atomic_json(wrapper, payload)
+    with pytest.raises(ValueError, match="clean completion"):
+        diagnostic._stage_probe_records(stage)
+    payload["timed_out"] = False
+    payload["marker_order_valid"] = False
+    diagnostic._atomic_json(wrapper, payload)
+    with pytest.raises(ValueError, match="clean completion"):
+        diagnostic._stage_probe_records(stage)
+    extra = stage / "gradient/duplicate_rank_0"
+    extra.mkdir()
+    with pytest.raises(ValueError, match="missing or duplicated"):
+        diagnostic._stage_probe_records(stage)
+
+
+def test_support_requires_both_material_classes_and_invariants() -> None:
+    stage = {
+        "invariants_ok": True,
+        "tasks": {
+            task: {"reward": 1.0, "success": 1.0, "retention": 1.0, "failure": 0.0}
+            for task in diagnostic.TASKS
+        },
+        "gradient": {
+            "combined_norm": {"mean": 1.0},
+            "ppo_semantic_cosine": {"mean": 1.0},
+            "preclip_fraction": 0.0,
+        },
+    }
+    c2 = {
+        **stage,
+        "tasks": {
+            **stage["tasks"],
+            "move_suitcase": {
+                "reward": 0.8,
+                "success": 0.85,
+                "retention": 1.0,
+                "failure": 0.0,
+            },
+        },
+        "gradient": {
+            "combined_norm": {"mean": 2.0},
+            "ppo_semantic_cosine": {"mean": 1.0},
+            "preclip_fraction": 0.0,
+        },
+    }
+    assert diagnostic._support_decision(stage, c2)["status"] == "supported"
