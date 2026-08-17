@@ -17,7 +17,7 @@ PATH = ROOT / "scripts/diagnose_phase6_gradients.py"
 SHELL = (
     ROOT.parents[0]
     / "training-job-scripts/somaforce_cross/phase6_joint_training"
-    / "diagnose_segment47_gradients_4gpu.sh"
+    / "diagnose_segment47_authority_contact_drift_4gpu.sh"
 )
 SPEC = importlib.util.spec_from_file_location("phase6_gradient_diagnostics", PATH)
 assert SPEC and SPEC.loader
@@ -160,6 +160,12 @@ def test_parser_and_shell_argv_are_consistent() -> None:
     assert "--headless" not in shell
     assert "for PROBE in gradient residual scaffold_only; do" in shell
     assert '--probe "${PROBE}"' in shell
+    assert "--authority-stage" in shell
+    assert "for SEGMENT in 47 51 52 59 79; do" in shell
+    assert "chmod" not in shell
+    assert "REBOUND_ROOT" in shell
+    assert "source_rebind_mainrunner.json" in shell
+    assert "post_evaluation_mainrunner_rebound.pt" in shell
     wrapper = diagnostic._plain_parser("rank-wrapper")
     parsed = wrapper.parse_args(
         [
@@ -170,6 +176,8 @@ def test_parser_and_shell_argv_are_consistent() -> None:
             "--checkpoint",
             "c",
             "--stage",
+            "C2",
+            "--authority-stage",
             "C1",
             "--probe",
             "gradient",
@@ -177,7 +185,8 @@ def test_parser_and_shell_argv_are_consistent() -> None:
             "1",
         ]
     )
-    assert diagnostic._worker_command(parsed)[-1] == "--headless"
+    assert "--headless" in diagnostic._worker_command(parsed)
+    assert diagnostic._worker_command(parsed)[-2:] == ["--authority-stage", "C1"]
     worker_source = ast.get_source_segment(
         PATH.read_text(),
         next(
@@ -197,6 +206,10 @@ def test_parser_and_shell_argv_are_consistent() -> None:
         "torch.cuda.set_device(local_rank)"
     ) < worker_source.index("launcher = AppLauncher(args)")
     assert worker_source.count("_build_environment(") == 1
+    assert "_bind_diagnostic_authority(" in worker_source
+    assert (
+        'rollout_steps = 472 if task.task == "move_suitcase" else 32' in worker_source
+    )
     outcome_source = ast.get_source_segment(
         PATH.read_text(),
         next(
@@ -278,6 +291,14 @@ def test_outcome_aggregation_requires_production_quotas() -> None:
             residual[:-1], task="move_suitcase", mode="residual", stage_name="C1"
         )
     assert "schedule_sha256" in PATH.read_text()
+    assert diagnostic._authority_case(authority_stage="C1", probe="residual") == (
+        "c2_env_c1_authority"
+    )
+    assert diagnostic._authority_case(authority_stage=None, probe="scaffold_only") == (
+        "scaffold_only"
+    )
+    with pytest.raises(ValueError, match="C1 or C2"):
+        diagnostic._authority_case(authority_stage=None, probe="gradient")
 
 
 def test_runtime_rng_capture_is_state_sensitive() -> None:
@@ -330,6 +351,16 @@ def test_plan_is_written_before_worker_launch(tmp_path: Path, monkeypatch) -> No
     checkpoint = tmp_path / "checkpoint.pt"
     checkpoint.write_bytes(b"checkpoint")
     monkeypatch.setattr(diagnostic, "CHECKPOINT_SHA256", diagnostic._sha256(checkpoint))
+    monkeypatch.setattr(
+        diagnostic,
+        "_diagnostic_checkpoint_binding",
+        lambda path: {
+            "diagnostic_only": True,
+            "rebound_path": str(path),
+            "rebound_sha256": diagnostic._sha256(path),
+            "segment": 47,
+        },
+    )
     args = diagnostic._plain_parser("plan").parse_args(
         [
             "--mode",
@@ -346,6 +377,13 @@ def test_plan_is_written_before_worker_launch(tmp_path: Path, monkeypatch) -> No
     assert (tmp_path / "attempt/plan.json").is_file() and diagnostic._read_json(
         tmp_path / "attempt/progress.json"
     )["status"] == "planned"
+    plan = diagnostic._read_json(tmp_path / "attempt/plan.json")
+    assert plan["environment_stage"] == "C2"
+    assert plan["authority_cases"] == list(diagnostic.AUTHORITY_CASES)
+    assert plan["suitcase_event_trace"]["horizon_steps"] == 472
+    assert plan["c1_nominal_checkpoint_drift"]["segments"] == [47, 51, 52, 59, 79]
+    assert plan["checkpoint"]["diagnostic_only"] is True
+    assert "rebound_checkpoints" in plan["c1_nominal_checkpoint_drift"]
 
 
 def test_plan_refuses_to_overwrite_failed_attempt_and_stage_merge_rejects_bad_wrappers(
@@ -439,3 +477,10 @@ def test_support_requires_both_material_classes_and_invariants() -> None:
         },
     }
     assert diagnostic._support_decision(stage, c2)["status"] == "supported"
+    source = PATH.read_text()
+    assert "suitcase_event_time_series.json" in source
+    assert "_window_gradient_diagnostic(" in source
+    assert "strict restore of five diagnostic-only rebound endpoints" in source
+    assert "diagnostic refuses a historical or unbound checkpoint input" in source
+    assert "source_manifest_only_change" in source
+    assert "payload_except_source_manifest" in source

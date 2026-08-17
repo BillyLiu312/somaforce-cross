@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 import traceback
+import types
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -26,7 +27,7 @@ import torch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CHECKPOINT_SHA256 = "b7c7c495394882218d8c941f31cdce76e9b993ac2073891bb4a156128693348a"
+CHECKPOINT_SHA256 = "834691b5eef7cbcbe3bf439630f81a6a1be7844065593f73b409ad5422615ae1"
 RESULT_MARKER = "PHASE6_DIAGNOSTIC_RESULT="
 SUCCESS_MARKERS = ("JSON_WRITTEN", RESULT_MARKER, "ENV_CLOSED")
 TASKS = ("push_door_hand", "push_box", "move_suitcase", "move_largebox")
@@ -44,6 +45,47 @@ OBJECTIVES = (
 )
 OUTCOME_MODES = ("residual", "scaffold_only")
 PROBES = ("gradient", *OUTCOME_MODES)
+AUTHORITY_CASES = (
+    "c2_env_c1_authority",
+    "c2_env_c2_authority",
+    "scaffold_only",
+)
+SUITCASE_WINDOWS = ("contact", "lift", "carry", "set_down")
+DRIFT_SEGMENTS = (47, 51, 52, 59, 79)
+ORIGINAL_CHECKPOINTS = {
+    47: "b7c7c495394882218d8c941f31cdce76e9b993ac2073891bb4a156128693348a",
+    51: "6b4d2845d4194822aabd15c4d5d29b3980dfb5adc75bb3ac297a034516442ab5",
+    52: "97f1770323636195ea83c2363b31c1d49a7d180a1a07f05416bd6e99e6eaccf5",
+    59: "15ee9d673603050c65b003fd362b3765ee06dafc95f1845434d2deca297befa6",
+    79: "ea7c015f82a5a349387e966f33de55a6f7d8efc2a26b17c08698e55fb3ee5b24",
+}
+REBOUND_CHECKPOINTS = {
+    47: (
+        "834691b5eef7cbcbe3bf439630f81a6a1be7844065593f73b409ad5422615ae1",
+        "a20bfaf08bcaa4bc10d76dbc8c6ba54f2966d7113d20b7ff57283be6b0146143",
+    ),
+    51: (
+        "b8f844d28d8653c714a3c56251eb4c5f845fe1ad6bf3c6f676bb67a7881be85b",
+        "dbb47719ca8c34f4ce2b71b79771ab5ca56e4ae25834b6e80f5ce6195e7ee8dd",
+    ),
+    52: (
+        "3f26f3b8ed35fae758f2ebf60cedd3a411cd8ef7fc5e8e9f4a16e5483b31799f",
+        "262592ed2f564da4d685fb35598f3a6e7c8d89a495793ad19fd61c97451089a6",
+    ),
+    59: (
+        "b57031a71062adcbe331b8d5ff8f5d23d25343ec796389476ce1ba8dc680f5ed",
+        "2b88ac7cd8c81580951e89dd933ee57fa1503eb4f47f95efba104e416a982bd3",
+    ),
+    79: (
+        "6573a5170f88e2aed90075d05e3acf31081fd144fdbcaed10b9806c36a085b04",
+        "6b517addc09a1be56927be4b0ad58ba3ceb35ea043a7d3bc8ca6f957c1a57b2a",
+    ),
+}
+REBOUND_ROOT = (
+    REPO_ROOT
+    / "outputs/phase6_gradient_diagnostics"
+    / "phase6-diagnostic-source-rebind-2b7bfbc-20260817"
+)
 OUTCOME_RECORD_KEYS = {
     "diagnostics",
     "env_id",
@@ -117,6 +159,74 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _accepted_checkpoint_sha256(value: str) -> bool:
+    return value == CHECKPOINT_SHA256 or value in {
+        checkpoint_sha256 for checkpoint_sha256, _ in REBOUND_CHECKPOINTS.values()
+    }
+
+
+def _original_checkpoint(segment: int) -> Path:
+    return (
+        REPO_ROOT
+        / "outputs/phase6_learning_acceptance"
+        / "phase6-learning-main-4gpu-64env-2442iter-20260812_185544"
+        / f"segment_{segment:04d}"
+        / "post_evaluation.pt"
+    )
+
+
+def _rebound_attempt(segment: int) -> Path:
+    return REBOUND_ROOT / f"segment_{segment:04d}" / "attempt_0001"
+
+
+def _rebound_checkpoint(segment: int) -> Path:
+    return _rebound_attempt(segment) / "post_evaluation_mainrunner_rebound.pt"
+
+
+def _rebind_record(segment: int) -> Path:
+    return _rebound_attempt(segment) / "source_rebind_mainrunner.json"
+
+
+def _diagnostic_checkpoint_binding(checkpoint: Path) -> dict[str, object]:
+    """Require one of the five diagnostic-only, current-source-bound endpoints."""
+    for segment, (rebound_sha256, record_sha256) in REBOUND_CHECKPOINTS.items():
+        if checkpoint.resolve() != _rebound_checkpoint(segment).resolve():
+            continue
+        record_path = _rebind_record(segment)
+        if (
+            _sha256(checkpoint) != rebound_sha256
+            or _sha256(record_path) != record_sha256
+        ):
+            raise ValueError("diagnostic rebound checkpoint or record SHA256 mismatch")
+        record = _read_json(record_path)
+        checkpoint_record = record.get("checkpoint")
+        if (
+            record.get("status") != "ok"
+            or not isinstance(checkpoint_record, Mapping)
+            or checkpoint_record.get("input_path") != str(_original_checkpoint(segment))
+            or checkpoint_record.get("input_sha256") != ORIGINAL_CHECKPOINTS[segment]
+            or checkpoint_record.get("output_path") != str(checkpoint)
+            or checkpoint_record.get("output_sha256") != rebound_sha256
+            or record.get("invariants")
+            != {
+                "payload_except_source_manifest": True,
+                "source_manifest_only_change": True,
+            }
+        ):
+            raise ValueError("diagnostic rebound record binding is invalid")
+        return {
+            "diagnostic_only": True,
+            "original_path": str(_original_checkpoint(segment)),
+            "original_sha256": ORIGINAL_CHECKPOINTS[segment],
+            "rebind_record_path": str(record_path),
+            "rebind_record_sha256": record_sha256,
+            "rebound_path": str(checkpoint),
+            "rebound_sha256": rebound_sha256,
+            "segment": segment,
+        }
+    raise ValueError("diagnostic refuses a historical or unbound checkpoint input")
+
+
 def _update_digest(digest: object, value: object) -> None:
     if isinstance(value, torch.Tensor):
         tensor = value.detach().cpu().contiguous()
@@ -143,6 +253,169 @@ def _hash_object(value: object) -> str:
     digest = hashlib.sha256()
     _update_digest(digest, value)
     return digest.hexdigest()
+
+
+def _authority_case(*, authority_stage: str | None, probe: str) -> str:
+    """Name the single-process diagnostic condition without changing runtime code."""
+    if probe == "scaffold_only":
+        return "scaffold_only"
+    if authority_stage not in {"C1", "C2"}:
+        raise ValueError("residual diagnostic requires C1 or C2 authority")
+    return f"c2_env_{authority_stage.lower()}_authority"
+
+
+def _bind_diagnostic_authority(
+    environment: object, *, environment_stage: str, authority_stage: str | None
+) -> dict[str, object]:
+    """Override only this process' authority lookup while preserving its buffers.
+
+    The residual environment owns the C2 mismatch/sensor rows through its normal
+    curriculum stage.  Rebinding the instance method leaves the authority module
+    state dict unchanged and cannot affect a checkpoint or production source.
+    """
+    if environment_stage != "C2":
+        raise ValueError("authority discrimination fixes the environment at C2")
+    if authority_stage not in {"C1", "C2"}:
+        raise ValueError("authority discrimination requires C1 or C2 authority")
+    authority = getattr(environment, "authority")
+    before = _hash_object(authority.state_dict())
+    selected = authority(1 if authority_stage == "C1" else 2).detach().clone()
+    original = authority.forward
+
+    def diagnostic_forward(_self: object, stage: object) -> torch.Tensor:
+        # `_pre_physics_step` always requests the environment's C2 index.
+        if stage != 2:
+            raise AssertionError("diagnostic authority received a non-C2 environment")
+        return selected
+
+    authority.forward = types.MethodType(diagnostic_forward, authority)
+    return {
+        "environment_stage": environment_stage,
+        "authority_stage": authority_stage,
+        "authority_buffer_sha256_before": before,
+        "authority_buffer_sha256_after": _hash_object(authority.state_dict()),
+        "selected_authority_sha256": _hash_object(selected),
+        "process_local_override": True,
+        "original_forward_name": original.__name__,
+    }
+
+
+def _suitcase_time_series_record(
+    *, environment: object, step: int
+) -> tuple[dict[str, object], dict[str, torch.Tensor]]:
+    """Capture all fixed-horizon suitcase event signals before one control step."""
+    adapter = environment.adapter
+    signals = adapter.progress_signals()
+    contact = signals.contact_truth.any(dim=-1)
+    lifted = adapter.lift_latched
+    exhausted = signals.reference_exhausted
+    object_local = adapter.object.data.root_link_pos_w - environment.scene.env_origins
+    set_down_error = torch.linalg.vector_norm(
+        object_local - adapter.reference_positions[-1], dim=-1
+    )
+    windows = {
+        "contact": contact,
+        "lift": lifted,
+        "carry": lifted & ~exhausted,
+        "set_down": exhausted,
+    }
+    return (
+        {
+            "step": step,
+            "contact_fraction": float(contact.float().mean().item()),
+            "lift_fraction": float(lifted.float().mean().item()),
+            "carry_fraction": float(windows["carry"].float().mean().item()),
+            "set_down_fraction": float(exhausted.float().mean().item()),
+            "reference_exhausted_fraction": float(exhausted.float().mean().item()),
+            "set_down_error_mean": float(set_down_error.mean().item()),
+            "window_counts": {
+                name: int(mask.sum().item()) for name, mask in windows.items()
+            },
+        },
+        windows,
+    )
+
+
+def _summarize_suitcase_windows(
+    *,
+    records: Sequence[Mapping[str, object]],
+    window_diagnostics: Mapping[str, Mapping[str, object] | None],
+) -> dict[str, object]:
+    if len(records) != 472:
+        raise ValueError("suitcase diagnostic requires the complete 472-step horizon")
+    result: dict[str, object] = {}
+    for window in SUITCASE_WINDOWS:
+        active_steps = sum(
+            int(record["window_counts"][window]) > 0 for record in records
+        )
+        result[window] = {
+            "active_steps": active_steps,
+            "available": active_steps > 0,
+            "diagnostic": window_diagnostics[window],
+        }
+    return result
+
+
+def _window_gradient_diagnostic(
+    *,
+    policy: torch.nn.Module,
+    samples: Sequence[Mapping[str, object]],
+    ppo: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Differentiate a fixed event-window trace without an optimizer update."""
+    if not samples:
+        return None
+    from somaforce_cross.learning.losses import semantic_losses
+
+    keys = ("policy", "critic", "semantic_target")
+    observations = {
+        key: torch.cat([sample["observations"][key] for sample in samples], dim=0)
+        for key in keys
+    }
+    actions = torch.cat([sample["actions"] for sample in samples], dim=0)
+    rewards = torch.cat([sample["rewards"] for sample in samples], dim=0)
+    policy.act(observations)
+    log_prob = policy.get_actions_log_prob(actions)
+    ratio = torch.exp(log_prob - log_prob.detach())
+    advantages = rewards - rewards.mean()
+    surrogate = torch.maximum(
+        -advantages * ratio,
+        -advantages
+        * torch.clamp(
+            ratio, 1.0 - float(ppo["clip_param"]), 1.0 + float(ppo["clip_param"])
+        ),
+    ).mean()
+    value = policy.evaluate(observations)
+    returns = rewards.unsqueeze(-1)
+    value_raw = (value - returns).pow(2).mean()
+    value_weighted = float(ppo["value_loss_coef"]) * value_raw
+    entropy = -float(ppo["entropy_coef"]) * policy.entropy.mean()
+    semantic = semantic_losses(
+        policy.last_semantic_output.p_dir,
+        policy.last_semantic_output.p_mag,
+        observations["semantic_target"],
+    )
+    record = _minibatch_diagnostic(
+        policy=policy,
+        objectives={
+            "surrogate": surrogate,
+            "value_raw": value_raw,
+            "value_weighted": value_weighted,
+            "entropy": entropy,
+            "ppo": surrogate + value_weighted + entropy,
+            "semantic_dir": semantic.dir_loss,
+            "semantic_mag": semantic.mag_loss,
+            "semantic_total": semantic.total,
+            "combined": surrogate + value_weighted + entropy + semantic.total,
+        },
+    )
+    return {
+        "sample_count": len(samples),
+        "losses": record["losses"],
+        "gradient_norms": record["gradient_norms"],
+        "ppo_semantic_cosine": record["ppo_semantic_cosine"],
+        "combined_norm": record["combined_norm"],
+    }
 
 
 def _signal_name(return_code: int | None) -> str | None:
@@ -511,6 +784,7 @@ def _worker_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--stage", choices=("C1", "C2"), required=True)
+    parser.add_argument("--authority-stage", choices=("C1", "C2"))
     parser.add_argument("--probe", choices=PROBES, required=True)
     parser.add_argument("--timeout-s", type=int, required=True)
     AppLauncher.add_app_launcher_args(parser)
@@ -523,6 +797,7 @@ def _plain_parser(mode: str) -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--stage", choices=("C1", "C2"))
+    parser.add_argument("--authority-stage", choices=("C1", "C2"))
     if mode in {"rank-wrapper", "summarize-stage"}:
         parser.add_argument("--probe", choices=PROBES)
     parser.add_argument("--timeout-s", type=int, required=True)
@@ -530,7 +805,7 @@ def _plain_parser(mode: str) -> argparse.ArgumentParser:
 
 
 def _worker_command(args: argparse.Namespace) -> list[str]:
-    return [
+    command = [
         sys.executable,
         str(Path(__file__).resolve()),
         "--mode",
@@ -547,6 +822,9 @@ def _worker_command(args: argparse.Namespace) -> list[str]:
         str(args.timeout_s),
         "--headless",
     ]
+    if args.authority_stage is not None:
+        command.extend(("--authority-stage", args.authority_stage))
+    return command
 
 
 def _run_rank_wrapper(args: argparse.Namespace) -> int:
@@ -778,6 +1056,13 @@ def _run_outcome_mode(
     records: list[dict[str, object]] = []
     control_steps = 0
     try:
+        authority_override = None
+        if mode == "residual":
+            authority_override = _bind_diagnostic_authority(
+                environment,
+                environment_stage=args.stage,
+                authority_stage=args.authority_stage or args.stage,
+            )
         schedule = paired_evaluation_schedule(
             task=task.task,
             stage=args.stage,
@@ -841,6 +1126,7 @@ def _run_outcome_mode(
             raise AssertionError("paired outcome probe mutated the fixed normalizer")
         seeds = [int(record["seed"]) for record in records]
         manifest = {
+            "authority_override": authority_override,
             "control_steps": control_steps,
             "mode": mode,
             "normalizer_sha256": normalizer_before,
@@ -882,9 +1168,10 @@ def _worker_main(values: list[str]) -> int:
     if (
         args.timeout_s <= 0
         or not args.checkpoint.is_file()
-        or _sha256(args.checkpoint) != CHECKPOINT_SHA256
+        or not _accepted_checkpoint_sha256(_sha256(args.checkpoint))
     ):
         raise ValueError("diagnostic checkpoint or timeout is invalid")
+    checkpoint_binding = _diagnostic_checkpoint_binding(args.checkpoint)
     rank, local_rank, world_size = (
         int(os.environ["RANK"]),
         int(os.environ["LOCAL_RANK"]),
@@ -943,11 +1230,13 @@ def _worker_main(values: list[str]) -> int:
             expected_iteration=1465,
             device="cpu",
         )
-        if (
-            restored["pre_evaluation"] is not False
-            or restored["curriculum"]["stage"] != "C2"
-        ):
-            raise ValueError("segment 47 endpoint must be a completed C2 checkpoint")
+        checkpoint_sha = _sha256(args.checkpoint)
+        if restored["pre_evaluation"] is not False:
+            raise ValueError("diagnostic checkpoint must be a completed endpoint")
+        if args.stage == "C2" and checkpoint_sha != CHECKPOINT_SHA256:
+            raise ValueError("C2 authority comparison is fixed to segment 47")
+        if args.stage == "C2" and restored["curriculum"]["stage"] != "C2":
+            raise ValueError("segment 47 endpoint must retain its C2 curriculum")
         torch.distributed.init_process_group(
             "nccl", init_method="env://", timeout=process_group_timeout(config)
         )
@@ -1000,6 +1289,7 @@ def _worker_main(values: list[str]) -> int:
                     "path": str(args.checkpoint),
                     "sha256_before": _sha256(args.checkpoint),
                     "sha256_after": _sha256(args.checkpoint),
+                    "binding": checkpoint_binding,
                 },
                 "invariants": {
                     "checkpoint_unchanged": True,
@@ -1019,6 +1309,11 @@ def _worker_main(values: list[str]) -> int:
         args.runtime_mode = "residual"
         environment = _build_environment(args, task=task, seed=20260806 + rank)
         environment.set_curriculum_stage(args.stage)
+        authority_override = _bind_diagnostic_authority(
+            environment,
+            environment_stage=args.stage,
+            authority_stage=args.authority_stage or args.stage,
+        )
         if environment.normalizer is None:
             raise RuntimeError("environment did not own its fixed normalizer")
         protected_before = _protected_state(
@@ -1059,9 +1354,24 @@ def _worker_main(values: list[str]) -> int:
         )
         collector = TransitionMetricCollector(phase6_metrics_schema(config))
         reward_samples: list[float] = []
-        for step in range(32):
+        suitcase_time_series: list[dict[str, object]] = []
+        suitcase_window_samples: dict[str, list[dict[str, object]]] = {
+            window: [] for window in SUITCASE_WINDOWS
+        }
+        gradient_observations: Mapping[str, torch.Tensor] | None = None
+        rollout_steps = 472 if task.task == "move_suitcase" else 32
+        for step in range(rollout_steps):
+            if task.task == "move_suitcase":
+                time_record, suitcase_windows = _suitcase_time_series_record(
+                    environment=environment, step=step
+                )
+                suitcase_time_series.append(time_record)
             with torch.inference_mode():
-                actions = algorithm.act(observations)
+                actions = (
+                    algorithm.act(observations)
+                    if step < 32
+                    else policy.act_inference(observations)
+                )
             signals = environment.adapter.progress_signals()
             collector.observe(
                 observed_wrench=environment._observed_wrench,
@@ -1082,13 +1392,32 @@ def _worker_main(values: list[str]) -> int:
             next_obs, step_rewards, terminated, time_outs, extras = environment.step(
                 actions
             )
-            algorithm.process_env_step(
-                next_obs,
-                step_rewards,
-                terminated.to(torch.bool) | time_outs.to(torch.bool),
-                {**dict(extras), "time_outs": time_outs},
-            )
+            if step < 32:
+                algorithm.process_env_step(
+                    next_obs,
+                    step_rewards,
+                    terminated.to(torch.bool) | time_outs.to(torch.bool),
+                    {**dict(extras), "time_outs": time_outs},
+                )
+                if step == 31:
+                    gradient_observations = next_obs
             reward_samples.extend(float(value) for value in step_rewards.detach().cpu())
+            if task.task == "move_suitcase":
+                for window, mask in suitcase_windows.items():
+                    samples = suitcase_window_samples[window]
+                    if len(samples) >= 32 or not bool(mask.any().item()):
+                        continue
+                    index = int(mask.nonzero(as_tuple=False)[0].item())
+                    samples.append(
+                        {
+                            "actions": actions[index : index + 1].detach().clone(),
+                            "observations": {
+                                key: value[index : index + 1].detach().clone()
+                                for key, value in observations.items()
+                            },
+                            "rewards": step_rewards[index : index + 1].detach().clone(),
+                        }
+                    )
             _atomic_json(
                 rank_dir / "progress.json",
                 {
@@ -1096,14 +1425,50 @@ def _worker_main(values: list[str]) -> int:
                     "stage": args.stage,
                     "state": "rollout",
                     "control_steps": step + 1,
-                    "transitions": (step + 1) * 64,
+                    "transitions": min(step + 1, 32) * 64,
                 },
             )
             observations = next_obs
-        algorithm.compute_returns(observations)
+        if gradient_observations is None:
+            raise AssertionError("gradient rollout did not collect 32 transitions")
+        algorithm.compute_returns(gradient_observations)
         records = _gradient_probe(
-            algorithm=algorithm, observations=observations, ppo=config.payload["ppo"]
+            algorithm=algorithm,
+            observations=gradient_observations,
+            ppo=config.payload["ppo"],
         )
+        gradient_summary = _summarize_gradient_records(records)
+        suitcase_trace: dict[str, object] | None = None
+        if task.task == "move_suitcase":
+            time_series_path = rank_dir / "suitcase_event_time_series.json"
+            _atomic_json(
+                time_series_path,
+                {
+                    "case": _authority_case(
+                        authority_stage=args.authority_stage or args.stage,
+                        probe=args.probe,
+                    ),
+                    "environment_stage": args.stage,
+                    "horizon_steps": 472,
+                    "records": suitcase_time_series,
+                },
+            )
+            suitcase_trace = {
+                "path": str(time_series_path),
+                "sha256": _sha256(time_series_path),
+                "horizon_steps": 472,
+                "windows": _summarize_suitcase_windows(
+                    records=suitcase_time_series,
+                    window_diagnostics={
+                        window: _window_gradient_diagnostic(
+                            policy=policy,
+                            samples=samples,
+                            ppo=config.payload["ppo"],
+                        )
+                        for window, samples in suitcase_window_samples.items()
+                    },
+                ),
+            }
         gradient_rollout = {
             "mean_reward": sum(reward_samples) / len(reward_samples),
             "metrics": collector.transition_metrics(),
@@ -1133,12 +1498,15 @@ def _worker_main(values: list[str]) -> int:
             "task": task.task,
             "stage": args.stage,
             "transitions": 2048,
-            "gradient": _summarize_gradient_records(records),
+            "gradient": gradient_summary,
             "gradient_rollout": gradient_rollout,
+            "authority_override": authority_override,
+            "suitcase_event_time_series": suitcase_trace,
             "checkpoint": {
                 "path": str(args.checkpoint),
                 "sha256_before": protected_before["checkpoint"],
                 "sha256_after": protected_after["checkpoint"],
+                "binding": checkpoint_binding,
             },
             "invariants": {
                 "before": protected_before,
@@ -1199,17 +1567,32 @@ def _run_plan(args: argparse.Namespace) -> int:
     if (
         args.timeout_s <= 0
         or not args.checkpoint.is_file()
-        or _sha256(args.checkpoint) != CHECKPOINT_SHA256
+        or not _accepted_checkpoint_sha256(_sha256(args.checkpoint))
     ):
         raise ValueError("diagnostic plan checkpoint or timeout is invalid")
+    binding = _diagnostic_checkpoint_binding(args.checkpoint)
     plan = {
         "run_id": args.output_dir.name,
         "checkpoint": {
             "path": str(args.checkpoint),
             "sha256": _sha256(args.checkpoint),
+            **binding,
         },
+        "environment_stage": "C2",
+        "authority_cases": list(AUTHORITY_CASES),
         "stages": ["C1", "C2"],
         "read_only": True,
+        "authority_override": {
+            "scope": "diagnostic process instance only",
+            "forbidden_mutations": [
+                "checkpoint_curriculum",
+                "policy",
+                "optimizer",
+                "normalizer",
+                "rank_rng_payload",
+                "production_source",
+            ],
+        },
         "gradient_probe": {
             "world_size": 4,
             "num_envs_per_rank": 64,
@@ -1224,9 +1607,96 @@ def _run_plan(args: argparse.Namespace) -> int:
             "modes": ["residual", "scaffold_only"],
             "deterministic_actor_mean": True,
         },
+        "suitcase_event_trace": {
+            "horizon_steps": 472,
+            "windows": list(SUITCASE_WINDOWS),
+            "window_loss_gradient_samples": 32,
+        },
+        "c1_nominal_checkpoint_drift": {
+            "segments": list(DRIFT_SEGMENTS),
+            "rebound_checkpoints": {
+                str(segment): {
+                    "diagnostic_only": True,
+                    "original_sha256": ORIGINAL_CHECKPOINTS[segment],
+                    "rebind_record_sha256": REBOUND_CHECKPOINTS[segment][1],
+                    "sha256": REBOUND_CHECKPOINTS[segment][0],
+                }
+                for segment in DRIFT_SEGMENTS
+            },
+            "fixed_schedule_and_seeds": True,
+        },
     }
     _atomic_json(args.output_dir / "plan.json", plan)
     _atomic_json(args.output_dir / "progress.json", {"status": "planned", "stages": []})
+    return 0
+
+
+def _strict_restore_catalog(args: argparse.Namespace) -> int:
+    """CPU-only strict restore of five diagnostic-only rebound endpoints."""
+    from somaforce_cross.learning.actor_critic import ResidualActorCritic
+    from somaforce_cross.learning.joint_runner import (
+        load_learning_acceptance_config,
+        load_phase6_config,
+        load_phase6_task_roster,
+        restore_learning_checkpoint,
+    )
+    from scripts.train_phase6 import _current_mainrunner_source_manifest
+
+    config = load_phase6_config(REPO_ROOT / "configs/phase6_joint_training_v1.json")
+    acceptance = load_learning_acceptance_config(
+        REPO_ROOT / "configs/phase6_learning_acceptance_v1.json"
+    )
+    roster = load_phase6_task_roster(
+        REPO_ROOT / "configs/phase6_task_roster_v1.json", phase6_config=config
+    )
+    source_manifest = _current_mainrunner_source_manifest()
+    restored_rows: list[dict[str, object]] = []
+    for segment in DRIFT_SEGMENTS:
+        checkpoint = _rebound_checkpoint(segment)
+        binding = _diagnostic_checkpoint_binding(checkpoint)
+        before = _sha256(checkpoint)
+        if before != REBOUND_CHECKPOINTS[segment][0]:
+            raise ValueError(f"segment {segment} checkpoint SHA256 mismatch")
+        summary = _read_json(
+            _original_checkpoint(segment).parent / "segment_summary.json"
+        )
+        iteration = summary.get("iteration")
+        if isinstance(iteration, bool) or not isinstance(iteration, int):
+            raise ValueError(f"segment {segment} summary iteration is invalid")
+        policy = ResidualActorCritic()
+        optimizer = torch.optim.Adam(
+            policy.parameters(), lr=float(config.payload["ppo"]["learning_rate"])
+        )
+        restored = restore_learning_checkpoint(
+            checkpoint,
+            config=config,
+            roster=roster,
+            acceptance=acceptance,
+            policy=policy,
+            optimizer=optimizer,
+            source_manifest=source_manifest,
+            expected_iteration=iteration,
+            device="cpu",
+        )
+        after = _sha256(checkpoint)
+        if before != after:
+            raise AssertionError("strict restore changed an immutable checkpoint")
+        restored_rows.append(
+            {
+                "segment": segment,
+                "path": str(checkpoint),
+                "binding": binding,
+                "sha256_before": before,
+                "sha256_after": after,
+                "iteration": restored["iteration"],
+                "stage": restored["curriculum"]["stage"],
+                "strict_restore": True,
+            }
+        )
+    _atomic_json(
+        args.output_dir / "strict_restore.json",
+        {"checkpoints": restored_rows, "status": "ok"},
+    )
     return 0
 
 
@@ -1314,8 +1784,13 @@ def _summarize_stage(args: argparse.Namespace) -> int:
     probe_records = _stage_probe_records(stage_dir)
     rows = probe_records["gradient"]
     starts = {str(row["invariants"]["runtime_rng_start"]) for row in rows}
+    authority_stages = {
+        str(row["authority_override"]["authority_stage"]) for row in rows
+    }
     summary = {
         "stage": args.stage,
+        "environment_stage": args.stage,
+        "authority_stage": next(iter(authority_stages)),
         "checkpoint": {
             "path": str(args.checkpoint),
             "sha256": _sha256(args.checkpoint),
@@ -1358,6 +1833,7 @@ def _summarize_stage(args: argparse.Namespace) -> int:
         summary["transitions"] != 8192
         or any(value != 0.25 for value in summary["task_balance"].values())
         or len(starts) != 4
+        or len(authority_stages) != 1
     ):
         raise ValueError("stage transition balance or rank RNG evidence is invalid")
     _atomic_json(stage_dir / "stage_summary.json", summary)
@@ -1369,6 +1845,76 @@ def _summarize_stage(args: argparse.Namespace) -> int:
     _atomic_json(
         args.output_dir / "progress.json",
         {"status": "running", "stages": completed},
+    )
+    return 0
+
+
+def _summarize_authority(args: argparse.Namespace) -> int:
+    """Compare the three fixed C2 conditions after all wrappers closed cleanly."""
+    root = args.output_dir / "cases"
+    summaries = {
+        case: _read_json(root / case / "C2" / "stage_summary.json")
+        for case in AUTHORITY_CASES
+    }
+    c1 = summaries["c2_env_c1_authority"]
+    c2 = summaries["c2_env_c2_authority"]
+    scaffold = summaries["scaffold_only"]
+    if (
+        c1["checkpoint"] != c2["checkpoint"]
+        or c1["checkpoint"] != scaffold["checkpoint"]
+        or c1["environment_stage"] != "C2"
+        or c2["environment_stage"] != "C2"
+        or scaffold["environment_stage"] != "C2"
+        or c1["authority_stage"] != "C1"
+        or c2["authority_stage"] != "C2"
+    ):
+        raise ValueError("authority comparison did not keep C2 environment fixed")
+    summary = {
+        "conditions": summaries,
+        "comparison": _support_decision(c1, c2),
+        "scaffold_only": scaffold,
+        "invariants_ok": all(
+            bool(item["invariants_ok"]) for item in summaries.values()
+        ),
+        "claim_boundary": (
+            "read-only authority discriminator only; it does not modify training "
+            "and does not establish Phase 6 acceptance"
+        ),
+    }
+    _atomic_json(args.output_dir / "summary.json", summary)
+    _atomic_json(
+        args.output_dir / "progress.json",
+        {"status": "complete", "authority_cases": list(AUTHORITY_CASES)},
+    )
+    return 0
+
+
+def _summarize_checkpoint_drift(args: argparse.Namespace) -> int:
+    """Join non-overwriting C1 nominal runs without inferring a cause."""
+    root = args.output_dir / "checkpoint_drift"
+    summaries = {
+        str(segment): _read_json(
+            root / f"segment_{segment:04d}" / "C1" / "stage_summary.json"
+        )
+        for segment in DRIFT_SEGMENTS
+    }
+    reference = summaries["47"]
+    for segment, summary in summaries.items():
+        if summary["environment_stage"] != "C1" or summary["authority_stage"] != "C1":
+            raise ValueError(f"segment {segment} did not use fixed C1 nominal settings")
+        for task in TASKS:
+            if (
+                summary["tasks"][task]["seed_sha256"]
+                != reference["tasks"][task]["seed_sha256"]
+            ):
+                raise ValueError("checkpoint drift comparison changed nominal seeds")
+    _atomic_json(
+        root / "summary.json",
+        {
+            "checkpoints": summaries,
+            "fixed_c1_nominal_schedule_and_seeds": True,
+            "claim_boundary": "checkpoint drift localization only; no optimizer change",
+        },
     )
     return 0
 
@@ -1413,8 +1959,14 @@ def main(argv: list[str] | None = None) -> int:
         return _run_rank_wrapper(_plain_parser(mode).parse_args(values))
     if mode == "plan":
         return _run_plan(_plain_parser(mode).parse_args(values))
+    if mode == "strict-restore":
+        return _strict_restore_catalog(_plain_parser(mode).parse_args(values))
     if mode == "summarize-stage":
         return _summarize_stage(_plain_parser(mode).parse_args(values))
+    if mode == "summarize-authority":
+        return _summarize_authority(_plain_parser(mode).parse_args(values))
+    if mode == "summarize-checkpoint-drift":
+        return _summarize_checkpoint_drift(_plain_parser(mode).parse_args(values))
     if mode == "summarize-suite":
         return _summarize_suite(_plain_parser(mode).parse_args(values))
     raise SystemExit(f"unsupported mode: {mode}")
