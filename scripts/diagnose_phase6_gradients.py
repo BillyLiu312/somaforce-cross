@@ -87,6 +87,7 @@ REBOUND_ROOT = (
     / "phase6-diagnostic-source-rebind-2b7bfbc-20260817"
 )
 OUTCOME_RECORD_KEYS = {
+    "acceptance_diagnostics",
     "diagnostics",
     "env_id",
     "failure",
@@ -103,6 +104,13 @@ OUTCOME_RECORD_KEYS = {
     "task",
     "timeout",
     "weighted_reward_sums",
+}
+OUTCOME_ACCEPTANCE_DIAGNOSTIC_KEYS = {
+    "residual_norm_sum",
+    "contact_residual_norm_sum",
+    "transition_count",
+    "residual_mean_norm",
+    "contact_bearing_residual_fraction",
 }
 OUTCOME_DIAGNOSTICS = (
     "p50_wrench",
@@ -640,6 +648,71 @@ def _validate_outcome_rows(
                 raise ValueError("paired outcome reward schema differs from production")
             for key, value in reward.items():
                 _finite_number(value, name=f"outcome.{name}.{key}")
+        acceptance_diagnostics = row["acceptance_diagnostics"]
+        if (
+            not isinstance(acceptance_diagnostics, Mapping)
+            or set(acceptance_diagnostics) != OUTCOME_ACCEPTANCE_DIAGNOSTIC_KEYS
+        ):
+            raise ValueError(
+                "paired outcome acceptance diagnostics schema differs from production"
+            )
+        transition_count = acceptance_diagnostics["transition_count"]
+        if (
+            isinstance(transition_count, bool)
+            or not isinstance(transition_count, int)
+            or transition_count <= 0
+            or transition_count != row["steps"]
+        ):
+            raise ValueError("paired outcome transition count is invalid")
+        normalized_acceptance = {
+            key: _finite_number(value, name=f"outcome.acceptance_diagnostics.{key}")
+            for key, value in acceptance_diagnostics.items()
+            if key != "transition_count"
+        }
+        if (
+            normalized_acceptance["residual_norm_sum"] < 0.0
+            or normalized_acceptance["contact_residual_norm_sum"] < 0.0
+            or normalized_acceptance["contact_residual_norm_sum"]
+            > normalized_acceptance["residual_norm_sum"]
+            or normalized_acceptance["contact_bearing_residual_fraction"] < 0.0
+            or normalized_acceptance["contact_bearing_residual_fraction"] > 1.0
+            or (
+                mode == "scaffold_only"
+                and any(value != 0.0 for value in normalized_acceptance.values())
+            )
+        ):
+            raise ValueError("paired outcome acceptance diagnostics domain is invalid")
+        residual_norm_sum = normalized_acceptance["residual_norm_sum"]
+        expected_mean = residual_norm_sum / transition_count
+        expected_fraction = (
+            normalized_acceptance["contact_residual_norm_sum"] / residual_norm_sum
+            if residual_norm_sum > 0.0
+            else 0.0
+        )
+        if residual_norm_sum == 0.0 and any(
+            normalized_acceptance[name] != 0.0
+            for name in (
+                "contact_residual_norm_sum",
+                "residual_mean_norm",
+                "contact_bearing_residual_fraction",
+            )
+        ):
+            raise ValueError("zero residual mass diagnostics must be zero")
+        if not (
+            math.isclose(
+                normalized_acceptance["residual_mean_norm"],
+                expected_mean,
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            )
+            and math.isclose(
+                normalized_acceptance["contact_bearing_residual_fraction"],
+                expected_fraction,
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            )
+        ):
+            raise ValueError("paired outcome acceptance diagnostics formula is invalid")
         for name in ("env_id", "seed", "steps"):
             if (
                 isinstance(row[name], bool)

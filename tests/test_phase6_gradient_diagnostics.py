@@ -134,6 +134,13 @@ def _outcome_rows():
             "raw_reward_sums": reward,
             "weighted_reward_sums": reward,
             "diagnostics": diagnostics,
+            "acceptance_diagnostics": {
+                "residual_norm_sum": 10.0,
+                "contact_residual_norm_sum": 5.0,
+                "transition_count": 10,
+                "residual_mean_norm": 1.0,
+                "contact_bearing_residual_fraction": 0.5,
+            },
         }
         for index in range(256)
     ]
@@ -281,7 +288,20 @@ def test_outcome_aggregation_rejects_missing_schema() -> None:
 
 def test_outcome_aggregation_requires_production_quotas() -> None:
     residual = _outcome_rows()
-    scaffold = [{**row, "mode": "scaffold_only"} for row in residual]
+    scaffold = [
+        {
+            **row,
+            "mode": "scaffold_only",
+            "acceptance_diagnostics": {
+                "residual_norm_sum": 0.0,
+                "contact_residual_norm_sum": 0.0,
+                "transition_count": row["steps"],
+                "residual_mean_norm": 0.0,
+                "contact_bearing_residual_fraction": 0.0,
+            },
+        }
+        for row in residual
+    ]
     summary = diagnostic._paired_outcome_summary(
         residual, scaffold, task="move_suitcase", stage="C1"
     )
