@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
+
+import torch
 
 
 SOURCE_PATH = Path("somaforce_cross/envs/residual_env.py")
@@ -195,8 +198,174 @@ def test_evaluation_completion_records_preserve_business_fields() -> None:
         '"raw_reward_sums": {',
         '"weighted_reward_sums": {',
         '"diagnostics": {',
+        '"acceptance_diagnostics": {',
+        '"transition_count": transition_count',
+        '"contact_bearing_residual_fraction": (',
     ):
         assert field in record
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    environment = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.ClassDef) and node.name == "SomaForceResidualEnv"
+    )
+    methods = [
+        node
+        for node in environment.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"_accumulate_episode_metrics", "_reset_episode_metrics"}
+    ]
+    probe_node = ast.ClassDef(
+        name="_Probe", bases=[], keywords=[], body=methods, decorator_list=[]
+    )
+
+    def target_stub(clean: torch.Tensor, *_: object) -> object:
+        batch = clean.shape[0]
+        return SimpleNamespace(
+            p_dir_target=torch.full((batch, 13), 1 / 13),
+            p_mag_target=torch.full((batch, 5), 1 / 5),
+        )
+
+    namespace = {
+        "torch": torch,
+        "RewardOutput": object,
+        "TaskProgressSignals": object,
+        "build_semantic_target_bundle": target_stub,
+    }
+    exec(
+        compile(
+            ast.fix_missing_locations(ast.Module(body=[probe_node], type_ignores=[])),
+            str(SOURCE_PATH),
+            "exec",
+        ),
+        namespace,
+    )
+    probe_type = namespace["_Probe"]
+
+    class _Termination:
+        def __init__(self) -> None:
+            self.ids: torch.Tensor | None = None
+
+        def reset(self, ids: torch.Tensor) -> None:
+            self.ids = ids.clone()
+
+    def make_probe(*, residual: bool, delta: torch.Tensor) -> object:
+        value = probe_type()
+        value.is_residual, value._evaluation_enabled, value.device, value.num_envs = (
+            residual,
+            True,
+            torch.device("cpu"),
+            3,
+        )
+        value.numeric_contract = SimpleNamespace(
+            payload={
+                "sensor": {
+                    "control_dt_s": 0.02,
+                    "fixed_scales": {"force_N": 1.0, "moment_Nm": 1.0},
+                }
+            }
+        )
+        value._delta_safe = delta.clone()
+        value._previous_delta_safe = torch.ones_like(delta)
+        value._normalized_wrench = torch.zeros(3, 2, 6)
+        value._observed_wrench = torch.zeros(3, 2, 6)
+        value._sensor_quality = torch.ones(3, 2)
+        value._saturation_mask = torch.zeros(3, 2, dtype=torch.bool)
+        value._dropout_mask = torch.zeros(3, 2, dtype=torch.bool)
+        value._episode_reward_steps = torch.zeros(3, dtype=torch.long)
+        value._episode_wrench_history = torch.zeros(3, 4)
+        value._episode_force_rate_history = torch.zeros(3, 4)
+        for name in (
+            "_previous_wrench_norm",
+            "_episode_impulse",
+            "_episode_contact_fraction",
+            "_episode_contact_loss",
+            "_episode_sensor_quality",
+            "_episode_saturation",
+            "_episode_dropout",
+            "_episode_arms_residual",
+            "_episode_waist_residual",
+            "_episode_legs_residual",
+            "_episode_semantic_entropy",
+            "_episode_semantic_kl",
+            "_episode_stability_margin",
+            "_episode_return",
+            "_evaluation_residual_norm_mass",
+            "_evaluation_contact_residual_norm_mass",
+        ):
+            setattr(value, name, torch.zeros(3))
+        value._evaluation_transition_count = torch.zeros(3, dtype=torch.long)
+        value._episode_raw_sums = {"x": torch.zeros(3)}
+        value._episode_weighted_sums = {"x": torch.zeros(3)}
+        value.authority = SimpleNamespace(ARMS=[0], WAIST=[1], LEGS=list(range(2, 23)))
+        value.semantic_pipeline = lambda _: SimpleNamespace(
+            p_dir=torch.full((3, 13), 1 / 13), p_mag=torch.full((3, 5), 1 / 5)
+        )
+        value.wrist_history = SimpleNamespace(storage=torch.zeros(3, 2, 16, 14))
+        value._clean_wrench = torch.zeros(3, 2, 6)
+        value.episode_termination = _Termination()
+        value._episode_active = torch.zeros(3, dtype=torch.bool)
+        value._last_nonfinite = torch.ones(3, dtype=torch.bool)
+        value._last_terminated = torch.ones(3, dtype=torch.bool)
+        value._last_time_outs = torch.ones(3, dtype=torch.bool)
+        return value
+
+    delta = torch.zeros(3, 23)
+    delta[0, :2] = torch.tensor([3.0, 4.0])
+    delta[1, 0] = 2.0
+    delta[2, 0] = 10.0
+    probe = make_probe(residual=True, delta=delta)
+    signals = SimpleNamespace(
+        contact_truth=torch.tensor([[1.0, 0.0], [0.0, 0.0], [0.0, 1.0]]),
+        expected_contact=torch.zeros(3, 2),
+        stability_margin=torch.ones(3, 1),
+    )
+    reward = SimpleNamespace(
+        raw_terms={"x": torch.ones(3)},
+        weighted_terms={"x": torch.ones(3)},
+        total=torch.ones(3),
+    )
+    probe._accumulate_episode_metrics(reward, signals=signals)
+    assert torch.equal(
+        probe._evaluation_residual_norm_mass, torch.tensor([5.0, 2.0, 10.0])
+    )
+    assert torch.equal(
+        probe._evaluation_contact_residual_norm_mass, torch.tensor([5.0, 0.0, 10.0])
+    )
+    assert torch.equal(
+        probe._evaluation_transition_count, torch.ones(3, dtype=torch.long)
+    )
+    assert torch.equal(
+        probe._episode_reward_steps, torch.ones(3, dtype=torch.long)
+    ) and torch.equal(probe._episode_raw_sums["x"], torch.ones(3))
+    before = {
+        name: getattr(probe, name).clone()
+        for name in (
+            "_evaluation_residual_norm_mass",
+            "_evaluation_contact_residual_norm_mass",
+            "_evaluation_transition_count",
+            "_delta_safe",
+            "_episode_reward_steps",
+        )
+    }
+    probe._reset_episode_metrics(torch.tensor([0, 2]))
+    assert torch.equal(probe.episode_termination.ids, torch.tensor([0, 2]))
+    for value in before.values():
+        assert torch.equal(
+            value[1],
+            getattr(probe, next(name for name, old in before.items() if old is value))[
+                1
+            ],
+        )
+    scaffold = make_probe(residual=False, delta=torch.zeros(3, 23))
+    scaffold._accumulate_episode_metrics(reward, signals=signals)
+    assert (
+        torch.equal(scaffold._evaluation_residual_norm_mass, torch.zeros(3))
+        and torch.equal(scaffold._evaluation_contact_residual_norm_mass, torch.zeros(3))
+        and torch.equal(
+            scaffold._evaluation_transition_count, torch.ones(3, dtype=torch.long)
+        )
+    )
 
 
 def test_evaluation_schedule_rejects_seed_nominal_and_exhaustion_mutations() -> None:

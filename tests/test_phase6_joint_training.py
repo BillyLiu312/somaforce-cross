@@ -168,6 +168,657 @@ def _joint_metrics(config: Phase6Config, roster: object) -> dict[str, object]:
     return {"pooled": pooled_macro_metrics(records)["pooled"], "task_records": records}
 
 
+def _final_assembly_inputs() -> tuple[dict[str, object], dict[str, object], object]:
+    config, roster = _roster()
+    acceptance = load_learning_acceptance_config(PHASE6_LEARNING_CONFIG)
+    records: dict[str, object] = {}
+    evaluation: dict[str, object] = {}
+    transitions = (3, 5, 7, 11)
+    rewards = (-2.0, 3.0, -5.0, 7.0)
+    semantics = (-1.0, 2.0, 4.0, 8.0)
+    for index, task in enumerate(roster.tasks):
+        records[task.task] = {
+            "task_transitions": transitions[index],
+            "transition_metrics": {
+                "reward": rewards[index],
+                "semantic_total": semantics[index],
+            },
+        }
+        family = f"family_{index}"
+        evaluation[task.task] = {
+            "nominal_retention": 1.0,
+            "nominal_invalid": 0,
+            "nominal_saturation": 0.0,
+            "residual_mean_norm": 0.1,
+            "contact_bearing_residual_fraction": 0.5,
+            "family_metrics": {
+                family: {
+                    "residual": {
+                        "success": 1.0,
+                        "progress": 1.0,
+                        "p95_wrench": 0.9,
+                        "stability_margin": 1.0,
+                    },
+                    "scaffold_only": {
+                        "success": 0.0,
+                        "progress": 0.0,
+                        "p95_wrench": 1.0,
+                        "stability_margin": 1.0,
+                    },
+                }
+            },
+        }
+    return (
+        {"task_records": records},
+        {"curriculum_task_metrics": evaluation},
+        acceptance,
+    )
+
+
+def test_mainrunner_final_acceptance_metrics_are_production_assembled() -> None:
+    train, evaluation, acceptance = _final_assembly_inputs()
+    assembled = train_phase6._mainrunner_final_acceptance_metrics(
+        train_metrics=train, evaluation_metrics=evaluation, acceptance=acceptance
+    )
+    assert set(assembled) == set(evaluation["curriculum_task_metrics"])
+    assert assembled["push_door_hand"]["transition_fraction"] == pytest.approx(3 / 26)
+    assert assembled["move_largebox"]["transition_fraction"] == pytest.approx(11 / 26)
+    assert assembled["push_door_hand"]["normalized_reward_share"] == pytest.approx(
+        6 / 133
+    )
+    assert assembled["move_largebox"]["normalized_reward_share"] == pytest.approx(
+        77 / 133
+    )
+    assert assembled["push_door_hand"]["semantic_total_share"] == 0.0
+    assert assembled["move_largebox"]["semantic_total_share"] == pytest.approx(88 / 126)
+
+
+def test_mainrunner_final_acceptance_rejects_missing_evidence() -> None:
+    train, evaluation, acceptance = _final_assembly_inputs()
+    del evaluation["curriculum_task_metrics"]["push_box"]["residual_mean_norm"]
+    with pytest.raises(KeyError):
+        train_phase6._mainrunner_final_acceptance_metrics(
+            train_metrics=train, evaluation_metrics=evaluation, acceptance=acceptance
+        )
+    base = {
+        "task": "push_door_hand",
+        "mode": "residual",
+        "stage": "C3",
+        "subset": "stage",
+        "family": "physical",
+        "env_id": 0,
+        "seed": 1,
+        "steps": 2,
+        "success": True,
+        "failure": False,
+        "timeout": False,
+        "invalid": False,
+        "return": 0.0,
+        "raw_reward_sums": {name: 0.0 for name in train_phase6._EVALUATION_REWARD_KEYS},
+        "weighted_reward_sums": {
+            name: 0.0 for name in train_phase6._EVALUATION_REWARD_KEYS
+        },
+        "diagnostics": {name: 0.0 for name in train_phase6._EVALUATION_DIAGNOSTIC_KEYS},
+        "acceptance_diagnostics": {
+            "residual_norm_sum": 2.0,
+            "contact_residual_norm_sum": 1.0,
+            "transition_count": 2,
+            "residual_mean_norm": 1.0,
+            "contact_bearing_residual_fraction": 0.5,
+        },
+    }
+    cases = []
+    missing = copy.deepcopy(base)
+    del missing["acceptance_diagnostics"]["residual_norm_sum"]
+    cases.append(missing)
+    extra = copy.deepcopy(base)
+    extra["acceptance_diagnostics"]["extra"] = 0.0
+    cases.append(extra)
+    for key, value in (
+        ("residual_norm_sum", float("nan")),
+        ("residual_norm_sum", -1.0),
+        ("contact_residual_norm_sum", 3.0),
+        ("transition_count", 0),
+        ("transition_count", 3),
+        ("residual_mean_norm", 2.0),
+        ("contact_bearing_residual_fraction", 0.0),
+    ):
+        case = copy.deepcopy(base)
+        case["acceptance_diagnostics"][key] = value
+        cases.append(case)
+    zero = copy.deepcopy(base)
+    zero["acceptance_diagnostics"] = {
+        "residual_norm_sum": 0.0,
+        "contact_residual_norm_sum": 0.0,
+        "transition_count": 2,
+        "residual_mean_norm": 1.0,
+        "contact_bearing_residual_fraction": 0.0,
+    }
+    cases.append(zero)
+    for case in cases:
+        with pytest.raises(ValueError):
+            train_phase6._validate_completed_episode_record(
+                case, task="push_door_hand", mode="residual", stage="C3"
+            )
+    scaffold = copy.deepcopy(base)
+    scaffold["mode"] = "scaffold_only"
+    with pytest.raises(ValueError):
+        train_phase6._validate_completed_episode_record(
+            scaffold, task="push_door_hand", mode="scaffold_only", stage="C3"
+        )
+    residual_records = []
+    scaffold_records = []
+    for seed, subset, family in ((1, "stage", "physical"), (2, "nominal", "nominal")):
+        residual_record = copy.deepcopy(base)
+        residual_record.update({"seed": seed, "subset": subset, "family": family})
+        scaffold_record = copy.deepcopy(residual_record)
+        scaffold_record["mode"] = "scaffold_only"
+        scaffold_record["acceptance_diagnostics"] = {
+            "residual_norm_sum": 0.0,
+            "contact_residual_norm_sum": 0.0,
+            "transition_count": 2,
+            "residual_mean_norm": 0.0,
+            "contact_bearing_residual_fraction": 0.0,
+        }
+        residual_records.append(residual_record)
+        scaffold_records.append(scaffold_record)
+    train_phase6._mainrunner_task_metrics(
+        residual_records=residual_records, scaffold_records=scaffold_records
+    )
+    for records, mutation in (
+        (scaffold_records[:-1], lambda row: row),
+        (copy.deepcopy(scaffold_records), lambda row: row.update({"subset": "stage"})),
+        (copy.deepcopy(scaffold_records), lambda row: row.update({"family": "sensor"})),
+    ):
+        mutated = copy.deepcopy(records)
+        mutation(mutated[-1])
+        with pytest.raises(ValueError):
+            train_phase6._mainrunner_task_metrics(
+                residual_records=residual_records, scaffold_records=mutated
+            )
+
+
+def test_mainrunner_benefit_assignment_requires_two_tasks_and_distinct_families() -> (
+    None
+):
+    train, evaluation, acceptance = _final_assembly_inputs()
+    rows = evaluation["curriculum_task_metrics"]
+    physical = copy.deepcopy(rows["push_door_hand"]["family_metrics"]["family_0"])
+    sensor = copy.deepcopy(physical)
+    sensor["residual"]["success"] = 0.1
+    sensor["residual"]["p95_wrench"] = 0.94
+    rows["push_door_hand"]["family_metrics"] = {"physical": physical}
+    rows["push_box"]["family_metrics"] = {"physical": physical, "sensor": sensor}
+    for task in ("move_suitcase", "move_largebox"):
+        rows[task]["family_metrics"] = {
+            "physical": {
+                **physical,
+                "residual": {
+                    **physical["residual"],
+                    "success": 0.0,
+                    "progress": 0.0,
+                    "p95_wrench": 1.1,
+                },
+            }
+        }
+    assembled = train_phase6._mainrunner_final_acceptance_metrics(
+        train_metrics=train, evaluation_metrics=evaluation, acceptance=acceptance
+    )
+    families = {
+        row["benefit"].get("mismatch_family")
+        for row in assembled.values()
+        if row["benefit"]["passes"]
+    }
+    assert assembled["push_door_hand"]["benefit"]["mismatch_family"] == "physical"
+    assert assembled["push_box"]["benefit"]["mismatch_family"] == "sensor"
+    assert families == {"physical", "sensor"}
+    assert sum(row["benefit"]["passes"] for row in assembled.values()) == 2
+    reversed_evaluation = {
+        "curriculum_task_metrics": dict(reversed(list(rows.items())))
+    }
+    assert (
+        train_phase6._mainrunner_final_acceptance_metrics(
+            train_metrics=train,
+            evaluation_metrics=reversed_evaluation,
+            acceptance=acceptance,
+        )
+        == assembled
+    )
+
+
+def test_mainrunner_reward_and_semantic_shares_are_normalized() -> None:
+    train, evaluation, acceptance = _final_assembly_inputs()
+    assembled = train_phase6._mainrunner_final_acceptance_metrics(
+        train_metrics=train, evaluation_metrics=evaluation, acceptance=acceptance
+    )
+    assert sum(
+        row["normalized_reward_share"] for row in assembled.values()
+    ) == pytest.approx(1.0)
+    assert sum(
+        row["semantic_total_share"] for row in assembled.values()
+    ) == pytest.approx(1.0)
+    for row in train["task_records"].values():
+        row["transition_metrics"]["reward"] = 0.0
+    with pytest.raises(ValueError, match="reward mass is zero"):
+        train_phase6._mainrunner_final_acceptance_metrics(
+            train_metrics=train, evaluation_metrics=evaluation, acceptance=acceptance
+        )
+
+
+def test_mainrunner_zero_semantic_total_uses_contract_zero_share() -> None:
+    train, evaluation, acceptance = _final_assembly_inputs()
+    for row in train["task_records"].values():
+        row["transition_metrics"]["semantic_total"] = -1.0
+    assembled = train_phase6._mainrunner_final_acceptance_metrics(
+        train_metrics=train, evaluation_metrics=evaluation, acceptance=acceptance
+    )
+    assert {row["semantic_total_share"] for row in assembled.values()} == {0.0}
+
+
+def test_mainrunner_final_c3_endpoint_calls_validator_with_assembled_metrics(
+    tmp_path: Path,
+) -> None:
+    # The production finalizer imports these boundaries locally.  Keep the train
+    # metrics and final assembly real while replacing only checkpoint/Isaac evidence.
+    import somaforce_cross.learning.joint_runner as joint_runner
+
+    train, evaluation, acceptance = _final_assembly_inputs()
+    _, roster = _roster()
+    payload = {
+        "pre_evaluation": True,
+        "curriculum": {"stage": "C3"},
+        "evaluation_history": [],
+        "next_crossing": {
+            "logical_transitions": 250000,
+            "target_iteration": 2442,
+            "actual_transitions": 20004864,
+        },
+        "actual_global_transitions": 20004864,
+        "actual_per_task_transitions": 5001216,
+        "optimizer_step": 58608,
+        "metrics": train,
+    }
+    calls: list[dict[str, object]] = []
+    source_manifest = {"source": hashlib.sha256(b"source").hexdigest()}
+    tmp = tmp_path
+    segment = tmp / "segment"
+    segment.mkdir()
+    evaluation_dir = segment / "evaluation"
+    evaluation_dir.mkdir()
+    evaluation_path = evaluation_dir / "evaluation_summary.json"
+    evaluation_path.write_text("{}", encoding="utf-8")
+    args = Namespace(
+        segment_index=1,
+        iteration=2442,
+        segment_dir=segment,
+        run_dir=tmp,
+        pre_checkpoint=tmp / "pre.pt",
+        evaluation_summary=evaluation_path,
+        logical_crossing=250000,
+        phase6_config=CONFIG_PATH,
+        roster=ROSTER_PATH,
+        acceptance_config=PHASE6_LEARNING_CONFIG,
+        source_rebind=tmp / "rebind.json",
+    )
+
+    class _Curriculum:
+        def load_state_dict(self, value: object) -> None:
+            self.value = value
+
+        def state_dict(self) -> object:
+            return self.value
+
+        def evaluate_window(self, **_: object) -> object:
+            return Namespace(
+                crossing=250000, promoted=False, rolled_back=False, stage="C3"
+            )
+
+    saved_payload: dict[str, object] | None = None
+
+    def restore(path: Path, *_: object, **__: object) -> dict[str, object]:
+        resolved = path.resolve()
+        if resolved == args.pre_checkpoint.resolve():
+            return copy.deepcopy(payload)
+        if resolved == (segment / "post_evaluation.pt").resolve():
+            assert saved_payload is not None
+            return copy.deepcopy(saved_payload)
+        raise AssertionError(f"unexpected checkpoint restore path: {resolved}")
+
+    def save(path: Path, value: object) -> str:
+        nonlocal saved_payload
+        assert path.resolve() == (segment / "post_evaluation.pt").resolve()
+        assert isinstance(value, dict)
+        saved_payload = copy.deepcopy(value)
+        path.write_bytes(b"checkpoint")
+        return train_phase6._sha256(path)
+
+    def validate(metrics: dict[str, object], **_: object) -> dict[str, bool]:
+        calls.append(metrics)
+        return {"c3": True}
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(joint_runner, "load_phase6_config", lambda _: _roster()[0])
+        monkeypatch.setattr(
+            joint_runner, "load_phase6_task_roster", lambda *_args, **_kwargs: roster
+        )
+        monkeypatch.setattr(
+            joint_runner, "load_learning_acceptance_config", lambda _: acceptance
+        )
+        monkeypatch.setattr(joint_runner, "restore_learning_checkpoint", restore)
+        monkeypatch.setattr(joint_runner, "atomic_learning_checkpoint", save)
+        monkeypatch.setattr(
+            joint_runner, "validate_learning_final_acceptance", validate
+        )
+        monkeypatch.setattr(joint_runner, "JointCurriculum", _Curriculum)
+        monkeypatch.setattr(
+            train_phase6,
+            "_validate_mainrunner_rebind_record",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            train_phase6,
+            "_validate_mainrunner_evaluation_summary",
+            lambda *_args, **_kwargs: {**evaluation, "evidence_manifests": {}},
+        )
+        monkeypatch.setattr(
+            train_phase6,
+            "_current_mainrunner_source_manifest",
+            lambda: dict(source_manifest),
+        )
+        assert train_phase6._run_mainrunner_finalize(args) == 0
+    finally:
+        monkeypatch.undo()
+
+    failure_run = tmp_path / "validator_failure"
+    failure_segment = failure_run / "segment"
+    failure_evaluation = failure_segment / "evaluation" / "evaluation_summary.json"
+    failure_evaluation.parent.mkdir(parents=True)
+    failure_evaluation.write_text("{}", encoding="utf-8")
+    failure_args = Namespace(
+        segment_index=1,
+        iteration=2442,
+        segment_dir=failure_segment,
+        run_dir=failure_run,
+        pre_checkpoint=failure_run / "pre.pt",
+        evaluation_summary=failure_evaluation,
+        logical_crossing=250000,
+        phase6_config=CONFIG_PATH,
+        roster=ROSTER_PATH,
+        acceptance_config=PHASE6_LEARNING_CONFIG,
+        source_rebind=failure_run / "rebind.json",
+    )
+    failure_payload = copy.deepcopy(payload)
+    failure_saved: dict[str, object] | None = None
+    validator_calls: list[dict[str, object]] = []
+
+    class _ValidatorSentinel(Exception):
+        pass
+
+    sentinel = _ValidatorSentinel("final validator failure")
+
+    def failure_restore(path: Path, *_: object, **__: object) -> dict[str, object]:
+        if path.resolve() == failure_args.pre_checkpoint.resolve():
+            return copy.deepcopy(failure_payload)
+        if path.resolve() == (failure_segment / "post_evaluation.pt").resolve():
+            assert failure_saved is not None
+            return copy.deepcopy(failure_saved)
+        raise AssertionError(f"unexpected failure fixture restore path: {path}")
+
+    def failure_save(path: Path, value: object) -> str:
+        nonlocal failure_saved
+        assert path.resolve() == (failure_segment / "post_evaluation.pt").resolve()
+        assert isinstance(value, dict)
+        failure_saved = copy.deepcopy(value)
+        path.write_bytes(b"failure-checkpoint")
+        return train_phase6._sha256(path)
+
+    def failure_validate(metrics: dict[str, object], **_: object) -> dict[str, bool]:
+        validator_calls.append(metrics)
+        raise sentinel
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(joint_runner, "load_phase6_config", lambda _: _roster()[0])
+        monkeypatch.setattr(
+            joint_runner, "load_phase6_task_roster", lambda *_args, **_kwargs: roster
+        )
+        monkeypatch.setattr(
+            joint_runner, "load_learning_acceptance_config", lambda _: acceptance
+        )
+        monkeypatch.setattr(
+            joint_runner, "restore_learning_checkpoint", failure_restore
+        )
+        monkeypatch.setattr(joint_runner, "atomic_learning_checkpoint", failure_save)
+        monkeypatch.setattr(
+            joint_runner, "validate_learning_final_acceptance", failure_validate
+        )
+        monkeypatch.setattr(joint_runner, "JointCurriculum", _Curriculum)
+        monkeypatch.setattr(
+            train_phase6,
+            "_validate_mainrunner_rebind_record",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            train_phase6,
+            "_validate_mainrunner_evaluation_summary",
+            lambda *_args, **_kwargs: {**evaluation, "evidence_manifests": {}},
+        )
+        monkeypatch.setattr(
+            train_phase6,
+            "_current_mainrunner_source_manifest",
+            lambda: dict(source_manifest),
+        )
+        with pytest.raises(_ValidatorSentinel) as raised:
+            train_phase6._run_mainrunner_finalize(failure_args)
+        assert raised.value is sentinel
+    finally:
+        monkeypatch.undo()
+    assert len(validator_calls) == 1
+    assert validator_calls[0]["iteration"] == 2442
+    assert validator_calls[0]["stage"] == "C3"
+    assert set(validator_calls[0]["tasks"]) == set(
+        evaluation["curriculum_task_metrics"]
+    )
+    assert failure_saved is not None
+    assert failure_saved["pre_evaluation"] is False
+    assert failure_saved["curriculum"] == {"stage": "C3"}
+    assert failure_saved["evaluation_history"] == [
+        {**evaluation, "evidence_manifests": {}}
+    ]
+    for name in (
+        "actual_global_transitions",
+        "actual_per_task_transitions",
+        "metrics",
+        "next_crossing",
+        "optimizer_step",
+    ):
+        assert _semantic_equal(failure_saved[name], failure_payload[name])
+    assert (failure_segment / "post_evaluation.pt").is_file()
+    assert (failure_segment / "latest.json").is_file()
+    assert not (failure_segment / "segment_summary.json").exists()
+    assert not (failure_run / "latest.json").exists()
+    assert all(
+        "final_acceptance_complete" not in path.read_text(encoding="utf-8")
+        for path in failure_run.rglob("*.json")
+    )
+    assert saved_payload is not None
+    assert saved_payload["pre_evaluation"] is False
+    assert saved_payload["curriculum"] == {"stage": "C3"}
+    assert saved_payload["evaluation_history"] == [
+        {**evaluation, "evidence_manifests": {}}
+    ]
+    for name in (
+        "actual_global_transitions",
+        "actual_per_task_transitions",
+        "metrics",
+        "next_crossing",
+        "optimizer_step",
+    ):
+        assert _semantic_equal(saved_payload[name], payload[name])
+    summary = json.loads((segment / "segment_summary.json").read_text())
+    assert calls and calls[0]["tasks"] == summary["final_acceptance_metrics"]
+    assert (
+        summary["final_acceptance_metrics_sha256"]
+        == hashlib.sha256(
+            json.dumps(
+                summary["final_acceptance_metrics"],
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode()
+        ).hexdigest()
+    )
+    assert summary["final_acceptance_inputs"]["acceptance"] == {
+        "raw_sha256": acceptance.raw_sha256,
+        "canonical_sha256": acceptance.canonical_sha256,
+    }
+    assert summary["evaluation_summary"] == {
+        "path": str(evaluation_path),
+        "sha256": train_phase6._sha256(evaluation_path),
+    }
+    assert summary["final_acceptance_inputs"]["evaluation_summary"] == {
+        "path": str(evaluation_path),
+        "sha256": train_phase6._sha256(evaluation_path),
+    }
+    expected_manifest_sha256 = train_phase6._source_manifest_digest(source_manifest)
+    assert summary["source_manifest_sha256"] == expected_manifest_sha256
+    assert (
+        summary["final_acceptance_inputs"]["source_manifest_sha256"]
+        == expected_manifest_sha256
+    )
+    completed_segment = Namespace(
+        end_iteration=2442,
+        end_transitions=20004864,
+        segment_index=1,
+        crossing=Namespace(logical_transitions=250000),
+    )
+    command = [
+        str(train_phase6.ISAAC_PYTHON),
+        str(Path(train_phase6.__file__).resolve()),
+        "--mode",
+        "mainrunner-finalize",
+        "--run-dir",
+        str(tmp),
+        "--segment-dir",
+        str(segment),
+        "--pre-checkpoint",
+        str(args.pre_checkpoint),
+        "--evaluation-summary",
+        str(evaluation_path),
+        "--iteration",
+        "2442",
+        "--segment-index",
+        "1",
+        "--logical-crossing",
+        "250000",
+        "--stage",
+        "C3",
+        "--source-rebind",
+        str(args.source_rebind),
+    ]
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(joint_runner, "restore_learning_checkpoint", restore)
+        monkeypatch.setattr(joint_runner, "JointCurriculum", _Curriculum)
+        monkeypatch.setattr(
+            joint_runner, "validate_learning_final_acceptance", validate
+        )
+        monkeypatch.setattr(
+            train_phase6,
+            "_validate_mainrunner_stage_evidence",
+            lambda *_args, **_kwargs: command,
+        )
+        assert (
+            train_phase6._validate_mainrunner_completed_finalize(
+                run_dir=tmp,
+                segment_dir=segment,
+                segment=completed_segment,
+                pre_checkpoint=args.pre_checkpoint,
+                pre_restored=payload,
+                evaluation={**evaluation, "evidence_manifests": {}},
+                source_rebind=args.source_rebind,
+                config=_roster()[0],
+                roster=roster,
+                acceptance=acceptance,
+                source_manifest=source_manifest,
+            )["segment"]
+            == 1
+        )
+        pristine = copy.deepcopy(summary)
+        mutations = (
+            lambda value: value["final_acceptance_metrics"]["push_box"].__setitem__(
+                "nominal_retention", 0.0
+            ),
+            lambda value: value.__setitem__(
+                "final_acceptance_metrics_sha256", "0" * 64
+            ),
+            lambda value: value["final_acceptance_inputs"]["checkpoint"].__setitem__(
+                "path", "tampered.pt"
+            ),
+            lambda value: value["final_acceptance_inputs"]["checkpoint"].__setitem__(
+                "sha256", "0" * 64
+            ),
+            lambda value: value["final_acceptance_inputs"][
+                "evaluation_summary"
+            ].__setitem__("path", "tampered.json"),
+            lambda value: value["final_acceptance_inputs"][
+                "evaluation_summary"
+            ].__setitem__("sha256", "0" * 64),
+            lambda value: value["final_acceptance_inputs"].__setitem__(
+                "source_manifest_sha256", "0" * 64
+            ),
+            lambda value: value["final_acceptance_inputs"]["acceptance"].__setitem__(
+                "raw_sha256", "0" * 64
+            ),
+            lambda value: value["final_acceptance_inputs"]["acceptance"].__setitem__(
+                "canonical_sha256", "0" * 64
+            ),
+            lambda value: value.__setitem__("source_manifest_sha256", "0" * 64),
+        )
+        for mutate in mutations:
+            altered = copy.deepcopy(pristine)
+            mutate(altered)
+            (segment / "segment_summary.json").write_text(
+                json.dumps(altered), encoding="utf-8"
+            )
+            with pytest.raises(ValueError):
+                train_phase6._validate_mainrunner_completed_finalize(
+                    run_dir=tmp,
+                    segment_dir=segment,
+                    segment=completed_segment,
+                    pre_checkpoint=args.pre_checkpoint,
+                    pre_restored=payload,
+                    evaluation={**evaluation, "evidence_manifests": {}},
+                    source_rebind=args.source_rebind,
+                    config=_roster()[0],
+                    roster=roster,
+                    acceptance=acceptance,
+                    source_manifest=source_manifest,
+                )
+        (segment / "segment_summary.json").write_text(
+            json.dumps(pristine), encoding="utf-8"
+        )
+        assert (
+            train_phase6._validate_mainrunner_completed_finalize(
+                run_dir=tmp,
+                segment_dir=segment,
+                segment=completed_segment,
+                pre_checkpoint=args.pre_checkpoint,
+                pre_restored=payload,
+                evaluation={**evaluation, "evidence_manifests": {}},
+                source_rebind=args.source_rebind,
+                config=_roster()[0],
+                roster=roster,
+                acceptance=acceptance,
+                source_manifest=source_manifest,
+            )["segment"]
+            == 1
+        )
+    finally:
+        monkeypatch.undo()
+
+
 def test_phase6_algorithm_schema_raw_canonical_and_bindings() -> None:
     config = load_phase6_config(CONFIG_PATH)
 

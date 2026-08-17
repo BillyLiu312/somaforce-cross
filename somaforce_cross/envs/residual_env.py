@@ -567,6 +567,17 @@ class SomaForceResidualEnv(DirectRLEnv):
         self._episode_semantic_entropy = torch.zeros(self.num_envs, device=self.device)
         self._episode_semantic_kl = torch.zeros(self.num_envs, device=self.device)
         self._episode_stability_margin = torch.zeros(self.num_envs, device=self.device)
+        # These diagnostics exist only for paired evaluation evidence.  They are
+        # deliberately outside EpisodeMetricLog and the ordinary transition schema.
+        self._evaluation_residual_norm_mass = torch.zeros(
+            self.num_envs, device=self.device
+        )
+        self._evaluation_contact_residual_norm_mass = torch.zeros(
+            self.num_envs, device=self.device
+        )
+        self._evaluation_transition_count = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.long
+        )
         self._previous_wrench_norm = torch.zeros(self.num_envs, device=self.device)
         self._episode_family: list[str] = ["nominal"] * self.num_envs
         self._episode_nominal = torch.ones(
@@ -779,6 +790,9 @@ class SomaForceResidualEnv(DirectRLEnv):
             self._episode_semantic_entropy,
             self._episode_semantic_kl,
             self._episode_stability_margin,
+            self._evaluation_residual_norm_mass,
+            self._evaluation_contact_residual_norm_mass,
+            self._evaluation_transition_count,
         ):
             value[env_ids] = 0.0
         self._last_nonfinite[env_ids] = False
@@ -912,6 +926,15 @@ class SomaForceResidualEnv(DirectRLEnv):
                 }
             )
             if self._evaluation_enabled:
+                residual_norm_sum = float(
+                    self._evaluation_residual_norm_mass[env_id].item()
+                )
+                contact_residual_norm_sum = float(
+                    self._evaluation_contact_residual_norm_mass[env_id].item()
+                )
+                transition_count = int(self._evaluation_transition_count[env_id].item())
+                if transition_count <= 0:
+                    raise ValueError("evaluation completion has no control transitions")
                 self._evaluation_completed.append(
                     {
                         "task": self.task_spec.task,
@@ -938,6 +961,17 @@ class SomaForceResidualEnv(DirectRLEnv):
                         "diagnostics": {
                             name: float(value.item())
                             for name, value in diagnostics.items()
+                        },
+                        "acceptance_diagnostics": {
+                            "residual_norm_sum": residual_norm_sum,
+                            "contact_residual_norm_sum": contact_residual_norm_sum,
+                            "transition_count": transition_count,
+                            "residual_mean_norm": residual_norm_sum / transition_count,
+                            "contact_bearing_residual_fraction": (
+                                contact_residual_norm_sum / residual_norm_sum
+                                if residual_norm_sum > 0.0
+                                else 0.0
+                            ),
                         },
                     }
                 )
@@ -1366,6 +1400,14 @@ class SomaForceResidualEnv(DirectRLEnv):
         self._episode_legs_residual += torch.linalg.vector_norm(
             self._delta_safe[:, self.authority.LEGS], dim=-1
         )
+        if self._evaluation_enabled:
+            residual_norm = torch.linalg.vector_norm(self._delta_safe, dim=-1)
+            contact_indicator = signals.contact_truth.any(dim=-1).to(residual_norm)
+            self._evaluation_residual_norm_mass += residual_norm
+            self._evaluation_contact_residual_norm_mass += (
+                residual_norm * contact_indicator
+            )
+            self._evaluation_transition_count += 1
         with torch.inference_mode():
             semantic = self.semantic_pipeline(self.wrist_history.storage)
             target = build_semantic_target_bundle(

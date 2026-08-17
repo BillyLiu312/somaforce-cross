@@ -7,6 +7,7 @@ import argparse
 import ast
 import copy
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -8128,6 +8129,20 @@ def _mainrunner_task_metrics(
     ]
     if not residual_stage or not residual_nominal or not scaffold_nominal:
         raise ValueError("mainrunner task metrics require stage and nominal records")
+    residual_pairs = {
+        int(row["seed"]): (row["subset"], row["family"]) for row in residual_records
+    }
+    scaffold_pairs = {
+        int(row["seed"]): (row["subset"], row["family"]) for row in scaffold_records
+    }
+    if (
+        len(residual_pairs) != len(residual_records)
+        or len(scaffold_pairs) != len(scaffold_records)
+        or residual_pairs != scaffold_pairs
+    ):
+        raise ValueError(
+            "mainrunner paired records disagree on seed, subset, or family"
+        )
     nominal_scaffold_success = _mean_record_flag(scaffold_nominal, "success")
     if nominal_scaffold_success <= 0.0:
         raise ValueError("mainrunner nominal scaffold success cannot define retention")
@@ -8141,20 +8156,59 @@ def _mainrunner_task_metrics(
             families.setdefault(family, {}).setdefault(mode, []).append(record)
     family_metrics: dict[str, object] = {}
     for family, by_mode in sorted(families.items()):
+        if family == "nominal":
+            continue
         if set(by_mode) != {"residual", "scaffold_only"}:
             raise ValueError("mainrunner family is not paired across modes")
+        if {int(row["seed"]) for row in by_mode["residual"]} != {
+            int(row["seed"]) for row in by_mode["scaffold_only"]
+        }:
+            raise ValueError("mainrunner family paired seeds are inconsistent")
         family_metrics[family] = {
             mode: {
-                "failure": _mean_record_flag(records, "failure"),
-                "return": _mean_record_value(records, "return"),
+                "progress": sum(
+                    _finite_json_number(
+                        row["raw_reward_sums"]["progress"], name="progress"
+                    )
+                    for row in records
+                )
+                / len(records),
                 "success": _mean_record_flag(records, "success"),
                 "p95_wrench": sum(
-                    float(record["diagnostics"]["p95_wrench"]) for record in records
+                    _finite_json_number(
+                        row["diagnostics"]["p95_wrench"], name="p95_wrench"
+                    )
+                    for row in records
+                )
+                / len(records),
+                "stability_margin": sum(
+                    _finite_json_number(
+                        row["diagnostics"]["stability_margin"], name="stability_margin"
+                    )
+                    for row in records
                 )
                 / len(records),
             }
             for mode, records in by_mode.items()
         }
+    residual_norm_sum = sum(
+        _finite_json_number(
+            row["acceptance_diagnostics"]["residual_norm_sum"], name="residual_norm_sum"
+        )
+        for row in residual_stage
+    )
+    contact_residual_norm_sum = sum(
+        _finite_json_number(
+            row["acceptance_diagnostics"]["contact_residual_norm_sum"],
+            name="contact_residual_norm_sum",
+        )
+        for row in residual_stage
+    )
+    transition_count = sum(
+        int(row["acceptance_diagnostics"]["transition_count"]) for row in residual_stage
+    )
+    if transition_count <= 0 or contact_residual_norm_sum > residual_norm_sum:
+        raise ValueError("mainrunner residual acceptance diagnostics are invalid")
     return {
         "family_metrics": family_metrics,
         "failure": _mean_record_flag(residual_stage, "failure"),
@@ -8163,6 +8217,222 @@ def _mainrunner_task_metrics(
         "retention": _mean_record_flag(residual_nominal, "success")
         / nominal_scaffold_success,
         "success": _mean_record_flag(residual_stage, "success"),
+        "nominal_retention": _mean_record_flag(residual_nominal, "success")
+        / nominal_scaffold_success,
+        "nominal_invalid": sum(bool(row["invalid"]) for row in residual_nominal),
+        "nominal_saturation": sum(
+            _finite_json_number(
+                row["diagnostics"]["saturation"], name="nominal_saturation"
+            )
+            for row in residual_nominal
+        )
+        / len(residual_nominal),
+        "residual_mean_norm": residual_norm_sum / transition_count,
+        "contact_bearing_residual_fraction": (
+            contact_residual_norm_sum / residual_norm_sum if residual_norm_sum else 0.0
+        ),
+    }
+
+
+def _mainrunner_final_acceptance_metrics(
+    *,
+    train_metrics: Mapping[str, object],
+    evaluation_metrics: Mapping[str, object],
+    acceptance: object,
+) -> dict[str, object]:
+    """Merge persisted final train records with paired evaluation evidence."""
+    final = getattr(acceptance, "payload", {}).get("final_acceptance")
+    records = train_metrics.get("task_records")
+    task_metrics = evaluation_metrics.get("curriculum_task_metrics")
+    if (
+        not isinstance(final, Mapping)
+        or not isinstance(records, Mapping)
+        or not isinstance(task_metrics, Mapping)
+    ):
+        raise ValueError("mainrunner final acceptance inputs are invalid")
+    if set(records) != set(task_metrics) or len(task_metrics) != 4:
+        raise ValueError("mainrunner final acceptance task set is invalid")
+    transitions: dict[str, int] = {}
+    reward_mass: dict[str, float] = {}
+    semantic_mass: dict[str, float] = {}
+    for task, row in records.items():
+        if not isinstance(row, Mapping) or not isinstance(
+            row.get("transition_metrics"), Mapping
+        ):
+            raise ValueError("mainrunner final train record schema is invalid")
+        count = row.get("task_transitions")
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            raise ValueError("mainrunner final transition count is invalid")
+        transitions[task] = count
+        transition_metrics = row["transition_metrics"]
+        reward_mass[task] = (
+            abs(_finite_json_number(transition_metrics.get("reward"), name="reward"))
+            * count
+        )
+        semantic_mass[task] = (
+            max(
+                _finite_json_number(
+                    transition_metrics.get("semantic_total"), name="semantic_total"
+                ),
+                0.0,
+            )
+            * count
+        )
+    total_transitions = sum(transitions.values())
+    total_reward = sum(reward_mass.values())
+    total_semantic = sum(semantic_mass.values())
+    if total_reward <= 0.0:
+        raise ValueError("mainrunner final acceptance reward mass is zero")
+    candidates_by_task: dict[str, list[tuple[float, str, dict[str, object]]]] = {}
+    for task, metrics in task_metrics.items():
+        if not isinstance(metrics, Mapping) or not isinstance(
+            metrics.get("family_metrics"), Mapping
+        ):
+            raise ValueError("mainrunner final evaluation metrics are invalid")
+        candidates: list[tuple[float, str, dict[str, object]]] = []
+        for family, modes in metrics["family_metrics"].items():
+            if not isinstance(modes, Mapping) or set(modes) != {
+                "residual",
+                "scaffold_only",
+            }:
+                raise ValueError("mainrunner benefit family schema is invalid")
+            residual, scaffold = modes["residual"], modes["scaffold_only"]
+            if not isinstance(residual, Mapping) or not isinstance(scaffold, Mapping):
+                raise ValueError("mainrunner benefit mode schema is invalid")
+            denominator = _finite_json_number(
+                scaffold.get("p95_wrench"), name="scaffold.p95_wrench"
+            )
+            if denominator <= 0.0:
+                raise ValueError("mainrunner scaffold force denominator is invalid")
+            benefit: dict[str, object] = {
+                "mismatch_family": str(family),
+                "success_delta": _finite_json_number(
+                    residual.get("success"), name="residual.success"
+                )
+                - _finite_json_number(scaffold.get("success"), name="scaffold.success"),
+                "progress_delta": _finite_json_number(
+                    residual.get("progress"), name="residual.progress"
+                )
+                - _finite_json_number(
+                    scaffold.get("progress"), name="scaffold.progress"
+                ),
+                "force_p95_ratio": _finite_json_number(
+                    residual.get("p95_wrench"), name="residual.p95_wrench"
+                )
+                / denominator,
+                "stability_degradation": max(
+                    0.0,
+                    _finite_json_number(
+                        scaffold.get("stability_margin"), name="scaffold.stability"
+                    )
+                    - _finite_json_number(
+                        residual.get("stability_margin"), name="residual.stability"
+                    ),
+                ),
+            }
+            benefit["passes"] = (
+                benefit["success_delta"] >= float(final["benefit_success_delta_min"])
+                or benefit["progress_delta"]
+                >= float(final["benefit_progress_delta_min"])
+                or benefit["force_p95_ratio"]
+                <= float(final["benefit_force_p95_ratio_max"])
+            ) and benefit["stability_degradation"] <= float(
+                final["stability_degradation_max"]
+            )
+            if benefit["passes"]:
+                margin = max(
+                    (
+                        float(benefit["success_delta"])
+                        - float(final["benefit_success_delta_min"])
+                    )
+                    / float(final["benefit_success_delta_min"]),
+                    (
+                        float(benefit["progress_delta"])
+                        - float(final["benefit_progress_delta_min"])
+                    )
+                    / float(final["benefit_progress_delta_min"]),
+                    (
+                        float(final["benefit_force_p95_ratio_max"])
+                        - float(benefit["force_p95_ratio"])
+                    )
+                    / float(final["benefit_force_p95_ratio_max"]),
+                ) - float(benefit["stability_degradation"]) / float(
+                    final["stability_degradation_max"]
+                )
+                candidates.append((margin, str(family), benefit))
+        candidates_by_task[task] = [*candidates, (0.0, "", {"passes": False})]
+    task_names = tuple(sorted(task_metrics))
+    combinations = list(
+        itertools.product(*(candidates_by_task[name] for name in task_names))
+    )
+    if not combinations:
+        raise ValueError("mainrunner benefit candidate set is empty")
+    selected_combination = sorted(
+        combinations,
+        key=lambda combination: (
+            -sum(bool(candidate[2]["passes"]) for candidate in combination),
+            -len({candidate[1] for candidate in combination if candidate[1]}),
+            -sum(
+                candidate[0]
+                for candidate in combination
+                if bool(candidate[2]["passes"])
+            ),
+            tuple(
+                (task, family)
+                for task, (_, family, _) in zip(task_names, combination, strict=True)
+            ),
+        ),
+    )[0]
+    selected_by_task = {
+        task: candidate[2]
+        for task, candidate in zip(task_names, selected_combination, strict=True)
+    }
+    output: dict[str, object] = {}
+    for task, metrics in task_metrics.items():
+        output[task] = {
+            "transition_fraction": transitions[task] / total_transitions,
+            "nominal_retention": metrics["nominal_retention"],
+            "nominal_invalid": metrics["nominal_invalid"],
+            "nominal_saturation": metrics["nominal_saturation"],
+            "residual_mean_norm": metrics["residual_mean_norm"],
+            "contact_bearing_residual_fraction": metrics[
+                "contact_bearing_residual_fraction"
+            ],
+            "normalized_reward_share": reward_mass[task] / total_reward,
+            "semantic_total_share": semantic_mass[task] / total_semantic
+            if total_semantic
+            else float(final["semantic_total_sum_zero_share"]),
+            "benefit": selected_by_task[task],
+        }
+    return output
+
+
+def _final_acceptance_evidence(
+    *,
+    metrics: dict[str, object] | None,
+    checkpoint: Path,
+    evaluation_summary: Path,
+    source_manifest_sha256: str,
+    acceptance: object,
+) -> tuple[str | None, dict[str, object] | None]:
+    if metrics is None:
+        return None, None
+    digest = hashlib.sha256(
+        json.dumps(
+            metrics, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    ).hexdigest()
+    return digest, {
+        "checkpoint": {"path": str(checkpoint), "sha256": _sha256(checkpoint)},
+        "evaluation_summary": {
+            "path": str(evaluation_summary),
+            "sha256": _sha256(evaluation_summary),
+        },
+        "source_manifest_sha256": source_manifest_sha256,
+        "acceptance": {
+            "raw_sha256": getattr(acceptance, "raw_sha256"),
+            "canonical_sha256": getattr(acceptance, "canonical_sha256"),
+        },
     }
 
 
@@ -8913,6 +9183,7 @@ def _validate_mainrunner_completed_finalize(
     if segment_latest != expected_latest:
         raise ValueError("mainrunner segment latest binding is invalid")
     final_acceptance: dict[str, bool] | None = None
+    final_acceptance_metrics: dict[str, object] | None = None
     if (
         int(getattr(segment, "end_iteration")) == 2442
         and restored["actual_global_transitions"] == 20004864
@@ -8920,16 +9191,30 @@ def _validate_mainrunner_completed_finalize(
         and restored["optimizer_step"] == 58608
         and decision.stage == "C3"
     ):
+        final_acceptance_metrics = _mainrunner_final_acceptance_metrics(
+            train_metrics=restored["metrics"],
+            evaluation_metrics=evaluation,
+            acceptance=acceptance,
+        )
         final_acceptance = validate_learning_final_acceptance(
             {
                 "global_transitions": restored["actual_global_transitions"],
                 "iteration": int(getattr(segment, "end_iteration")),
                 "optimizer_steps": restored["optimizer_step"],
                 "stage": decision.stage,
-                "tasks": evaluation["curriculum_task_metrics"],
+                "tasks": final_acceptance_metrics,
             },
             config=acceptance,
         )
+    final_acceptance_metrics_sha256, final_acceptance_inputs = (
+        _final_acceptance_evidence(
+            metrics=final_acceptance_metrics,
+            checkpoint=post_checkpoint,
+            evaluation_summary=segment_dir / "evaluation" / "evaluation_summary.json",
+            source_manifest_sha256=_source_manifest_digest(source_manifest),
+            acceptance=acceptance,
+        )
+    )
     summary = _read_json(segment_dir / "segment_summary.json")
     expected_summary = {
         "checkpoint": {"path": str(post_checkpoint), "sha256": digest},
@@ -8945,6 +9230,9 @@ def _validate_mainrunner_completed_finalize(
         },
         "evidence_manifests": evaluation["evidence_manifests"],
         "final_acceptance": final_acceptance,
+        "final_acceptance_metrics": final_acceptance_metrics,
+        "final_acceptance_metrics_sha256": final_acceptance_metrics_sha256,
+        "final_acceptance_inputs": final_acceptance_inputs,
         "iteration": int(getattr(segment, "end_iteration")),
         "logical_crossing": int(getattr(segment, "crossing").logical_transitions),
         "status": "final_acceptance_complete"
@@ -9227,6 +9515,7 @@ def _run_mainrunner_finalize(args: argparse.Namespace) -> int:
     }
     _atomic_json(segment_latest, latest_payload)
     final_acceptance: dict[str, bool] | None = None
+    final_acceptance_metrics: dict[str, object] | None = None
     if (
         args.iteration == 2442
         and payload["actual_global_transitions"] == 20004864
@@ -9234,16 +9523,32 @@ def _run_mainrunner_finalize(args: argparse.Namespace) -> int:
         and payload["optimizer_step"] == 58608
         and decision.stage == "C3"
     ):
+        final_acceptance_metrics = _mainrunner_final_acceptance_metrics(
+            train_metrics=payload["metrics"],
+            evaluation_metrics=evaluation,
+            acceptance=acceptance,
+        )
         final_acceptance = validate_learning_final_acceptance(
             {
                 "global_transitions": payload["actual_global_transitions"],
                 "iteration": args.iteration,
                 "optimizer_steps": payload["optimizer_step"],
                 "stage": decision.stage,
-                "tasks": evaluation["curriculum_task_metrics"],
+                "tasks": final_acceptance_metrics,
             },
             config=acceptance,
         )
+    final_acceptance_metrics_sha256, final_acceptance_inputs = (
+        _final_acceptance_evidence(
+            metrics=final_acceptance_metrics,
+            checkpoint=post_checkpoint,
+            evaluation_summary=args.evaluation_summary,
+            source_manifest_sha256=_source_manifest_digest(
+                _current_mainrunner_source_manifest()
+            ),
+            acceptance=acceptance,
+        )
+    )
     _atomic_json(
         segment_summary,
         {
@@ -9260,6 +9565,9 @@ def _run_mainrunner_finalize(args: argparse.Namespace) -> int:
             },
             "evidence_manifests": evaluation["evidence_manifests"],
             "final_acceptance": final_acceptance,
+            "final_acceptance_metrics": final_acceptance_metrics,
+            "final_acceptance_metrics_sha256": final_acceptance_metrics_sha256,
+            "final_acceptance_inputs": final_acceptance_inputs,
             "iteration": args.iteration,
             "logical_crossing": args.logical_crossing,
             "status": "final_acceptance_complete"
@@ -11110,6 +11418,13 @@ _EVALUATION_REWARD_KEYS = {
     "terminal_failure",
     "terminal_success",
 }
+_EVALUATION_ACCEPTANCE_DIAGNOSTIC_KEYS = {
+    "residual_norm_sum",
+    "contact_residual_norm_sum",
+    "transition_count",
+    "residual_mean_norm",
+    "contact_bearing_residual_fraction",
+}
 
 
 def _finite_json_number(value: object, *, name: str) -> float:
@@ -11145,6 +11460,7 @@ def _validate_completed_episode_record(
         "task",
         "timeout",
         "weighted_reward_sums",
+        "acceptance_diagnostics",
     }
     if set(record) != expected:
         raise ValueError("completed episode record has unknown or missing fields")
@@ -11186,6 +11502,73 @@ def _validate_completed_episode_record(
     normalized["diagnostics"] = {
         key: _finite_json_number(value, name=f"record.diagnostics.{key}")
         for key, value in diagnostics.items()
+    }
+    acceptance_diagnostics = record["acceptance_diagnostics"]
+    if (
+        not isinstance(acceptance_diagnostics, Mapping)
+        or set(acceptance_diagnostics) != _EVALUATION_ACCEPTANCE_DIAGNOSTIC_KEYS
+    ):
+        raise ValueError("completed episode acceptance diagnostics schema is invalid")
+    transition_count = acceptance_diagnostics["transition_count"]
+    if (
+        isinstance(transition_count, bool)
+        or not isinstance(transition_count, int)
+        or transition_count <= 0
+        or transition_count != record["steps"]
+    ):
+        raise ValueError("completed episode transition count is invalid")
+    normalized_diagnostics = {
+        key: _finite_json_number(value, name=f"record.acceptance_diagnostics.{key}")
+        for key, value in acceptance_diagnostics.items()
+        if key != "transition_count"
+    }
+    if (
+        normalized_diagnostics["residual_norm_sum"] < 0.0
+        or normalized_diagnostics["contact_residual_norm_sum"] < 0.0
+        or normalized_diagnostics["contact_residual_norm_sum"]
+        > normalized_diagnostics["residual_norm_sum"]
+        or normalized_diagnostics["contact_bearing_residual_fraction"] < 0.0
+        or normalized_diagnostics["contact_bearing_residual_fraction"] > 1.0
+        or (
+            mode == "scaffold_only"
+            and any(value != 0.0 for value in normalized_diagnostics.values())
+        )
+    ):
+        raise ValueError("completed episode acceptance diagnostics domain is invalid")
+    expected_mean = normalized_diagnostics["residual_norm_sum"] / transition_count
+    expected_fraction = (
+        normalized_diagnostics["contact_residual_norm_sum"]
+        / normalized_diagnostics["residual_norm_sum"]
+        if normalized_diagnostics["residual_norm_sum"] > 0.0
+        else 0.0
+    )
+    if normalized_diagnostics["residual_norm_sum"] == 0.0 and any(
+        normalized_diagnostics[name] != 0.0
+        for name in (
+            "contact_residual_norm_sum",
+            "residual_mean_norm",
+            "contact_bearing_residual_fraction",
+        )
+    ):
+        raise ValueError("zero residual mass diagnostics must be zero")
+    if not (
+        math.isclose(
+            normalized_diagnostics["residual_mean_norm"],
+            expected_mean,
+            rel_tol=0.0,
+            abs_tol=1.0e-12,
+        )
+        and math.isclose(
+            normalized_diagnostics["contact_bearing_residual_fraction"],
+            expected_fraction,
+            rel_tol=0.0,
+            abs_tol=1.0e-12,
+        )
+    ):
+        raise ValueError("completed episode acceptance diagnostics formula is invalid")
+    normalized["acceptance_diagnostics"] = {
+        **normalized_diagnostics,
+        "transition_count": transition_count,
     }
     try:
         json.dumps(normalized, allow_nan=False, sort_keys=True)
