@@ -213,7 +213,8 @@ def test_parser_and_shell_argv_are_consistent() -> None:
         "torch.cuda.set_device(local_rank)"
     ) < worker_source.index("launcher = AppLauncher(args)")
     assert worker_source.count("_build_environment(") == 1
-    assert "_bind_diagnostic_authority(" in worker_source
+    assert "_bind_gradient_authority(" in worker_source
+    assert 'if environment_stage != "C2":' in PATH.read_text()
     assert (
         'rollout_steps = 472 if task.task == "move_suitcase" else 32' in worker_source
     )
@@ -228,6 +229,41 @@ def test_parser_and_shell_argv_are_consistent() -> None:
     assert (
         outcome_source is not None and outcome_source.count("_build_environment(") == 1
     )
+
+
+def test_gradient_authority_binding_keeps_c1_native_and_overrides_only_c2() -> None:
+    class FakeAuthority(torch.nn.Module):
+        def forward(self, stage: int) -> torch.Tensor:
+            return torch.tensor([float(stage)])
+
+    class FakeEnvironment:
+        def __init__(self) -> None:
+            self.authority = FakeAuthority()
+
+    for authority_stage in (None, "C1"):
+        c1_environment = FakeEnvironment()
+        c1_forward = c1_environment.authority.forward
+        c1 = diagnostic._bind_gradient_authority(
+            c1_environment,
+            environment_stage="C1",
+            authority_stage=authority_stage,
+        )
+        assert c1["authority_stage"] == "C1"
+        assert c1["process_local_override"] is False
+        assert c1_environment.authority.forward == c1_forward
+        assert c1_environment.authority(1).tolist() == [1.0]
+    with pytest.raises(ValueError, match="native C1 authority"):
+        diagnostic._bind_gradient_authority(
+            FakeEnvironment(), environment_stage="C1", authority_stage="C2"
+        )
+
+    c2_environment = FakeEnvironment()
+    c2 = diagnostic._bind_gradient_authority(
+        c2_environment, environment_stage="C2", authority_stage="C1"
+    )
+    assert c2["authority_stage"] == "C1"
+    assert c2["process_local_override"] is True
+    assert c2_environment.authority(2).tolist() == [1.0]
 
 
 def test_real_actor_critic_parameter_groups_use_log_std() -> None:

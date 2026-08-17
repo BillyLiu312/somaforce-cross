@@ -308,6 +308,34 @@ def _bind_diagnostic_authority(
     }
 
 
+def _bind_gradient_authority(
+    environment: object, *, environment_stage: str, authority_stage: str | None
+) -> dict[str, object]:
+    """Bind a gradient probe without extending C2 authority discrimination to C1."""
+    if environment_stage == "C2":
+        return _bind_diagnostic_authority(
+            environment,
+            environment_stage=environment_stage,
+            authority_stage=authority_stage or environment_stage,
+        )
+    if environment_stage != "C1":
+        raise ValueError("gradient diagnostic requires a C1 or C2 environment")
+    if authority_stage not in {None, "C1"}:
+        raise ValueError("C1 gradient diagnostic requires native C1 authority")
+    authority = getattr(environment, "authority")
+    before = _hash_object(authority.state_dict())
+    selected = authority(1).detach().clone()
+    return {
+        "environment_stage": environment_stage,
+        "authority_stage": "C1",
+        "authority_buffer_sha256_before": before,
+        "authority_buffer_sha256_after": _hash_object(authority.state_dict()),
+        "selected_authority_sha256": _hash_object(selected),
+        "process_local_override": False,
+        "original_forward_name": authority.forward.__name__,
+    }
+
+
 def _suitcase_time_series_record(
     *, environment: object, step: int
 ) -> tuple[dict[str, object], dict[str, torch.Tensor]]:
@@ -1382,10 +1410,10 @@ def _worker_main(values: list[str]) -> int:
         args.runtime_mode = "residual"
         environment = _build_environment(args, task=task, seed=20260806 + rank)
         environment.set_curriculum_stage(args.stage)
-        authority_override = _bind_diagnostic_authority(
+        authority_override = _bind_gradient_authority(
             environment,
             environment_stage=args.stage,
-            authority_stage=args.authority_stage or args.stage,
+            authority_stage=args.authority_stage,
         )
         if environment.normalizer is None:
             raise RuntimeError("environment did not own its fixed normalizer")
