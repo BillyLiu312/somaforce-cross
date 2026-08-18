@@ -1159,10 +1159,10 @@ def _run_outcome_mode(
     try:
         authority_override = None
         if mode == "residual":
-            authority_override = _bind_diagnostic_authority(
+            authority_override = _bind_gradient_authority(
                 environment,
                 environment_stage=args.stage,
-                authority_stage=args.authority_stage or args.stage,
+                authority_stage=args.authority_stage,
             )
         schedule = paired_evaluation_schedule(
             task=task.task,

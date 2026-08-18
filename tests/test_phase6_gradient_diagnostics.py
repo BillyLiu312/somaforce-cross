@@ -231,6 +231,20 @@ def test_parser_and_shell_argv_are_consistent() -> None:
     )
 
 
+def test_outcome_residual_uses_gradient_authority_binding() -> None:
+    outcome_source = ast.get_source_segment(
+        PATH.read_text(),
+        next(
+            node
+            for node in ast.parse(PATH.read_text()).body
+            if isinstance(node, ast.FunctionDef) and node.name == "_run_outcome_mode"
+        ),
+    )
+    assert outcome_source is not None
+    assert outcome_source.count("_bind_gradient_authority(") == 1
+    assert "_bind_diagnostic_authority(" not in outcome_source
+
+
 def test_gradient_authority_binding_keeps_c1_native_and_overrides_only_c2() -> None:
     class FakeAuthority(torch.nn.Module):
         def forward(self, stage: int) -> torch.Tensor:
