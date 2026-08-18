@@ -52,6 +52,13 @@ AUTHORITY_CASES = (
 )
 SUITCASE_WINDOWS = ("contact", "lift", "carry", "set_down")
 DRIFT_SEGMENTS = (47, 51, 52, 59, 79)
+DIAGNOSTIC_ENDPOINT_STAGES = {
+    47: "C2",
+    51: "C1",
+    52: "C1",
+    59: "C1",
+    79: "C1",
+}
 ORIGINAL_CHECKPOINTS = {
     47: "b7c7c495394882218d8c941f31cdce76e9b993ac2073891bb4a156128693348a",
     51: "6b4d2845d4194822aabd15c4d5d29b3980dfb5adc75bb3ac297a034516442ab5",
@@ -208,13 +215,23 @@ def _diagnostic_checkpoint_binding(checkpoint: Path) -> dict[str, object]:
             raise ValueError("diagnostic rebound checkpoint or record SHA256 mismatch")
         record = _read_json(record_path)
         checkpoint_record = record.get("checkpoint")
+        endpoint = record.get("endpoint")
+        endpoint_iteration = (
+            endpoint.get("iteration") if isinstance(endpoint, Mapping) else None
+        )
         if (
             record.get("status") != "ok"
             or not isinstance(checkpoint_record, Mapping)
+            or not isinstance(endpoint, Mapping)
             or checkpoint_record.get("input_path") != str(_original_checkpoint(segment))
             or checkpoint_record.get("input_sha256") != ORIGINAL_CHECKPOINTS[segment]
             or checkpoint_record.get("output_path") != str(checkpoint)
             or checkpoint_record.get("output_sha256") != rebound_sha256
+            or endpoint.get("segment") != segment
+            or endpoint.get("stage") != DIAGNOSTIC_ENDPOINT_STAGES[segment]
+            or isinstance(endpoint_iteration, bool)
+            or not isinstance(endpoint_iteration, int)
+            or endpoint_iteration <= 0
             or record.get("invariants")
             != {
                 "payload_except_source_manifest": True,
@@ -231,6 +248,7 @@ def _diagnostic_checkpoint_binding(checkpoint: Path) -> dict[str, object]:
             "rebound_path": str(checkpoint),
             "rebound_sha256": rebound_sha256,
             "segment": segment,
+            "endpoint_iteration": endpoint_iteration,
         }
     raise ValueError("diagnostic refuses a historical or unbound checkpoint input")
 
@@ -1328,7 +1346,7 @@ def _worker_main(values: list[str]) -> int:
             policy=policy,
             optimizer=optimizer,
             source_manifest=source_manifest,
-            expected_iteration=1465,
+            expected_iteration=checkpoint_binding["endpoint_iteration"],
             device="cpu",
         )
         checkpoint_sha = _sha256(args.checkpoint)

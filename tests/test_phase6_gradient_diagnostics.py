@@ -245,6 +245,95 @@ def test_outcome_residual_uses_gradient_authority_binding() -> None:
     assert "_bind_diagnostic_authority(" not in outcome_source
 
 
+@pytest.mark.parametrize(
+    ("segment", "expected_iteration"),
+    ((47, 1465), (51, 1587), (52, 1618), (59, 1832), (79, 2442)),
+)
+def test_admitted_checkpoint_binding_uses_source_rebind_endpoint_iteration(
+    segment: int, expected_iteration: int
+) -> None:
+    binding = diagnostic._diagnostic_checkpoint_binding(
+        diagnostic._rebound_checkpoint(segment)
+    )
+    assert binding["segment"] == segment
+    assert binding["endpoint_iteration"] == expected_iteration
+    if segment == 51:
+        assert binding["endpoint_iteration"] != 1465
+
+
+def test_worker_probes_share_strict_checkpoint_binding_path() -> None:
+    worker_source = ast.get_source_segment(
+        PATH.read_text(),
+        next(
+            node
+            for node in ast.parse(PATH.read_text()).body
+            if isinstance(node, ast.FunctionDef) and node.name == "_worker_main"
+        ),
+    )
+    assert worker_source is not None
+    binding_index = worker_source.index(
+        "checkpoint_binding = _diagnostic_checkpoint_binding(args.checkpoint)"
+    )
+    restore_index = worker_source.index("restored = restore_learning_checkpoint(")
+    outcome_index = worker_source.index("if args.probe in OUTCOME_MODES:")
+    gradient_index = worker_source.index('args.runtime_mode = "residual"')
+    assert binding_index < restore_index < outcome_index < gradient_index
+    assert worker_source.count("restore_learning_checkpoint(") == 1
+    assert (
+        'expected_iteration=checkpoint_binding["endpoint_iteration"]' in worker_source
+    )
+
+
+def test_production_restore_validator_rejects_segment51_iteration_1465() -> None:
+    from scripts.train_phase6 import _current_mainrunner_source_manifest
+    from somaforce_cross.learning.joint_runner import (
+        load_learning_acceptance_config,
+        load_phase6_config,
+        load_phase6_task_roster,
+        restore_learning_checkpoint,
+    )
+
+    binding = diagnostic._diagnostic_checkpoint_binding(
+        diagnostic._rebound_checkpoint(51)
+    )
+    config = load_phase6_config(ROOT / "configs/phase6_joint_training_v1.json")
+    acceptance = load_learning_acceptance_config(
+        ROOT / "configs/phase6_learning_acceptance_v1.json"
+    )
+    roster = load_phase6_task_roster(
+        ROOT / "configs/phase6_task_roster_v1.json", phase6_config=config
+    )
+    policy = ResidualActorCritic()
+    optimizer = torch.optim.Adam(policy.parameters(), lr=3.0e-4)
+    restored = restore_learning_checkpoint(
+        diagnostic._rebound_checkpoint(51),
+        config=config,
+        roster=roster,
+        acceptance=acceptance,
+        policy=policy,
+        optimizer=optimizer,
+        source_manifest=_current_mainrunner_source_manifest(),
+        expected_iteration=binding["endpoint_iteration"],
+        device="cpu",
+    )
+    assert restored["iteration"] == 1587
+
+    rejected_policy = ResidualActorCritic()
+    rejected_optimizer = torch.optim.Adam(rejected_policy.parameters(), lr=3.0e-4)
+    with pytest.raises(ValueError, match="learning resume iteration mismatch"):
+        restore_learning_checkpoint(
+            diagnostic._rebound_checkpoint(51),
+            config=config,
+            roster=roster,
+            acceptance=acceptance,
+            policy=rejected_policy,
+            optimizer=rejected_optimizer,
+            source_manifest=_current_mainrunner_source_manifest(),
+            expected_iteration=1465,
+            device="cpu",
+        )
+
+
 def test_gradient_authority_binding_keeps_c1_native_and_overrides_only_c2() -> None:
     class FakeAuthority(torch.nn.Module):
         def forward(self, stage: int) -> torch.Tensor:
