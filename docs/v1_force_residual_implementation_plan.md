@@ -257,6 +257,12 @@ Train the existing four artifacts with balanced environments and C0-C3
 curricula. Keep a nominal fraction in every batch. Log task-specific and pooled
 metrics separately.
 
+The Phase 6 initialization and checkpoint-lineage boundary is superseded by
+[`phase6_independent_four_task_learning_amendment.md`](phase6_independent_four_task_learning_amendment.md).
+New Phase 6 production runs must initialize a new shared residual actor-critic
+without loading Phase 5 policy weights; historical Phase 5 warm-start runs
+remain immutable baselines and cannot bootstrap the independent lineage.
+
 Acceptance:
 
 - every task completes the learning smoke;
