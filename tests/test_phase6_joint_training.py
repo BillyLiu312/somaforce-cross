@@ -539,8 +539,64 @@ def test_phase6_v2_smoke_shells_use_torchrun_then_summarize() -> None:
         )
         assert "--mode rank-wrapper" in source
         assert f"--profile {profile}" in source
+        assert "--stage C1" in source
         assert "--mode summarize" in source
         assert "suite_summary.json and rank_*/wrapper.json" in source
+
+    parser = train_phase6._rank_wrapper_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "--mode",
+                "rank-wrapper",
+                "--output-dir",
+                "outputs/v2_smoke",
+                "--profile",
+                "smoke_4gpu_2env_1iter",
+                "--timeout-s",
+                "900",
+            ]
+        )
+    smoke_args = parser.parse_args(
+        [
+            "--mode",
+            "rank-wrapper",
+            "--output-dir",
+            "outputs/v2_smoke",
+            "--profile",
+            "smoke_4gpu_2env_1iter",
+            "--timeout-s",
+            "900",
+            "--stage",
+            "C1",
+        ]
+    )
+    smoke_command = train_phase6._worker_command(smoke_args)
+    assert smoke_command.count("--stage") == 1
+    assert train_phase6._command_argument(smoke_command, "--stage") == "C1"
+    assert train_phase6._command_argument(smoke_command, "--mode") == "worker"
+
+    production_args = parser.parse_args(
+        [
+            "--mode",
+            "rank-wrapper",
+            "--worker-mode",
+            "train-segment",
+            "--output-dir",
+            "outputs/v2_production",
+            "--profile",
+            "production_segment",
+            "--timeout-s",
+            "900",
+            "--segment-end",
+            "1",
+            "--stage",
+            "C1",
+        ]
+    )
+    production_command = train_phase6._worker_command(production_args)
+    assert production_command.count("--stage") == 1
+    assert train_phase6._command_argument(production_command, "--stage") == "C1"
 
 
 def test_phase6_v2_pilot_shell_starts_fresh_c1_lineage() -> None:

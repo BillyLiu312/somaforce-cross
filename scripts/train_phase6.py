@@ -602,7 +602,7 @@ def _rank_wrapper_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--segment-start", type=int, default=0)
     parser.add_argument("--segment-end", type=int)
-    parser.add_argument("--stage", choices=("C1", "C2", "C3"))
+    parser.add_argument("--stage", choices=("C1", "C2", "C3"), required=True)
     parser.add_argument("--evaluation-seed", type=int, default=20262806)
     parser.add_argument("--paired-num-envs", type=int)
     parser.add_argument("--paired-stage-quota", type=int, default=256)
@@ -775,6 +775,8 @@ def _worker_command(args: argparse.Namespace) -> list[str]:
         str(args.cycle_index),
         "--window-index",
         str(args.window_index),
+        "--stage",
+        args.stage,
         "--phase6-config",
         str(args.phase6_config),
         "--roster",
@@ -792,8 +794,6 @@ def _worker_command(args: argparse.Namespace) -> list[str]:
                 str(args.segment_start),
                 "--segment-end",
                 str(args.segment_end),
-                "--stage",
-                args.stage,
                 "--evaluation-seed",
                 str(args.evaluation_seed),
             )
