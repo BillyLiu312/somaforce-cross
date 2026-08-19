@@ -1211,32 +1211,39 @@ def _validate_summary_result(
         JointTaskScheduler,
         Phase6Config,
         Phase6Roster,
+        validate_independent_initialization,
         validate_phase6_joint_metrics,
     )
 
     if not isinstance(config, Phase6Config) or not isinstance(roster, Phase6Roster):
         raise TypeError("Phase 6 summary received invalid contracts")
+    expected_keys = {
+        "checkpoint",
+        "contracts",
+        "curriculum",
+        "global_transitions",
+        "local_transitions",
+        "metrics",
+        "optimizer_sha256",
+        "optimizer_step",
+        "per_task_transitions",
+        "policy_sha256",
+        "profile",
+        "rank",
+        "schedule",
+        "status",
+        "task_fraction",
+    }
+    is_v2 = config.payload["contract_version"] == "phase6_joint_training_v2"
+    if is_v2:
+        expected_keys.add("initialization")
     payload = _require_exact_mapping(
         result,
         name=f"rank_{rank}.result",
-        expected={
-            "checkpoint",
-            "contracts",
-            "curriculum",
-            "global_transitions",
-            "local_transitions",
-            "metrics",
-            "optimizer_sha256",
-            "optimizer_step",
-            "per_task_transitions",
-            "policy_sha256",
-            "profile",
-            "rank",
-            "schedule",
-            "status",
-            "task_fraction",
-        },
+        expected=expected_keys,
     )
+    if is_v2:
+        validate_independent_initialization(payload["initialization"])
     if (
         payload["rank"] != rank
         or payload["profile"] != profile
@@ -1950,6 +1957,7 @@ def _validate_production_train_result(
         Phase6Config,
         Phase6Roster,
         JointTaskScheduler,
+        validate_independent_initialization,
         validate_phase6_joint_metrics,
     )
 
@@ -1963,6 +1971,7 @@ def _validate_production_train_result(
             "contracts",
             "curriculum",
             "global_transitions",
+            "initialization",
             "local_transitions",
             "metrics",
             "optimizer_sha256",
@@ -1975,6 +1984,11 @@ def _validate_production_train_result(
             "status",
             "task_fraction",
         },
+    )
+    initialization = validate_independent_initialization(payload["initialization"])
+    _require_sha256(
+        initialization["optimizer_initial_sha256"],
+        name="production.initialization.optimizer_initial_sha256",
     )
     expected_tasks = {task.task: expected_per_task for task in roster.tasks}
     if (

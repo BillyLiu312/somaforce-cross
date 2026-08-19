@@ -1818,7 +1818,8 @@ def test_wrapper_requires_result_order_exit_zero_and_env_closed_last_marker(
         markers=markers + ["APP_CLOSED"],
         log_text="ENV_CLOSED\nAPP_CLOSED\n",
     )
-    config, roster = _roster()
+    config = load_phase6_config(V2_CONFIG_PATH)
+    roster = load_phase6_task_roster(V2_ROSTER_PATH, phase6_config=config)
     metrics = _joint_metrics(config, roster)
     validate_phase6_joint_metrics(
         metrics,
@@ -1848,6 +1849,20 @@ def test_wrapper_requires_result_order_exit_zero_and_env_closed_last_marker(
     profile = "smoke_4gpu_2env_1iter"
     per_task_transitions = {task.task: 64 for task in roster.tasks}
     task_fraction = {task: 0.25 for task in per_task_transitions}
+    initialization = {
+        "contract_version": "phase6_independent_initialization_v1",
+        "source": "random",
+        "seed": 20260806,
+        "parameter_count": 916881,
+        "initial_policy_sha256": (
+            "cc3116f729f05b536084a50323a613c6dbdb73149424d314864196e402bad01d"
+        ),
+        "actor_output_zero_init": True,
+        "rank0_broadcast_verified": True,
+        "optimizer_initial_sha256": "c" * 64,
+        "optimizer_initial_step": 0,
+        "external_checkpoint": None,
+    }
     for rank in range(4):
         rank_dir = tmp_path / f"rank_{rank}"
         rank_dir.mkdir()
@@ -1880,6 +1895,7 @@ def test_wrapper_requires_result_order_exit_zero_and_env_closed_last_marker(
             },
             "curriculum": JointCurriculum(transitions=256).state_dict(),
             "global_transitions": 256,
+            "initialization": initialization,
             "local_transitions": 64,
             "metrics": metrics,
             "optimizer_sha256": "b" * 64,
@@ -1930,15 +1946,25 @@ def test_wrapper_requires_result_order_exit_zero_and_env_closed_last_marker(
         (rank_dir / "wrapper.json").write_text(json.dumps(wrapper), encoding="utf-8")
     args = Namespace(
         output_dir=tmp_path,
-        phase6_config=CONFIG_PATH,
+        phase6_config=V2_CONFIG_PATH,
         profile=profile,
-        roster=ROSTER_PATH,
+        roster=V2_ROSTER_PATH,
     )
     summary = summarize_phase6_run(args)
     assert summary["status"] == "ok"
     assert len(summary["rank_results"]) == len(summary["wrapper_summaries"]) == 4
+    assert all(
+        result["initialization"] == initialization for result in summary["rank_results"]
+    )
     rank_dir = tmp_path / "rank_3"
     valid_wrapper = json.loads((rank_dir / "wrapper.json").read_text(encoding="utf-8"))
+    valid_result = json.loads((rank_dir / "result.json").read_text(encoding="utf-8"))
+    del valid_result["initialization"]
+    (rank_dir / "result.json").write_text(json.dumps(valid_result), encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown or missing schema keys"):
+        summarize_phase6_run(args)
+    valid_result["initialization"] = initialization
+    (rank_dir / "result.json").write_text(json.dumps(valid_result), encoding="utf-8")
     for timeout_kind in ("wall_clock", "progress_stall"):
         invalid_wrapper = copy.deepcopy(valid_wrapper)
         invalid_wrapper["timeout_kind"] = timeout_kind
@@ -2654,6 +2680,20 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
             window_index=0,
             rank=rank,
         )
+        initialization = {
+            "contract_version": "phase6_independent_initialization_v1",
+            "source": "random",
+            "seed": 20260806,
+            "parameter_count": 916881,
+            "initial_policy_sha256": (
+                "cc3116f729f05b536084a50323a613c6dbdb73149424d314864196e402bad01d"
+            ),
+            "actor_output_zero_init": True,
+            "rank0_broadcast_verified": True,
+            "optimizer_initial_sha256": "d" * 64,
+            "optimizer_initial_step": 0,
+            "external_checkpoint": None,
+        }
         return {
             "checkpoint": {"path": "/tmp/pre_evaluation.pt", "sha256": "a" * 64},
             "contracts": {
@@ -2664,6 +2704,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
             },
             "curriculum": JointCurriculum(transitions=global_transitions).state_dict(),
             "global_transitions": global_transitions,
+            "initialization": initialization,
             "local_transitions": local_transitions,
             "metrics": production_metrics(per_task_transitions),
             "optimizer_sha256": "b" * 64,
@@ -2723,6 +2764,37 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
             )
             assert "task" not in record
             assert record["schedule"]["task"] == roster.tasks[(rank + cycle) % 4].task
+            assert record["initialization"] == result["initialization"]
+
+    missing_initialization = copy.deepcopy(resumed_results[0])
+    del missing_initialization["initialization"]
+    with pytest.raises(ValueError, match="unknown or missing schema keys"):
+        train_phase6._validate_production_train_result(
+            missing_initialization,
+            rank=0,
+            config=config,
+            roster=roster,
+            expected_global=507904,
+            expected_per_task=126976,
+            expected_local_transitions=segment_delta,
+            expected_cycle_index=1,
+            expected_window_index=0,
+        )
+
+    malformed_initialization = copy.deepcopy(resumed_results[0])
+    malformed_initialization["initialization"]["seed"] = 0
+    with pytest.raises(ValueError, match="independent initialization provenance"):
+        train_phase6._validate_production_train_result(
+            malformed_initialization,
+            rank=0,
+            config=config,
+            roster=roster,
+            expected_global=507904,
+            expected_per_task=126976,
+            expected_local_transitions=segment_delta,
+            expected_cycle_index=1,
+            expected_window_index=0,
+        )
 
     for wrong_local in (segment_delta * 2, segment_delta * 3):
         with pytest.raises(ValueError, match="production rank result accounting"):
