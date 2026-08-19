@@ -641,6 +641,19 @@ def _production_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _init_probe_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("init-probe",), required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--timeout-s", type=int, required=True)
+    parser.add_argument("--phase6-config", type=Path, default=PHASE6_CONFIG)
+    parser.add_argument("--roster", type=Path, default=PHASE6_ROSTER)
+    parser.add_argument(
+        "--acceptance-config", type=Path, default=PHASE6_LEARNING_CONFIG
+    )
+    return parser
+
+
 def _summarize_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("summarize",), required=True)
@@ -805,6 +818,100 @@ def _worker_command(args: argparse.Namespace) -> list[str]:
     if args.resume is not None:
         command.extend(("--resume", str(args.resume)))
     return command
+
+
+def _run_v2_init_probe(args: argparse.Namespace) -> int:
+    """Persist the four-rank V2 initialization closure without starting Isaac."""
+    from somaforce_cross.learning.joint_runner import (
+        broadcast_independent_policy,
+        independent_optimizer,
+        load_learning_acceptance_config,
+        load_phase6_config,
+        load_phase6_task_roster,
+        process_group_timeout,
+        state_dict_sha256,
+    )
+
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    rank_dir = args.output_dir / f"rank_{rank}"
+    if world_size != 4:
+        raise ValueError("V2 initialization probe requires exactly four ranks")
+    rank_dir.mkdir(parents=True, exist_ok=False)
+    started = time.monotonic()
+    process_group_started = False
+    failure: BaseException | None = None
+    result: dict[str, object] = {
+        "rank": rank,
+        "local_rank": local_rank,
+        "world_size": world_size,
+    }
+    try:
+        config = load_phase6_config(args.phase6_config)
+        load_phase6_task_roster(args.roster, phase6_config=config)
+        acceptance = load_learning_acceptance_config(args.acceptance_config)
+        torch.cuda.set_device(local_rank)
+        torch.distributed.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            timeout=process_group_timeout(config),
+        )
+        process_group_started = True
+        if (
+            config.payload["contract_version"] != "phase6_joint_training_v2"
+            or acceptance.payload["contract_version"] != "phase6_learning_acceptance_v2"
+        ):
+            raise ValueError("initialization probe requires coherent V2 contracts")
+        from somaforce_cross.learning.joint_runner import initialize_independent_policy
+
+        policy, initialization = initialize_independent_policy(config)
+        device = torch.device(f"cuda:{local_rank}")
+        policy = policy.to(device)
+        policy_sha256 = broadcast_independent_policy(policy, rank=rank, device=device)
+        optimizer, initialization = independent_optimizer(
+            policy, learning_rate=3.0e-4, initialization=initialization
+        )
+        optimizer_sha256 = state_dict_sha256(optimizer.state_dict())
+        if initialization["optimizer_initial_step"] != 0:
+            raise AssertionError("V2 initialization optimizer step is not zero")
+        result.update(
+            {
+                "initialization": initialization,
+                "optimizer_initial_sha256": optimizer_sha256,
+                "optimizer_initial_step": 0,
+                "policy_sha256": policy_sha256,
+                "status": "ok",
+            }
+        )
+        _persist_worker_result(rank_dir / "result.json", result)
+    except BaseException as exc:
+        failure = exc
+        result.update(
+            {
+                "error": f"{type(exc).__name__}: {exc}",
+                "status": "error",
+            }
+        )
+        _atomic_json(rank_dir / "result.json", result)
+    finally:
+        if process_group_started and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+        wrapper = {
+            "close_verification": "process_group_destroyed"
+            if process_group_started
+            else None,
+            "elapsed_s": round(time.monotonic() - started, 3),
+            "exit_code": 0 if failure is None else 1,
+            "rank": rank,
+            "signal": None,
+            "timeout": False,
+        }
+        _atomic_json(rank_dir / "wrapper.json", wrapper)
+        print("PROCESS_GROUP_CLOSED", flush=True)
+    if failure is not None:
+        raise failure
+    return 0
 
 
 def _run_rank_wrapper(args: argparse.Namespace) -> int:
@@ -1409,7 +1516,7 @@ def _mainrunner_finalize_parser() -> argparse.ArgumentParser:
     parser.add_argument("--segment-index", type=int, required=True)
     parser.add_argument("--logical-crossing", type=int, required=True)
     parser.add_argument("--stage", choices=("C1", "C2", "C3"), required=True)
-    parser.add_argument("--source-rebind", type=Path, required=True)
+    parser.add_argument("--source-rebind", type=Path)
     parser.add_argument("--phase6-config", type=Path, default=PHASE6_CONFIG)
     parser.add_argument("--roster", type=Path, default=PHASE6_ROSTER)
     parser.add_argument(
@@ -1427,7 +1534,7 @@ def _mainrunner_evaluation_merge_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pre-checkpoint", type=Path, required=True)
     parser.add_argument("--iteration", type=int, required=True)
     parser.add_argument("--stage", choices=("C1", "C2", "C3"), required=True)
-    parser.add_argument("--source-rebind", type=Path, required=True)
+    parser.add_argument("--source-rebind", type=Path)
     parser.add_argument("--paired-stage-quota", type=int, default=256)
     parser.add_argument("--paired-nominal-quota", type=int, default=128)
     parser.add_argument("--phase6-config", type=Path, default=PHASE6_CONFIG)
@@ -8486,7 +8593,7 @@ def _merge_mainrunner_evaluation(
     stage: str,
     roster: object,
     source_manifest: Mapping[str, str],
-    source_rebind: Path,
+    source_rebind: Path | None,
     stage_quota: int,
     nominal_quota: int,
 ) -> dict[str, object]:
@@ -8591,7 +8698,11 @@ def _merge_mainrunner_evaluation(
         "curriculum_task_metrics": task_metrics,
         "evidence_manifests": evidence_manifests,
         "source_manifest_sha256": _source_manifest_digest(source_manifest),
-        "source_rebind": {"path": str(source_rebind), "sha256": _sha256(source_rebind)},
+        "source_rebind": (
+            {"path": str(source_rebind), "sha256": _sha256(source_rebind)}
+            if source_rebind is not None
+            else None
+        ),
         "stage": stage,
     }
 
@@ -8611,9 +8722,12 @@ def _run_mainrunner_evaluation_merge(args: argparse.Namespace) -> int:
     config = load_phase6_config(args.phase6_config)
     roster = load_phase6_task_roster(args.roster, phase6_config=config)
     acceptance = load_learning_acceptance_config(args.acceptance_config)
-    _validate_mainrunner_rebind_record(
-        args.source_rebind, config=config, roster=roster, acceptance=acceptance
-    )
+    if args.source_rebind is not None:
+        _validate_mainrunner_rebind_record(
+            args.source_rebind, config=config, roster=roster, acceptance=acceptance
+        )
+    elif config.payload["contract_version"] != "phase6_joint_training_v2":
+        raise ValueError("historical evaluation merge requires source rebind")
     policy = ResidualActorCritic()
     optimizer = torch.optim.Adam(policy.parameters(), lr=3.0e-4)
     restored = restore_learning_checkpoint(
@@ -8656,7 +8770,7 @@ def _validate_mainrunner_evaluation_summary(
     stage: str,
     checkpoint: Path,
     source_manifest: Mapping[str, str],
-    source_rebind: Path,
+    source_rebind: Path | None,
 ) -> dict[str, object]:
     required = {
         "checkpoint",
@@ -8678,18 +8792,27 @@ def _validate_mainrunner_evaluation_summary(
         name="mainrunner.evaluation.checkpoint",
         expected={"path", "sha256"},
     )
-    source_rebind_record = _require_exact_mapping(
-        summary["source_rebind"],
-        name="mainrunner.evaluation.source_rebind",
-        expected={"path", "sha256"},
-    )
+    source_rebind_record = summary["source_rebind"]
+    if source_rebind is None:
+        if source_rebind_record is not None:
+            raise ValueError("V2 native evaluation must not contain source rebind")
+    else:
+        source_rebind_record = _require_exact_mapping(
+            source_rebind_record,
+            name="mainrunner.evaluation.source_rebind",
+            expected={"path", "sha256"},
+        )
     if (
         summary["iteration"] != iteration
         or summary["stage"] != stage
         or checkpoint_record["path"] != str(checkpoint)
         or checkpoint_record["sha256"] != _sha256(checkpoint)
-        or source_rebind_record["path"] != str(source_rebind)
-        or source_rebind_record["sha256"] != _sha256(source_rebind)
+        or source_rebind is not None
+        and (
+            not isinstance(source_rebind_record, Mapping)
+            or source_rebind_record["path"] != str(source_rebind)
+            or source_rebind_record["sha256"] != _sha256(source_rebind)
+        )
         or summary["source_manifest_sha256"] != _source_manifest_digest(source_manifest)
         or summary["task_metrics"] != summary["curriculum_task_metrics"]
         or not isinstance(summary["curriculum_task_metrics"], Mapping)
@@ -9469,9 +9592,12 @@ def _run_mainrunner_finalize(args: argparse.Namespace) -> int:
     config = load_phase6_config(args.phase6_config)
     roster = load_phase6_task_roster(args.roster, phase6_config=config)
     acceptance = load_learning_acceptance_config(args.acceptance_config)
-    _validate_mainrunner_rebind_record(
-        args.source_rebind, config=config, roster=roster, acceptance=acceptance
-    )
+    if args.source_rebind is not None:
+        _validate_mainrunner_rebind_record(
+            args.source_rebind, config=config, roster=roster, acceptance=acceptance
+        )
+    elif config.payload["contract_version"] != "phase6_joint_training_v2":
+        raise ValueError("historical mainrunner finalize requires source rebind")
     policy = ResidualActorCritic()
     optimizer = torch.optim.Adam(policy.parameters(), lr=3.0e-4)
     restored = restore_learning_checkpoint(
@@ -10710,8 +10836,19 @@ def _update_mainrunner_progress(
 ) -> None:
     previous = _read_json(path)
     if previous is not None:
+        permitted_v2_extension = (
+            previous.get("target_iteration") == 31
+            and target_iteration == 2442
+            and previous.get("current_iteration") == current_iteration == 31
+            and previous.get("segment") == segment == 0
+            and previous.get("stage") == stage == "C1"
+            and previous.get("active_substage") == "segment_complete"
+        )
         if (
-            previous.get("target_iteration") != target_iteration
+            (
+                previous.get("target_iteration") != target_iteration
+                and not permitted_v2_extension
+            )
             or previous.get("current_iteration", -1) > current_iteration
             or previous.get("segment", -1) > segment
             or previous.get("completed_rows", -1) > completed_rows
@@ -10734,6 +10871,39 @@ def _update_mainrunner_progress(
             "target_iteration": target_iteration,
         },
     )
+
+
+def _validate_v2_pilot_run(
+    run_dir: Path,
+    *,
+    checkpoint: Path,
+    restored: Mapping[str, object],
+) -> None:
+    """Require the immutable V2 pilot endpoint before extending its budget."""
+    latest = _read_json(run_dir / "latest.json")
+    progress = _read_json(run_dir / "progress.json")
+    segment_dir = run_dir / "segment_0000"
+    if (
+        latest is None
+        or latest.get("segment") != 0
+        or latest.get("iteration") != 31
+        or Path(str(latest.get("checkpoint", ""))).resolve()
+        != (segment_dir / "post_evaluation.pt").resolve()
+        or checkpoint.resolve() != (segment_dir / "post_evaluation.pt").resolve()
+        or not (segment_dir / "segment_summary.json").is_file()
+        or not (segment_dir / "evaluation" / "evaluation_summary.json").is_file()
+        or progress is None
+        or progress.get("target_iteration") != 31
+        or progress.get("current_iteration") != 31
+        or progress.get("segment") != 0
+        or progress.get("stage") != "C1"
+        or progress.get("active_substage") != "segment_complete"
+        or restored.get("iteration") != 31
+        or restored.get("pre_evaluation") is not False
+        or not isinstance(restored.get("curriculum"), Mapping)
+        or restored["curriculum"].get("stage") != "C1"
+    ):
+        raise ValueError("main requires one completed V2 C1 pilot in the same RUN_DIR")
 
 
 def _resolve_mainrunner_resume(
@@ -10797,16 +10967,33 @@ def _run_production(args: argparse.Namespace) -> int:
         plan_learning_segments,
     )
 
-    if args.max_segments <= 0:
-        raise ValueError("mainrunner max_segments must be a positive integer")
-    if args.profile == "pilot" and args.resume is not None:
-        raise ValueError("pilot production run cannot resume")
-    if args.profile == "main" and (args.resume is None or args.source_rebind is None):
-        raise ValueError("main production requires resume checkpoint and source rebind")
     acceptance = load_learning_acceptance_config(args.acceptance_config)
     config = load_phase6_config(args.phase6_config)
     roster = load_phase6_task_roster(args.roster, phase6_config=config)
-    if args.profile == "main":
+    v2 = config.payload["contract_version"] == "phase6_joint_training_v2"
+    if args.max_segments <= 0:
+        raise ValueError("mainrunner max_segments must be a positive integer")
+    if (
+        v2
+        and args.profile == "pilot"
+        and (args.resume is not None or args.source_rebind is not None)
+    ):
+        raise ValueError(
+            "V2 pilot must start at iteration zero without resume or rebind"
+        )
+    if args.profile == "main" and args.resume is None:
+        raise ValueError("main production requires a completed V2 pilot RUN_DIR")
+    if v2 and args.source_rebind is not None:
+        raise ValueError("V2 production forbids source rebind; start a new lineage")
+    if not v2 and args.profile == "main" and args.source_rebind is None:
+        raise ValueError("historical main production requires source rebind")
+    if (
+        v2
+        and args.profile == "main"
+        and args.resume.resolve() != args.output_dir.resolve()
+    ):
+        raise ValueError("V2 main must resume RUN_DIR/latest.json in the same RUN_DIR")
+    if not v2 and args.profile == "main":
         assert args.source_rebind is not None
         _validate_mainrunner_rebind_record(
             args.source_rebind, config=config, roster=roster, acceptance=acceptance
@@ -10814,34 +11001,55 @@ def _run_production(args: argparse.Namespace) -> int:
     profile = acceptance.payload["profiles"][args.profile]
     target_iteration = int(profile["total_iterations"])
     segments = plan_learning_segments(total_iterations=target_iteration)
-    if args.resume is None:
-        raise ValueError(
-            "production bootstrap without a completed checkpoint is disabled"
+    if v2 and args.profile == "pilot":
+        if args.output_dir.exists() and any(
+            path.name != "job_logs" for path in args.output_dir.iterdir()
+        ):
+            raise FileExistsError("V2 pilot RUN_DIR must be new and non-overwriting")
+        resume = None
+        restored: Mapping[str, object] = {"curriculum": {"stage": "C1"}}
+        current_iteration = 0
+        stage = "C1"
+    else:
+        assert args.resume is not None
+        resume, restored = _resolve_mainrunner_resume(
+            args.resume, config=config, roster=roster, acceptance=acceptance
         )
-    resume, restored = _resolve_mainrunner_resume(
-        args.resume, config=config, roster=roster, acceptance=acceptance
-    )
-    current_iteration = int(restored["iteration"])
-    curriculum_state = restored["curriculum"]
-    if not isinstance(curriculum_state, Mapping):
-        raise ValueError("mainrunner resume curriculum is invalid")
-    stage = str(curriculum_state["stage"])
-    if current_iteration >= target_iteration:
-        raise ValueError(
-            "mainrunner resume is already at or beyond the target iteration"
-        )
-    if args.profile == "main":
+        current_iteration = int(restored["iteration"])
+        curriculum_state = restored["curriculum"]
+        if not isinstance(curriculum_state, Mapping):
+            raise ValueError("mainrunner resume curriculum is invalid")
+        stage = str(curriculum_state["stage"])
+        if current_iteration >= target_iteration:
+            raise ValueError(
+                "mainrunner resume is already at or beyond the target iteration"
+            )
+        if v2:
+            _validate_v2_pilot_run(
+                args.output_dir, checkpoint=resume, restored=restored
+            )
+        else:
+            assert args.source_rebind is not None
+            _validate_mainrunner_completed_segments(
+                args.output_dir,
+                current_iteration=current_iteration,
+                target_iteration=target_iteration,
+                source_rebind=args.source_rebind,
+                config=config,
+                roster=roster,
+                acceptance=acceptance,
+            )
+    if not v2 and args.profile == "main":
         assert args.source_rebind is not None
-        _validate_mainrunner_completed_segments(
-            args.output_dir,
-            current_iteration=current_iteration,
-            target_iteration=target_iteration,
-            source_rebind=args.source_rebind,
-            config=config,
-            roster=roster,
-            acceptance=acceptance,
-        )
+    if v2 and args.profile == "main" and current_iteration != 31:
+        raise ValueError("V2 main may extend only the completed 31-iteration pilot")
     args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def with_source_rebind(command: list[str]) -> list[str]:
+        if args.source_rebind is not None and "--source-rebind" not in command:
+            command.extend(("--source-rebind", str(args.source_rebind)))
+        return command
+
     progress_path = args.output_dir / "progress.json"
     previous_progress = _read_json(progress_path)
     completed_rows = (
@@ -10933,10 +11141,6 @@ def _run_production(args: argparse.Namespace) -> int:
                 str(segment.segment_index),
                 "--window-index",
                 "0",
-                "--resume",
-                str(resume),
-                "--source-rebind",
-                str(args.source_rebind),
                 "--acceptance-config",
                 str(args.acceptance_config),
                 "--phase6-config",
@@ -10944,27 +11148,31 @@ def _run_production(args: argparse.Namespace) -> int:
                 "--roster",
                 str(args.roster),
             ]
+            if resume is not None:
+                train_command.extend(("--resume", str(resume)))
+            if args.source_rebind is not None:
+                train_command.extend(("--source-rebind", str(args.source_rebind)))
             _run_stage_command(
-                train_command,
+                with_source_rebind(train_command),
                 log_path=segment_dir / "train.log",
                 timeout_s=args.train_timeout_s,
                 stage="train-segment",
             )
             _run_stage_command(
-                [
-                    ISAAC_PYTHON,
-                    str(Path(__file__).resolve()),
-                    "--mode",
-                    "production-summarize",
-                    "--output-dir",
-                    str(train_dir),
-                    "--iteration",
-                    str(segment.end_iteration),
-                    "--stage",
-                    stage,
-                    "--source-rebind",
-                    str(args.source_rebind),
-                ],
+                with_source_rebind(
+                    [
+                        ISAAC_PYTHON,
+                        str(Path(__file__).resolve()),
+                        "--mode",
+                        "production-summarize",
+                        "--output-dir",
+                        str(train_dir),
+                        "--iteration",
+                        str(segment.end_iteration),
+                        "--stage",
+                        stage,
+                    ]
+                ),
                 log_path=segment_dir / "summary.log",
                 timeout_s=args.train_timeout_s,
                 stage="summarize",
@@ -10987,96 +11195,96 @@ def _run_production(args: argparse.Namespace) -> int:
                     error_state=None,
                 )
                 _run_stage_command(
-                    [
-                        ISAAC_PYTHON,
-                        "-m",
-                        "torch.distributed.run",
-                        "--standalone",
-                        "--nnodes=1",
-                        "--nproc_per_node=4",
-                        str(Path(__file__).resolve()),
-                        "--mode",
-                        "rank-wrapper",
-                        "--worker-mode",
-                        "evaluate",
-                        "--output-dir",
-                        str(evaluation_dir / paired_mode),
-                        "--profile",
-                        "production_segment",
-                        "--timeout-s",
-                        str(worker_timeout),
-                        "--progress-stall-timeout-s",
-                        str(stall_timeout),
-                        "--paired-mode",
-                        paired_mode,
-                        "--segment-start",
-                        str(segment.end_iteration),
-                        "--segment-end",
-                        str(segment.end_iteration + 1),
-                        "--stage",
-                        stage,
-                        "--resume",
-                        str(train_dir / "pre_evaluation.pt"),
-                        "--source-rebind",
-                        str(args.source_rebind),
-                        "--acceptance-config",
-                        str(args.acceptance_config),
-                        "--phase6-config",
-                        str(args.phase6_config),
-                        "--roster",
-                        str(args.roster),
-                    ],
+                    with_source_rebind(
+                        [
+                            ISAAC_PYTHON,
+                            "-m",
+                            "torch.distributed.run",
+                            "--standalone",
+                            "--nnodes=1",
+                            "--nproc_per_node=4",
+                            str(Path(__file__).resolve()),
+                            "--mode",
+                            "rank-wrapper",
+                            "--worker-mode",
+                            "evaluate",
+                            "--output-dir",
+                            str(evaluation_dir / paired_mode),
+                            "--profile",
+                            "production_segment",
+                            "--timeout-s",
+                            str(worker_timeout),
+                            "--progress-stall-timeout-s",
+                            str(stall_timeout),
+                            "--paired-mode",
+                            paired_mode,
+                            "--segment-start",
+                            str(segment.end_iteration),
+                            "--segment-end",
+                            str(segment.end_iteration + 1),
+                            "--stage",
+                            stage,
+                            "--resume",
+                            str(train_dir / "pre_evaluation.pt"),
+                            "--acceptance-config",
+                            str(args.acceptance_config),
+                            "--phase6-config",
+                            str(args.phase6_config),
+                            "--roster",
+                            str(args.roster),
+                        ]
+                    ),
                     log_path=segment_dir / f"evaluation_{paired_mode}.log",
                     timeout_s=args.evaluation_timeout_s,
                     stage=f"paired-evaluate-{paired_mode}",
                 )
             evaluation_summary = evaluation_dir / "evaluation_summary.json"
             _run_stage_command(
-                [
-                    ISAAC_PYTHON,
-                    str(Path(__file__).resolve()),
-                    "--mode",
-                    "mainrunner-evaluation-merge",
-                    "--evaluation-dir",
-                    str(evaluation_dir),
-                    "--pre-checkpoint",
-                    str(train_dir / "pre_evaluation.pt"),
-                    "--iteration",
-                    str(segment.end_iteration),
-                    "--stage",
-                    stage,
-                    "--source-rebind",
-                    str(args.source_rebind),
-                ],
+                with_source_rebind(
+                    [
+                        ISAAC_PYTHON,
+                        str(Path(__file__).resolve()),
+                        "--mode",
+                        "mainrunner-evaluation-merge",
+                        "--evaluation-dir",
+                        str(evaluation_dir),
+                        "--pre-checkpoint",
+                        str(train_dir / "pre_evaluation.pt"),
+                        "--iteration",
+                        str(segment.end_iteration),
+                        "--stage",
+                        stage,
+                    ]
+                ),
                 log_path=segment_dir / "evaluation-summary.log",
                 timeout_s=args.evaluation_timeout_s,
                 stage="evaluation-summary",
             )
             _run_stage_command(
-                [
-                    ISAAC_PYTHON,
-                    str(Path(__file__).resolve()),
-                    "--mode",
-                    "mainrunner-finalize",
-                    "--run-dir",
-                    str(args.output_dir),
-                    "--segment-dir",
-                    str(segment_dir),
-                    "--pre-checkpoint",
-                    str(train_dir / "pre_evaluation.pt"),
-                    "--evaluation-summary",
-                    str(evaluation_summary),
-                    "--iteration",
-                    str(segment.end_iteration),
-                    "--segment-index",
-                    str(segment.segment_index),
-                    "--logical-crossing",
-                    str(segment.crossing.logical_transitions),
-                    "--stage",
-                    stage,
-                    "--source-rebind",
-                    str(args.source_rebind),
-                ],
+                with_source_rebind(
+                    [
+                        ISAAC_PYTHON,
+                        str(Path(__file__).resolve()),
+                        "--mode",
+                        "mainrunner-finalize",
+                        "--run-dir",
+                        str(args.output_dir),
+                        "--segment-dir",
+                        str(segment_dir),
+                        "--pre-checkpoint",
+                        str(train_dir / "pre_evaluation.pt"),
+                        "--evaluation-summary",
+                        str(evaluation_summary),
+                        "--iteration",
+                        str(segment.end_iteration),
+                        "--segment-index",
+                        str(segment.segment_index),
+                        "--logical-crossing",
+                        str(segment.crossing.logical_transitions),
+                        "--stage",
+                        stage,
+                    ]
+                ),
                 log_path=segment_dir / "finalize.log",
                 timeout_s=args.evaluation_timeout_s,
                 stage="finalize-checkpoint",
@@ -12355,6 +12563,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_rank_wrapper(_rank_wrapper_parser().parse_args(values))
     if values[mode_index] == "production":
         return _run_production(_production_parser().parse_args(values))
+    if values[mode_index] == "init-probe":
+        return _run_v2_init_probe(_init_probe_parser().parse_args(values))
     if values[mode_index] == "summarize":
         return _run_summarize(_summarize_parser().parse_args(values))
     if values[mode_index] == "production-summarize":

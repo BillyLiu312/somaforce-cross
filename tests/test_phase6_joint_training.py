@@ -124,6 +124,10 @@ ROSTER_CANONICAL_SHA256 = (
 V2_CONFIG_PATH = Path("configs/phase6_joint_training_v2.json")
 V2_ROSTER_PATH = Path("configs/phase6_task_roster_v2.json")
 V2_ACCEPTANCE_PATH = Path("configs/phase6_learning_acceptance_v2.json")
+V2_SCRIPT_ROOT = Path(
+    "/inspire/hdd/global_user/liumengfan-253108110079/lmf-workspace/"
+    "training-job-scripts/somaforce_cross/phase6_joint_training"
+)
 
 
 def _v2() -> tuple[Phase6Config, object, object]:
@@ -500,6 +504,185 @@ def test_phase6_v2_task_balance_and_actor_privilege_boundary_are_unchanged() -> 
         cycle_index=0, window_index=0, slot_transitions=2048
     ) == {0: 2048, 1: 2048, 2: 2048, 3: 2048}
     assert "task_id" not in inspect.getsource(ResidualActorCritic.actor_forward)
+
+
+def test_phase6_v2_init_probe_entrypoint_is_native_and_isaac_free() -> None:
+    source = inspect.getsource(train_phase6._run_v2_init_probe)
+    parser = train_phase6._init_probe_parser().parse_args(
+        [
+            "--mode",
+            "init-probe",
+            "--output-dir",
+            "outputs/probe",
+            "--timeout-s",
+            "900",
+        ]
+    )
+    assert parser.mode == "init-probe"
+    assert "torch.distributed.init_process_group" in source
+    assert 'backend="nccl"' in source
+    assert "broadcast_independent_policy" in source
+    assert "independent_optimizer" in source
+    assert "PROCESS_GROUP_CLOSED" in source
+    assert "AppLauncher" not in source
+
+
+def test_phase6_v2_smoke_shells_use_torchrun_then_summarize() -> None:
+    for name, profile in (
+        ("smoke_independent_4gpu_2env_1iter.sh", "smoke_4gpu_2env_1iter"),
+        ("smoke_independent_4gpu_64env_2iter.sh", "smoke_4gpu_64env_2iter"),
+    ):
+        source = (V2_SCRIPT_ROOT / name).read_text(encoding="utf-8")
+        assert (
+            "-m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=4"
+            in source
+        )
+        assert "--mode rank-wrapper" in source
+        assert f"--profile {profile}" in source
+        assert "--mode summarize" in source
+        assert "suite_summary.json and rank_*/wrapper.json" in source
+
+
+def test_phase6_v2_pilot_shell_starts_fresh_c1_lineage() -> None:
+    source = (V2_SCRIPT_ROOT / "pilot_independent_4gpu_64env_31iter.sh").read_text(
+        encoding="utf-8"
+    )
+    assert '[[ ! -e "${RUN_DIR}" ]]' in source
+    assert "--mode production" in source
+    assert "--profile pilot --max-segments 1" in source
+    assert "--resume" not in source
+    assert "--source-rebind" not in source
+    assert "segment_0000/post_evaluation.pt latest.json progress.json" in source
+
+
+def test_phase6_v2_main_shell_reuses_admitted_pilot_run_dir() -> None:
+    source = (V2_SCRIPT_ROOT / "train_independent_4gpu_64env_2442iter.sh").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        'RUN_DIR="${ADMITTED_V2_PILOT_RUN_DIR:?set ADMITTED_V2_PILOT_RUN_DIR}"'
+        in source
+    )
+    assert 'test -f "${RUN_DIR}/latest.json"' in source
+    assert 'test -f "${RUN_DIR}/segment_0000/post_evaluation.pt"' in source
+    assert '--output-dir "${RUN_DIR}" --profile main --resume "${RUN_DIR}"' in source
+    assert "--source-rebind" not in source
+    assert "[[ ! -e" not in source
+
+
+def test_phase6_v2_production_rejects_invalid_bootstrap_and_progress(
+    tmp_path: Path,
+) -> None:
+    parser = train_phase6._production_parser()
+    for values in (
+        [
+            "--mode",
+            "production",
+            "--output-dir",
+            str(tmp_path),
+            "--profile",
+            "pilot",
+            "--resume",
+            str(tmp_path / "checkpoint.pt"),
+        ],
+        [
+            "--mode",
+            "production",
+            "--output-dir",
+            str(tmp_path),
+            "--profile",
+            "pilot",
+            "--source-rebind",
+            str(tmp_path / "rebind.json"),
+        ],
+        ["--mode", "production", "--output-dir", str(tmp_path), "--profile", "main"],
+        [
+            "--mode",
+            "production",
+            "--output-dir",
+            str(tmp_path),
+            "--profile",
+            "main",
+            "--resume",
+            str(tmp_path / "other_run"),
+        ],
+    ):
+        with pytest.raises(ValueError):
+            _run_production(parser.parse_args(values))
+    progress = tmp_path / "progress.json"
+    progress.write_text(
+        json.dumps(
+            {
+                "active_mode": None,
+                "active_substage": "segment_complete",
+                "completed_rows": 3072,
+                "control_steps": 1,
+                "current_iteration": 31,
+                "error_state": None,
+                "eta_s": None,
+                "last_update_utc": "2026-08-19T00:00:00Z",
+                "segment": 0,
+                "stage": "C1",
+                "target_iteration": 31,
+            }
+        ),
+        encoding="utf-8",
+    )
+    train_phase6._update_mainrunner_progress(
+        progress,
+        target_iteration=2442,
+        current_iteration=31,
+        segment=0,
+        stage="C1",
+        active_substage="ready",
+        active_mode=None,
+        completed_rows=3072,
+        control_steps=1,
+        eta_s=None,
+        error_state=None,
+    )
+    with pytest.raises(ValueError, match="not monotonic"):
+        train_phase6._update_mainrunner_progress(
+            progress,
+            target_iteration=31,
+            current_iteration=31,
+            segment=0,
+            stage="C1",
+            active_substage="ready",
+            active_mode=None,
+            completed_rows=3072,
+            control_steps=1,
+            eta_s=None,
+            error_state=None,
+        )
+
+
+def test_phase6_v2_production_preserves_v1_rebind_requirement(tmp_path: Path) -> None:
+    args = train_phase6._production_parser().parse_args(
+        [
+            "--mode",
+            "production",
+            "--output-dir",
+            str(tmp_path),
+            "--profile",
+            "main",
+            "--resume",
+            str(tmp_path / "legacy.pt"),
+            "--phase6-config",
+            str(CONFIG_PATH),
+            "--roster",
+            str(ROSTER_PATH),
+            "--acceptance-config",
+            "configs/phase6_learning_acceptance_v1.json",
+        ]
+    )
+    with pytest.raises(
+        ValueError, match="historical main production requires source rebind"
+    ):
+        _run_production(args)
+    source = inspect.getsource(_run_production)
+    assert 'if not v2 and args.profile == "main"' in source
+    assert "with_source_rebind" in source
 
 
 def _gloo_gradient_worker(
