@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import copy
+import hashlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -284,17 +286,42 @@ def test_worker_probes_share_strict_checkpoint_binding_path() -> None:
     )
 
 
-def test_production_restore_validator_rejects_segment51_iteration_1465() -> None:
+def test_production_restore_validator_rejects_segment51_iteration_1465(
+    tmp_path: Path,
+) -> None:
     from scripts.train_phase6 import _current_mainrunner_source_manifest
     from somaforce_cross.learning.joint_runner import (
+        atomic_torch_save,
         load_learning_acceptance_config,
         load_phase6_config,
         load_phase6_task_roster,
         restore_learning_checkpoint,
     )
 
-    binding = diagnostic._diagnostic_checkpoint_binding(
-        diagnostic._rebound_checkpoint(51)
+    def assert_semantically_equal(expected: object, actual: object) -> None:
+        if isinstance(expected, torch.Tensor):
+            assert isinstance(actual, torch.Tensor)
+            assert torch.equal(expected, actual)
+        elif isinstance(expected, dict):
+            assert isinstance(actual, dict)
+            assert set(expected) == set(actual)
+            for key in expected:
+                assert_semantically_equal(expected[key], actual[key])
+        elif isinstance(expected, (list, tuple)):
+            assert isinstance(actual, type(expected))
+            assert len(expected) == len(actual)
+            for expected_item, actual_item in zip(expected, actual, strict=True):
+                assert_semantically_equal(expected_item, actual_item)
+        else:
+            assert expected == actual
+
+    checkpoint = diagnostic._rebound_checkpoint(51)
+    checkpoint_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    binding = diagnostic._diagnostic_checkpoint_binding(checkpoint)
+    v1_manifest = _current_mainrunner_source_manifest(
+        ROOT / "configs/phase6_joint_training_v1.json",
+        ROOT / "configs/phase6_task_roster_v1.json",
+        ROOT / "configs/phase6_learning_acceptance_v1.json",
     )
     config = load_phase6_config(ROOT / "configs/phase6_joint_training_v1.json")
     acceptance = load_learning_acceptance_config(
@@ -305,14 +332,49 @@ def test_production_restore_validator_rejects_segment51_iteration_1465() -> None
     )
     policy = ResidualActorCritic()
     optimizer = torch.optim.Adam(policy.parameters(), lr=3.0e-4)
+    with pytest.raises(
+        ValueError, match="learning checkpoint source manifest mismatch"
+    ):
+        restore_learning_checkpoint(
+            checkpoint,
+            config=config,
+            roster=roster,
+            acceptance=acceptance,
+            policy=policy,
+            optimizer=optimizer,
+            source_manifest=v1_manifest,
+            expected_iteration=binding["endpoint_iteration"],
+            device="cpu",
+        )
+
+    original_payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    rebound_payload = copy.deepcopy(original_payload)
+    rebound_payload["source_manifest"] = dict(v1_manifest)
+    for field, original_value in original_payload.items():
+        if field != "source_manifest":
+            assert_semantically_equal(original_value, rebound_payload[field])
+    changed_paths = {
+        path
+        for path in set(original_payload["source_manifest"]) | set(v1_manifest)
+        if original_payload["source_manifest"].get(path) != v1_manifest.get(path)
+    }
+    assert changed_paths == {
+        str(ROOT / "scripts/train_phase6.py"),
+        str(ROOT / "somaforce_cross/learning/joint_runner.py"),
+    }
+    rebound_checkpoint = tmp_path / "segment_0051_v1_manifest_rebound.pt"
+    atomic_torch_save(rebound_checkpoint, rebound_payload)
+
+    restored_policy = ResidualActorCritic()
+    restored_optimizer = torch.optim.Adam(restored_policy.parameters(), lr=3.0e-4)
     restored = restore_learning_checkpoint(
-        diagnostic._rebound_checkpoint(51),
+        rebound_checkpoint,
         config=config,
         roster=roster,
         acceptance=acceptance,
-        policy=policy,
-        optimizer=optimizer,
-        source_manifest=_current_mainrunner_source_manifest(),
+        policy=restored_policy,
+        optimizer=restored_optimizer,
+        source_manifest=v1_manifest,
         expected_iteration=binding["endpoint_iteration"],
         device="cpu",
     )
@@ -322,16 +384,17 @@ def test_production_restore_validator_rejects_segment51_iteration_1465() -> None
     rejected_optimizer = torch.optim.Adam(rejected_policy.parameters(), lr=3.0e-4)
     with pytest.raises(ValueError, match="learning resume iteration mismatch"):
         restore_learning_checkpoint(
-            diagnostic._rebound_checkpoint(51),
+            rebound_checkpoint,
             config=config,
             roster=roster,
             acceptance=acceptance,
             policy=rejected_policy,
             optimizer=rejected_optimizer,
-            source_manifest=_current_mainrunner_source_manifest(),
+            source_manifest=v1_manifest,
             expected_iteration=1465,
             device="cpu",
         )
+    assert hashlib.sha256(checkpoint.read_bytes()).hexdigest() == checkpoint_sha256
 
 
 def test_gradient_authority_binding_keeps_c1_native_and_overrides_only_c2() -> None:

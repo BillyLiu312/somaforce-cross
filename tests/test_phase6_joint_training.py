@@ -8,7 +8,10 @@ import hashlib
 import os
 import subprocess
 import sys
+import time
+import traceback
 from argparse import Namespace
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -118,6 +121,385 @@ ROSTER_RAW_SHA256 = "8ddcdd05f423138eb855d9c7cb3478ffb373f718484f0a948512f9bce14
 ROSTER_CANONICAL_SHA256 = (
     "14dfe15db96daa6c8d0bac93965fcdca3d9e815a1ac69a7adaa44d9f0db45bc4"
 )
+V2_CONFIG_PATH = Path("configs/phase6_joint_training_v2.json")
+V2_ROSTER_PATH = Path("configs/phase6_task_roster_v2.json")
+V2_ACCEPTANCE_PATH = Path("configs/phase6_learning_acceptance_v2.json")
+
+
+def _v2() -> tuple[Phase6Config, object, object]:
+    config = load_phase6_config(V2_CONFIG_PATH)
+    roster = load_phase6_task_roster(V2_ROSTER_PATH, phase6_config=config)
+    acceptance = load_learning_acceptance_config(V2_ACCEPTANCE_PATH)
+    return config, roster, acceptance
+
+
+def _write_gloo_v2_stage(
+    evidence_dir: Path,
+    *,
+    rank: int,
+    stage: str,
+    error: BaseException | None = None,
+) -> None:
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    path = evidence_dir / f"rank_{rank}.json"
+    payload = (
+        json.loads(path.read_text(encoding="utf-8"))
+        if path.exists()
+        else {
+            "rank": rank,
+            "stages": [],
+        }
+    )
+    payload["stages"].append(stage)
+    if error is not None:
+        payload["error"] = {
+            "message": str(error),
+            "type": type(error).__name__,
+            "traceback": traceback.format_exc(),
+        }
+    path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _gloo_v2_worker(
+    rank: int,
+    world_size: int,
+    init_path: str,
+    output_dir: str,
+    evidence_dir: str,
+    mode: str,
+) -> None:
+    from somaforce_cross.learning.joint_runner import (
+        broadcast_independent_policy,
+        initialize_independent_policy,
+        independent_optimizer,
+        state_dict_sha256,
+    )
+
+    output = Path(output_dir)
+    evidence = Path(evidence_dir)
+    try:
+        distributed.init_process_group(
+            backend="gloo",
+            init_method=f"file://{init_path}",
+            rank=rank,
+            world_size=world_size,
+            timeout=timedelta(seconds=60),
+        )
+        _write_gloo_v2_stage(evidence, rank=rank, stage="process_group_ready")
+        config = load_phase6_config(V2_CONFIG_PATH)
+        policy, record = initialize_independent_policy(config)
+        if rank == 1:
+            next(policy.parameters()).data.add_(1.0)
+        policy_hash = broadcast_independent_policy(policy, rank=rank, device="cpu")
+        _write_gloo_v2_stage(evidence, rank=rank, stage="broadcast_complete")
+        optimizer, record = independent_optimizer(
+            policy, learning_rate=3.0e-4, initialization=record
+        )
+        _write_gloo_v2_stage(evidence, rank=rank, stage="optimizer_initialized")
+        row: dict[str, object] = {
+            "initialization": record,
+            "policy": policy_hash,
+            "optimizer": state_dict_sha256(optimizer.state_dict()),
+        }
+        if mode == "update":
+            from somaforce_cross.learning.joint_runner import GradientAverager
+
+            for parameter in policy.parameters():
+                parameter.grad = torch.full_like(parameter, float(rank + 1))
+            GradientAverager(world_size=world_size, allow_test_backend=True)(policy)
+            _write_gloo_v2_stage(evidence, rank=rank, stage="gradient_sync_complete")
+            optimizer.step()
+            _write_gloo_v2_stage(evidence, rank=rank, stage="optimizer_step_complete")
+            row["updated_policy"] = state_dict_sha256(policy.state_dict())
+            row["updated_optimizer"] = state_dict_sha256(optimizer.state_dict())
+        elif mode != "broadcast":
+            raise ValueError(f"unknown Gloo V2 mode: {mode}")
+        torch.save(row, output / f"v2_rank_{rank}.pt")
+        _write_gloo_v2_stage(evidence, rank=rank, stage="hashes_written")
+    except BaseException as exc:
+        _write_gloo_v2_stage(evidence, rank=rank, stage="error", error=exc)
+        raise
+    finally:
+        if distributed.is_initialized():
+            distributed.destroy_process_group()
+
+
+def _gloo_v2_stages(evidence_dir: Path) -> dict[int, object]:
+    result: dict[int, object] = {}
+    for rank in range(4):
+        path = evidence_dir / f"rank_{rank}.json"
+        result[rank] = (
+            json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+        )
+    return result
+
+
+def _run_gloo_v2_workers(
+    tmp_path: Path, *, mode: str
+) -> tuple[list[dict[str, object]], dict[int, object]]:
+    root = tmp_path / f"v2_{mode}"
+    output_dir = root / "outputs"
+    evidence_dir = root / "stages"
+    output_dir.mkdir(parents=True)
+    context = multiprocessing.spawn(
+        _gloo_v2_worker,
+        args=(4, str(root / "filestore"), str(output_dir), str(evidence_dir), mode),
+        nprocs=4,
+        join=False,
+    )
+    deadline = time.monotonic() + 120.0
+    timed_out = False
+    failure: BaseException | None = None
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                timed_out = True
+                break
+            try:
+                if context.join(timeout=min(1.0, remaining)):
+                    break
+            except BaseException as exc:
+                failure = exc
+                break
+    finally:
+        for process in context.processes:
+            if process.is_alive():
+                process.terminate()
+        for process in context.processes:
+            process.join(timeout=10.0)
+    stages = _gloo_v2_stages(evidence_dir)
+    unreaped = [process.pid for process in context.processes if process.is_alive()]
+    if timed_out:
+        raise TimeoutError(
+            f"V2 Gloo worker timeout; stages={stages}; unreaped={unreaped}"
+        )
+    if failure is not None:
+        raise RuntimeError(
+            f"V2 Gloo worker failed; stages={stages}; unreaped={unreaped}"
+        ) from failure
+    if unreaped or any(process.exitcode != 0 for process in context.processes):
+        raise RuntimeError(
+            f"V2 Gloo worker exit failure; stages={stages}; unreaped={unreaped}"
+        )
+    rows = [
+        torch.load(output_dir / f"v2_rank_{rank}.pt", weights_only=False)
+        for rank in range(4)
+    ]
+    return rows, stages
+
+
+def test_phase6_v2_schema_rejects_phase5_fields() -> None:
+    payload = json.loads(V2_CONFIG_PATH.read_text(encoding="utf-8"))
+    payload["bindings"]["phase5_initial_checkpoint"] = {"path": "x", "sha256": "0" * 64}
+    with pytest.raises(ValueError):
+        validate_phase6_config(payload)
+
+
+def test_phase6_v2_v1_contracts_remain_byte_identical_and_load() -> None:
+    assert hashlib.sha256(CONFIG_PATH.read_bytes()).hexdigest() == CONFIG_RAW_SHA256
+    assert hashlib.sha256(ROSTER_PATH.read_bytes()).hexdigest() == ROSTER_RAW_SHA256
+    assert load_phase6_config(CONFIG_PATH).canonical_sha256 == CONFIG_CANONICAL_SHA256
+
+
+def test_phase6_v2_seed_reproduces_initial_policy_sha() -> None:
+    from somaforce_cross.learning.joint_runner import initialize_independent_policy
+
+    config, _, acceptance = _v2()
+    policy, _ = initialize_independent_policy(config)
+    assert (
+        state_dict_sha256(policy.state_dict())
+        == acceptance.payload["bindings"]["initial_policy_sha256"]
+    )
+
+
+def test_phase6_v2_different_seed_changes_policy_sha() -> None:
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(20260807)
+        policy = ResidualActorCritic()
+        policy.actor.mlp[4].weight.data.zero_()
+        policy.actor.mlp[4].bias.data.zero_()
+    assert (
+        state_dict_sha256(policy.state_dict())
+        != "cc3116f729f05b536084a50323a613c6dbdb73149424d314864196e402bad01d"
+    )
+
+
+def test_phase6_v2_initial_actor_mean_is_exactly_zero() -> None:
+    from somaforce_cross.learning.joint_runner import initialize_independent_policy
+
+    policy, _ = initialize_independent_policy(_v2()[0])
+    observation = {"policy": torch.zeros(2, 668), "critic": torch.zeros(2, 845)}
+    assert torch.equal(policy.act_inference(observation), torch.zeros(2, 23))
+
+
+def test_phase6_v2_non_actor_parameters_are_finite_and_nonzero() -> None:
+    from somaforce_cross.learning.joint_runner import initialize_independent_policy
+
+    policy, _ = initialize_independent_policy(_v2()[0])
+    values = torch.cat(
+        [
+            parameter.detach().flatten()
+            for name, parameter in policy.named_parameters()
+            if not name.startswith("actor.mlp.4")
+        ]
+    )
+    assert torch.isfinite(values).all() and torch.count_nonzero(values) > 0
+
+
+def test_phase6_v2_optimizer_is_empty_at_initialization() -> None:
+    from somaforce_cross.learning.joint_runner import (
+        independent_optimizer,
+        initialize_independent_policy,
+    )
+
+    policy, record = initialize_independent_policy(_v2()[0])
+    optimizer, record = independent_optimizer(
+        policy, learning_rate=3.0e-4, initialization=record
+    )
+    assert (
+        optimizer.state == {}
+        and optimizer_step(optimizer) == 0
+        and record["optimizer_initial_step"] == 0
+    )
+
+
+def test_phase6_v2_four_process_gloo_broadcast_and_optimizer_hashes(
+    tmp_path: Path,
+) -> None:
+    rows, stages = _run_gloo_v2_workers(tmp_path, mode="broadcast")
+    assert (
+        len({row["policy"] for row in rows}) == 1
+        and len({row["optimizer"] for row in rows}) == 1
+    )
+    assert all(
+        value
+        == {
+            "rank": rank,
+            "stages": [
+                "process_group_ready",
+                "broadcast_complete",
+                "optimizer_initialized",
+                "hashes_written",
+            ],
+        }
+        for rank, value in stages.items()
+    )
+
+
+def test_phase6_v2_divergent_rank_is_rejected_before_rollout() -> None:
+    with pytest.raises(RuntimeError):
+        assert_matching_hash_records(
+            [
+                {"policy": "a" * 64, "optimizer": "b" * 64, "step": 0},
+                {"policy": "c" * 64, "optimizer": "b" * 64, "step": 0},
+            ]
+        )
+
+
+def test_phase6_v2_cpu_synchronized_update_keeps_hashes_equal(tmp_path: Path) -> None:
+    rows, stages = _run_gloo_v2_workers(tmp_path, mode="update")
+    assert len({row["updated_policy"] for row in rows}) == 1
+    assert len({row["updated_optimizer"] for row in rows}) == 1
+    assert all(
+        value is not None
+        and value["stages"][-3:]
+        == ["gradient_sync_complete", "optimizer_step_complete", "hashes_written"]
+        for value in stages.values()
+    )
+
+
+def test_phase6_v2_rejects_v1_and_diagnostic_resume_before_environment(
+    tmp_path: Path,
+) -> None:
+    config, roster, acceptance = _v2()
+    checkpoint = tmp_path / "v1.pt"
+    torch.save({"checkpoint_version": "phase6_learning_checkpoint_v1"}, checkpoint)
+    with pytest.raises(ValueError):
+        restore_learning_checkpoint(
+            checkpoint,
+            config=config,
+            roster=roster,
+            acceptance=acceptance,
+            policy=ResidualActorCritic(),
+            optimizer=torch.optim.Adam(ResidualActorCritic().parameters()),
+            source_manifest={"x": "a" * 64},
+        )
+
+
+def test_phase6_v2_checkpoint_round_trips_initialization_provenance(
+    tmp_path: Path,
+) -> None:
+    from somaforce_cross.learning.joint_runner import (
+        independent_optimizer,
+        initialize_independent_policy,
+    )
+
+    config, roster, acceptance = _v2()
+    policy, initialization = initialize_independent_policy(config)
+    optimizer, initialization = independent_optimizer(
+        policy, learning_rate=3.0e-4, initialization=initialization
+    )
+    optimizer.state[next(policy.parameters())]["step"] = torch.tensor(24.0)
+    payload = learning_checkpoint_payload(
+        config=config,
+        roster=roster,
+        acceptance=acceptance,
+        policy=policy,
+        optimizer=optimizer,
+        iteration=1,
+        task_transitions={task.task: 2048 for task in roster.tasks},
+        curriculum=JointCurriculum(transitions=8192),
+        next_crossing=None,
+        evaluation_history=[],
+        rank_rng={
+            str(rank): {
+                "cpu": torch.arange(2, dtype=torch.uint8),
+                "cuda": [torch.arange(2, dtype=torch.uint8) for _ in range(4)],
+            }
+            for rank in range(4)
+        },
+        source_manifest={"x": "a" * 64},
+        metrics={},
+        pre_evaluation=True,
+        initialization=initialization,
+    )
+    path = tmp_path / "v2.pt"
+    atomic_torch_save(path, payload)
+    restored = restore_learning_checkpoint(
+        path,
+        config=config,
+        roster=roster,
+        acceptance=acceptance,
+        policy=ResidualActorCritic(),
+        optimizer=torch.optim.Adam(ResidualActorCritic().parameters()),
+        source_manifest={"x": "a" * 64},
+        expected_iteration=1,
+    )
+    assert restored["initialization"] == initialization
+
+
+def test_phase6_v2_initial_branch_has_no_phase5_loader_or_external_torch_load() -> None:
+    source = inspect.getsource(train_phase6._worker_main)
+    branch = source[
+        source.index(
+            'if config.payload["contract_version"] == "phase6_joint_training_v2"'
+        ) : source.index(
+            "else:\n            algorithm",
+            source.index(
+                'if config.payload["contract_version"] == "phase6_joint_training_v2"'
+            ),
+        )
+    ]
+    assert "load_phase5_policy_only" not in branch and "torch.load" not in branch
+
+
+def test_phase6_v2_task_balance_and_actor_privilege_boundary_are_unchanged() -> None:
+    scheduler = JointTaskScheduler(task_count=4, world_size=4)
+    assert scheduler.expected_task_transitions(
+        cycle_index=0, window_index=0, slot_transitions=2048
+    ) == {0: 2048, 1: 2048, 2: 2048, 3: 2048}
+    assert "task_id" not in inspect.getsource(ResidualActorCritic.actor_forward)
 
 
 def _gloo_gradient_worker(
@@ -1363,7 +1745,7 @@ def test_wrapper_requires_result_order_exit_zero_and_env_closed_last_marker(
             "--profile",
             "production_segment",
             "--acceptance-config",
-            str(PHASE6_LEARNING_CONFIG),
+            str(train_phase6.PHASE6_LEARNING_CONFIG),
             "--phase6-config",
             str(PHASE6_CONFIG),
             "--roster",
@@ -1545,9 +1927,10 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manifest = _current_mainrunner_source_manifest()
-    assert len(manifest) == 7
-    assert set(manifest) == {
+    manifest = _current_mainrunner_source_manifest(
+        CONFIG_PATH, ROSTER_PATH, PHASE6_LEARNING_CONFIG
+    )
+    expected_v1_paths = {
         str(Path(path).resolve())
         for path in (
             "configs/phase6_learning_acceptance_v1.json",
@@ -1559,6 +1942,29 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
             "somaforce_cross/envs/residual_env.py",
         )
     }
+    assert len(manifest) == 7
+    assert set(manifest) == expected_v1_paths
+    default_manifest = _current_mainrunner_source_manifest()
+    expected_v2_paths = {
+        str(Path(path).resolve())
+        for path in (
+            "configs/phase6_learning_acceptance_v2.json",
+            "configs/phase6_joint_training_v2.json",
+            "configs/phase6_task_roster_v2.json",
+            "somaforce_cross/learning/acceptance.py",
+            "somaforce_cross/learning/joint_runner.py",
+            "scripts/train_phase6.py",
+            "somaforce_cross/envs/residual_env.py",
+        )
+    }
+    assert len(default_manifest) == 7
+    assert set(default_manifest) == expected_v2_paths
+    with pytest.raises(ValueError, match="complete known lineage"):
+        _current_mainrunner_source_manifest(CONFIG_PATH, V2_ROSTER_PATH)
+    with pytest.raises(ValueError, match="must be coherent"):
+        _current_mainrunner_source_manifest(
+            V2_CONFIG_PATH, V2_ROSTER_PATH, PHASE6_LEARNING_CONFIG
+        )
     live_sources = {
         "train_phase6": Path("scripts/train_phase6.py").resolve(),
         "joint_runner": Path("somaforce_cross/learning/joint_runner.py").resolve(),
@@ -1673,7 +2079,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
             "--source-rebind",
             str(source_rebind),
             "--acceptance-config",
-            str(PHASE6_LEARNING_CONFIG),
+            str(train_phase6.PHASE6_LEARNING_CONFIG),
             "--phase6-config",
             str(PHASE6_CONFIG),
             "--roster",
@@ -1755,7 +2161,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
             stage="C3",
         )
     inner_args = Namespace(
-        acceptance_config=PHASE6_LEARNING_CONFIG,
+        acceptance_config=train_phase6.PHASE6_LEARNING_CONFIG,
         cycle_index=segment.segment_index,
         evaluation_seed=20262806,
         output_dir=tmp_path / "inner",
@@ -1888,8 +2294,16 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
     assert "ModuleNotFoundError" not in direct_entrypoint.stderr
     assert not direct_attempt.exists()
 
-    config, roster = _roster()
-    acceptance = load_learning_acceptance_config()
+    config, roster, acceptance = _v2()
+    production_manifest = default_manifest
+    assert config.payload["contract_version"] == "phase6_joint_training_v2"
+    assert (
+        json.loads(V2_ROSTER_PATH.read_text(encoding="utf-8"))["contract_version"]
+        == "phase6_task_roster_v2"
+    )
+    assert roster.phase6_canonical_sha256 == config.canonical_sha256
+    assert acceptance.payload["contract_version"] == "phase6_learning_acceptance_v2"
+    assert production_manifest == _current_mainrunner_source_manifest()
     metric_schema = config.payload["metrics"]
 
     class MetricCollector:
@@ -2255,7 +2669,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
         assert kwargs["config"] is config
         assert kwargs["roster"] is roster
         assert kwargs["acceptance"] is acceptance
-        assert kwargs["source_manifest"] == manifest
+        assert kwargs["source_manifest"] == production_manifest
         assert kwargs["device"] == "cpu"
         if resolved == history_resume.resolve():
             assert kwargs["expected_iteration"] == history_segment.start_iteration
@@ -2276,7 +2690,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
                 "--profile",
                 "production_segment",
                 "--acceptance-config",
-                str(PHASE6_LEARNING_CONFIG),
+                str(train_phase6.PHASE6_LEARNING_CONFIG),
                 "--phase6-config",
                 str(PHASE6_CONFIG),
                 "--roster",
@@ -2323,7 +2737,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
                 "iteration": history_segment.end_iteration,
                 "rank_results": [dict(result) for result in history_rank_results],
                 "source_manifest_sha256": train_phase6._source_manifest_digest(
-                    manifest
+                    production_manifest
                 ),
                 "source_rebind": {
                     "path": str(history_source_rebind),
@@ -2408,7 +2822,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
                     "--profile",
                     "production_segment",
                     "--acceptance-config",
-                    str(PHASE6_LEARNING_CONFIG),
+                    str(train_phase6.PHASE6_LEARNING_CONFIG),
                     "--phase6-config",
                     str(PHASE6_CONFIG),
                     "--roster",
@@ -2444,7 +2858,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
             config=config,
             roster=roster,
             acceptance=acceptance,
-            source_manifest=manifest,
+            source_manifest=production_manifest,
         )
         for invalid_history in (
             [],
@@ -2461,7 +2875,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
                     config=config,
                     roster=roster,
                     acceptance=acceptance,
-                    source_manifest=manifest,
+                    source_manifest=production_manifest,
                 )
     bootstrap = tmp_path / "post_evaluation_mainrunner_rebound.pt"
     bootstrap.write_bytes(b"bootstrap")
@@ -2714,7 +3128,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
                 stage="C1",
                 source_rebind=tmp_path / "source_rebind_mainrunner.json",
                 roster=roster,
-                source_manifest=manifest,
+                source_manifest=production_manifest,
             )
 
     (evaluation_dir / "scaffold_only").mkdir()
@@ -2771,7 +3185,7 @@ def test_mainrunner_source_manifest_and_rank_rng_contract_are_strict(
                 stage="C1",
                 source_rebind=tmp_path / "source_rebind_mainrunner.json",
                 roster=roster,
-                source_manifest=manifest,
+                source_manifest=production_manifest,
             )
 
 

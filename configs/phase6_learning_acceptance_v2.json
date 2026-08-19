@@ -1,0 +1,32 @@
+{
+  "bindings": {
+    "initialization_contract_version": "phase6_independent_initialization_v1",
+    "initial_policy_sha256": "cc3116f729f05b536084a50323a613c6dbdb73149424d314864196e402bad01d",
+    "phase6_canonical_sha256": "3e3da51648f0a25d6e083241d7ed0457a0c621b7adcf95d4503eece91eb3fab3",
+    "phase6_raw_sha256": "c1f0401c875713c7e07b3b0b2da71149ff27b1b125a87fb5897e41342a2a37fc",
+    "roster_canonical_sha256": "cd21654b48b923bc284f89b5003cae0836e8b4b9174401d4e83db5eda0a9eaae",
+    "roster_raw_sha256": "43086432add32dac71cf5dcc7a683c004b186a5477a6f2cd13f90e10951eb9ed"
+  },
+  "checkpoint": {
+    "checkpoint_version": "phase6_learning_checkpoint_v2",
+    "latest_pointer": "latest.json",
+    "persist_rank_rng_states": true,
+    "post_evaluation_atomic": true,
+    "pre_evaluation_required": true,
+    "resume_strict": true
+  },
+  "contract_version": "phase6_learning_acceptance_v2",
+  "crossing": {"actual_transitions_per_iteration": 8192, "formula": "target_iteration=ceil(logical_crossing/8192)", "interval_transitions": 250000, "record_logical_and_actual": true, "reject_duplicate_or_skipped": true},
+  "curriculum": {
+    "promotion_windows": 3,
+    "rollback_windows": 2,
+    "promotion_eligibility": {"C1": 5000000, "C2": 10000000},
+    "gates": {"C1": {"failure_max": 0.05, "retention_min": 0.95, "success_min": 0.75}, "C2": {"failure_max": 0.08, "retention_min": 0.95, "success_min": 0.65}, "C3": {"failure_max": 0.08, "retention_min": 0.95, "success_min": 0.65}},
+    "rollback": {"failure_margin": 0.05, "retention_min": 0.90, "success_margin": 0.15}
+  },
+  "evaluation": {"deterministic_actor_mean": true, "forbid_gradient_optimizer_normalizer_update": true, "horizons": {"move_largebox": 199, "move_suitcase": 472, "push_box": 792, "push_door_hand": 508}, "nominal_atom": "nominal", "nominal_pair_seeds_per_task": 128, "pair_seeds_per_task": 256, "paired_modes": ["residual", "scaffold_only"], "rank_zero_aggregate": true, "stage": "current_global_stage", "stage_pair_seed_base": 20262806, "evaluation_seed": 20262806, "logical_interval_transitions": 250000},
+  "final_acceptance": {"final_stage": "C3", "final_iteration": 2442, "task_transition_fraction": 0.25, "nominal_retention_min": 0.95, "nominal_invalid_max": 0, "nominal_saturation_max": 0.10, "residual_mean_norm_min": 0.01, "contact_bearing_residual_fraction_min": 0.25, "benefit_task_count_min": 2, "benefit_mismatch_family_count_min": 2, "benefit_success_delta_min": 0.05, "benefit_progress_delta_min": 0.05, "benefit_force_p95_ratio_max": 0.95, "stability_degradation_max": 0.05, "task_normalized_reward_share_max": 0.60, "task_semantic_total_share_max": 0.60, "semantic_total_sum_zero_share": 0.0},
+  "initialization_gates": {"actor_output_zero_init": true, "external_checkpoint": null, "optimizer_initial_step": 0, "rank0_broadcast_verified": true},
+  "profiles": {"pilot": {"total_iterations": 31, "global_transitions": 253952, "per_task_transitions": 63488, "optimizer_steps": 744}, "main": {"total_iterations": 2442, "global_transitions": 20004864, "per_task_transitions": 5001216, "optimizer_steps": 58608}},
+  "runtime": {"global_transitions_per_iteration": 8192, "num_envs_per_rank": 64, "num_steps_per_env": 32, "optimizer_steps_per_iteration": 24, "world_size": 4, "initial_stage": "C1", "train_seed": 20260806, "evaluation_seed": 20262806}
+}

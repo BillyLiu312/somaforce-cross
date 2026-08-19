@@ -31,6 +31,16 @@ PHASE6_CHECKPOINT_VERSION = "phase6_joint_checkpoint_v1"
 PHASE6_LEARNING_ACCEPTANCE_VERSION = "phase6_learning_acceptance_v1"
 PHASE6_LEARNING_CHECKPOINT_VERSION = "phase6_learning_checkpoint_v1"
 PHASE6_LEARNING_CONFIG = REPO_ROOT / "configs/phase6_learning_acceptance_v1.json"
+PHASE6_V2_CONTRACT_VERSION = "phase6_joint_training_v2"
+PHASE6_V2_ROSTER_VERSION = "phase6_task_roster_v2"
+PHASE6_V2_CHECKPOINT_VERSION = "phase6_joint_checkpoint_v2"
+PHASE6_V2_LEARNING_ACCEPTANCE_VERSION = "phase6_learning_acceptance_v2"
+PHASE6_V2_LEARNING_CHECKPOINT_VERSION = "phase6_learning_checkpoint_v2"
+PHASE6_V2_LEARNING_CONFIG = REPO_ROOT / "configs/phase6_learning_acceptance_v2.json"
+PHASE6_INDEPENDENT_INITIALIZATION_VERSION = "phase6_independent_initialization_v1"
+PHASE6_INDEPENDENT_INITIAL_POLICY_SHA256 = (
+    "cc3116f729f05b536084a50323a613c6dbdb73149424d314864196e402bad01d"
+)
 _LEARNING_PHASE6_RAW_SHA256 = (
     "f26f8e118decb13066362b7a8612b1e2c5fbba37050a38b7ab3880f796c2131d"
 )
@@ -298,6 +308,9 @@ def _validate_bindings(value: object) -> None:
 def validate_phase6_config(payload: Mapping[str, Any]) -> None:
     """Validate every frozen Phase 6 algorithm field before runtime startup."""
     canonical_json_bytes(payload)
+    if payload.get("contract_version") == PHASE6_V2_CONTRACT_VERSION:
+        _validate_phase6_v2_config(payload)
+        return
     root = _exact_keys(
         payload,
         "root",
@@ -415,6 +428,138 @@ def validate_phase6_config(payload: Mapping[str, Any]) -> None:
         raise ValueError("Phase 6 scheduler formula is frozen")
 
 
+def _validate_phase6_v2_config(payload: Mapping[str, Any]) -> None:
+    """Validate the independent lineage without consulting Phase 5 artifacts."""
+    root = _exact_keys(
+        payload,
+        "v2.root",
+        {
+            "bindings",
+            "checkpoint",
+            "contract_version",
+            "curriculum",
+            "dimensions",
+            "initialization",
+            "metrics",
+            "ppo",
+            "runtime",
+            "scheduler",
+        },
+    )
+    if root["contract_version"] != PHASE6_V2_CONTRACT_VERSION:
+        raise ValueError("unexpected Phase 6 v2 contract version")
+    bindings = _exact_keys(
+        root["bindings"], "v2.bindings", {"phase4", "roster_contract_version"}
+    )
+    if (
+        dict(
+            _exact_keys(bindings["phase4"], "v2.bindings.phase4", set(_PHASE4_BINDING))
+        )
+        != _PHASE4_BINDING
+    ):
+        raise ValueError("Phase 6 v2 Phase 4 binding changed")
+    if bindings["roster_contract_version"] != PHASE6_V2_ROSTER_VERSION:
+        raise ValueError("Phase 6 v2 roster version mismatch")
+    initialization = _exact_keys(
+        root["initialization"],
+        "v2.initialization",
+        {
+            "actor_output_zero_init",
+            "contract_version",
+            "external_checkpoint",
+            "init_noise_std",
+            "parameter_count",
+            "policy_constructor",
+            "rank_owner",
+            "seed",
+            "source",
+            "synchronization",
+        },
+    )
+    expected_initialization = {
+        "actor_output_zero_init": True,
+        "contract_version": PHASE6_INDEPENDENT_INITIALIZATION_VERSION,
+        "external_checkpoint": None,
+        "init_noise_std": 1.0,
+        "parameter_count": 916881,
+        "policy_constructor": "ResidualActorCritic",
+        "rank_owner": 0,
+        "seed": 20260806,
+        "source": "random",
+        "synchronization": "rank0_state_dict_broadcast",
+    }
+    if dict(initialization) != expected_initialization:
+        raise ValueError("Phase 6 v2 initialization contract changed")
+    if dict(
+        _exact_keys(
+            root["dimensions"],
+            "v2.dimensions",
+            {"action", "actor_input", "critic", "policy", "semantic_target"},
+        )
+    ) != {
+        "action": ACTION_DIM,
+        "actor_input": ACTOR_INPUT_DIM,
+        "critic": CRITIC_DIM,
+        "policy": POLICY_DIM,
+        "semantic_target": 31,
+    }:
+        raise ValueError("Phase 6 v2 dimensions changed")
+    if dict(_exact_keys(root["metrics"], "v2.metrics", set(_METRICS))) != _METRICS:
+        raise ValueError("Phase 6 v2 metrics changed")
+    if dict(_exact_keys(root["ppo"], "v2.ppo", set(_PPO))) != _PPO:
+        raise ValueError("Phase 6 v2 PPO changed")
+    if dict(
+        _exact_keys(
+            root["runtime"],
+            "v2.runtime",
+            {
+                "backend",
+                "init_method",
+                "process_group_timeout_s",
+                "required_visible_gpus",
+                "world_size",
+            },
+        )
+    ) != {
+        "backend": "nccl",
+        "init_method": "env://",
+        "process_group_timeout_s": 180,
+        "required_visible_gpus": 4,
+        "world_size": 4,
+    }:
+        raise ValueError("Phase 6 v2 runtime changed")
+    if dict(
+        _exact_keys(
+            root["checkpoint"],
+            "v2.checkpoint",
+            {
+                "atomic_writer_rank",
+                "checkpoint_version",
+                "persist_rank_rng_states",
+                "resume_strict",
+                "verify_hash_each_iteration",
+            },
+        )
+    ) != {
+        "atomic_writer_rank": 0,
+        "checkpoint_version": PHASE6_V2_CHECKPOINT_VERSION,
+        "persist_rank_rng_states": True,
+        "resume_strict": True,
+        "verify_hash_each_iteration": True,
+    }:
+        raise ValueError("Phase 6 v2 checkpoint policy changed")
+    for name in ("curriculum", "scheduler"):
+        if (
+            root[name]
+            != json.loads(
+                (REPO_ROOT / "configs/phase6_joint_training_v1.json").read_text(
+                    encoding="utf-8"
+                )
+            )[name]
+        ):
+            raise ValueError(f"Phase 6 v2 {name} changed")
+
+
 @dataclass(frozen=True)
 class Phase6Config:
     payload: Mapping[str, Any]
@@ -423,6 +568,11 @@ class Phase6Config:
 
 
 def _verify_phase6_inputs(config: Phase6Config, *, repo_root: Path) -> None:
+    if config.payload["contract_version"] == PHASE6_V2_CONTRACT_VERSION:
+        source = repo_root / "configs/phase4b5_numeric_contract.json"
+        if not source.is_file() or sha256_file(source) != _PHASE4_BINDING["raw_sha256"]:
+            raise ValueError("Phase 6 v2 Phase 4 binding checksum mismatch")
+        return
     expected_files = (
         ("configs/phase4b5_numeric_contract.json", _PHASE4_BINDING["raw_sha256"]),
         ("configs/phase5_ppo_v1.json", _PHASE5_BINDING["raw_sha256"]),
@@ -521,7 +671,12 @@ def load_phase6_task_roster(
         "roster",
         {"contract_version", "phase6_canonical_sha256", "tasks"},
     )
-    if root["contract_version"] != PHASE6_ROSTER_VERSION:
+    expected_roster_version = (
+        PHASE6_V2_ROSTER_VERSION
+        if phase6_config.payload["contract_version"] == PHASE6_V2_CONTRACT_VERSION
+        else PHASE6_ROSTER_VERSION
+    )
+    if root["contract_version"] != expected_roster_version:
         raise ValueError("unexpected Phase 6 roster version")
     if root["phase6_canonical_sha256"] != phase6_config.canonical_sha256:
         raise ValueError("roster does not bind this Phase 6 algorithm contract")
@@ -632,6 +787,9 @@ def validate_learning_acceptance_config(
 ) -> None:
     """Validate the frozen production learning contract and all arithmetic."""
     canonical_json_bytes(payload)
+    if payload.get("contract_version") == PHASE6_V2_LEARNING_ACCEPTANCE_VERSION:
+        _validate_learning_acceptance_v2(payload, repo_root=Path(repo_root))
+        return
     root = _exact_keys(
         payload,
         "learning",
@@ -848,6 +1006,123 @@ def validate_learning_acceptance_config(
         or final["final_iteration"] != 2442
     ):
         raise ValueError("Phase 6 final acceptance contract is frozen")
+
+
+def _validate_learning_acceptance_v2(
+    payload: Mapping[str, Any], *, repo_root: Path
+) -> None:
+    root = _exact_keys(
+        payload,
+        "v2.learning",
+        {
+            "bindings",
+            "checkpoint",
+            "contract_version",
+            "crossing",
+            "curriculum",
+            "evaluation",
+            "final_acceptance",
+            "initialization_gates",
+            "profiles",
+            "runtime",
+        },
+    )
+    bindings = _exact_keys(
+        root["bindings"],
+        "v2.learning.bindings",
+        {
+            "initialization_contract_version",
+            "initial_policy_sha256",
+            "phase6_canonical_sha256",
+            "phase6_raw_sha256",
+            "roster_canonical_sha256",
+            "roster_raw_sha256",
+        },
+    )
+    if (
+        bindings["initialization_contract_version"]
+        != PHASE6_INDEPENDENT_INITIALIZATION_VERSION
+        or bindings["initial_policy_sha256"] != PHASE6_INDEPENDENT_INITIAL_POLICY_SHA256
+    ):
+        raise ValueError("Phase 6 v2 initialization acceptance binding changed")
+    files = {
+        "configs/phase6_joint_training_v2.json": bindings["phase6_raw_sha256"],
+        "configs/phase6_task_roster_v2.json": bindings["roster_raw_sha256"],
+    }
+    for relative, digest in files.items():
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise ValueError("Phase 6 v2 binding is not a SHA256")
+        source = repo_root / relative
+        if not source.is_file() or sha256_file(source) != digest:
+            raise ValueError(f"Phase 6 v2 binding checksum mismatch: {relative}")
+    config_payload = json.loads(
+        (repo_root / "configs/phase6_joint_training_v2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    roster_payload = json.loads(
+        (repo_root / "configs/phase6_task_roster_v2.json").read_text(encoding="utf-8")
+    )
+    if (
+        canonical_sha256(config_payload) != bindings["phase6_canonical_sha256"]
+        or canonical_sha256(roster_payload) != bindings["roster_canonical_sha256"]
+    ):
+        raise ValueError("Phase 6 v2 canonical binding mismatch")
+    if dict(
+        _exact_keys(
+            root["checkpoint"],
+            "v2.learning.checkpoint",
+            {
+                "checkpoint_version",
+                "latest_pointer",
+                "persist_rank_rng_states",
+                "post_evaluation_atomic",
+                "pre_evaluation_required",
+                "resume_strict",
+            },
+        )
+    ) != {
+        "checkpoint_version": PHASE6_V2_LEARNING_CHECKPOINT_VERSION,
+        "latest_pointer": "latest.json",
+        "persist_rank_rng_states": True,
+        "post_evaluation_atomic": True,
+        "pre_evaluation_required": True,
+        "resume_strict": True,
+    }:
+        raise ValueError("Phase 6 v2 learning checkpoint policy changed")
+    if dict(
+        _exact_keys(
+            root["initialization_gates"],
+            "v2.initialization_gates",
+            {
+                "actor_output_zero_init",
+                "external_checkpoint",
+                "optimizer_initial_step",
+                "rank0_broadcast_verified",
+            },
+        )
+    ) != {
+        "actor_output_zero_init": True,
+        "external_checkpoint": None,
+        "optimizer_initial_step": 0,
+        "rank0_broadcast_verified": True,
+    }:
+        raise ValueError("Phase 6 v2 initialization gates changed")
+    baseline = json.loads(
+        (repo_root / "configs/phase6_learning_acceptance_v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    for name in (
+        "crossing",
+        "curriculum",
+        "evaluation",
+        "final_acceptance",
+        "profiles",
+        "runtime",
+    ):
+        if root[name] != baseline[name]:
+            raise ValueError(f"Phase 6 v2 {name} changed")
 
 
 def load_learning_acceptance_config(
@@ -2145,6 +2420,124 @@ def synchronize_iteration_hashes(
     return record
 
 
+def initialize_independent_policy(
+    config: Phase6Config,
+    *,
+    expected_policy_sha256: str = PHASE6_INDEPENDENT_INITIAL_POLICY_SHA256,
+) -> tuple[ResidualActorCritic, dict[str, object]]:
+    """Create the V2 policy in a CPU-only, rank-zero-owned RNG scope."""
+    if config.payload["contract_version"] != PHASE6_V2_CONTRACT_VERSION:
+        raise ValueError("independent initialization requires the Phase 6 v2 contract")
+    specification = _mapping(config.payload["initialization"], "initialization")
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(int(specification["seed"]))
+        policy = ResidualActorCritic(
+            init_noise_std=float(specification["init_noise_std"])
+        )
+        policy.actor.mlp[4].weight.data.zero_()
+        policy.actor.mlp[4].bias.data.zero_()
+    if (
+        sum(parameter.numel() for parameter in policy.parameters())
+        != specification["parameter_count"]
+    ):
+        raise ValueError("independent policy parameter count mismatch")
+    policy_sha256 = state_dict_sha256(policy.state_dict())
+    if policy_sha256 != expected_policy_sha256:
+        raise ValueError("independent initial policy SHA256 mismatch")
+    return policy, {
+        "contract_version": specification["contract_version"],
+        "source": specification["source"],
+        "seed": specification["seed"],
+        "parameter_count": specification["parameter_count"],
+        "initial_policy_sha256": policy_sha256,
+        "actor_output_zero_init": specification["actor_output_zero_init"],
+        "rank0_broadcast_verified": False,
+        "optimizer_initial_sha256": None,
+        "optimizer_initial_step": None,
+        "external_checkpoint": specification["external_checkpoint"],
+    }
+
+
+def broadcast_independent_policy(
+    policy: ResidualActorCritic,
+    *,
+    rank: int,
+    device: torch.device | str,
+    process_group: Any | None = None,
+) -> str:
+    """Move and broadcast the fixed state-dict order before Adam construction."""
+    if not distributed.is_initialized():
+        raise RuntimeError("independent policy broadcast requires a process group")
+    if distributed.get_world_size(process_group) != 4:
+        raise RuntimeError("independent policy broadcast requires four ranks")
+    policy.to(device)
+    for _, value in policy.state_dict().items():
+        if not isinstance(value, torch.Tensor):
+            raise TypeError("policy state must contain tensors")
+        distributed.broadcast(value, src=0, group=process_group)
+    digest = state_dict_sha256(policy.state_dict())
+    gathered: list[object] = [None] * distributed.get_world_size(process_group)
+    distributed.all_gather_object(gathered, digest, group=process_group)
+    if any(item != digest for item in gathered):
+        raise RuntimeError("independent policy broadcast hashes diverged")
+    return digest
+
+
+def independent_optimizer(
+    policy: ResidualActorCritic,
+    *,
+    learning_rate: float,
+    initialization: Mapping[str, object],
+) -> tuple[torch.optim.Adam, dict[str, object]]:
+    """Construct Adam only after verified policy synchronization."""
+    optimizer = torch.optim.Adam(policy.parameters(), lr=learning_rate)
+    if optimizer.state or optimizer_step(optimizer) != 0:
+        raise RuntimeError("independent optimizer must start empty at step zero")
+    record = dict(initialization)
+    record["rank0_broadcast_verified"] = True
+    record["optimizer_initial_sha256"] = state_dict_sha256(optimizer.state_dict())
+    record["optimizer_initial_step"] = 0
+    return optimizer, record
+
+
+def validate_independent_initialization(
+    value: object,
+    *,
+    expected_policy_sha256: str = PHASE6_INDEPENDENT_INITIAL_POLICY_SHA256,
+) -> dict[str, object]:
+    record = _exact_keys(
+        value,
+        "initialization",
+        {
+            "contract_version",
+            "source",
+            "seed",
+            "parameter_count",
+            "initial_policy_sha256",
+            "actor_output_zero_init",
+            "rank0_broadcast_verified",
+            "optimizer_initial_sha256",
+            "optimizer_initial_step",
+            "external_checkpoint",
+        },
+    )
+    if (
+        record["contract_version"] != PHASE6_INDEPENDENT_INITIALIZATION_VERSION
+        or record["source"] != "random"
+        or record["seed"] != 20260806
+        or record["parameter_count"] != 916881
+        or record["initial_policy_sha256"] != expected_policy_sha256
+        or record["actor_output_zero_init"] is not True
+        or record["rank0_broadcast_verified"] is not True
+        or record["optimizer_initial_step"] != 0
+        or record["external_checkpoint"] is not None
+        or not isinstance(record["optimizer_initial_sha256"], str)
+        or len(record["optimizer_initial_sha256"]) != 64
+    ):
+        raise ValueError("independent initialization provenance is invalid")
+    return dict(record)
+
+
 def load_phase5_policy_only(
     policy: ResidualActorCritic,
     checkpoint: str | Path,
@@ -2471,7 +2864,28 @@ def learning_checkpoint_payload(
     metrics: Mapping[str, object],
     pre_evaluation: bool,
     phase5_checkpoint_sha256: str = _LEARNING_PHASE5_CHECKPOINT_SHA256,
+    initialization: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
+    if config.payload["contract_version"] == PHASE6_V2_CONTRACT_VERSION:
+        if initialization is None:
+            raise ValueError("Phase 6 v2 checkpoint requires initialization provenance")
+        return _learning_checkpoint_payload_v2(
+            config=config,
+            roster=roster,
+            acceptance=acceptance,
+            policy=policy,
+            optimizer=optimizer,
+            iteration=iteration,
+            task_transitions=task_transitions,
+            curriculum=curriculum,
+            next_crossing=next_crossing,
+            evaluation_history=evaluation_history,
+            rank_rng=rank_rng,
+            source_manifest=source_manifest,
+            metrics=metrics,
+            pre_evaluation=pre_evaluation,
+            initialization=initialization,
+        )
     iteration = _positive_int(iteration, "learning checkpoint.iteration")
     arithmetic = learning_transition_arithmetic(iterations=iteration)
     expected_tasks = {
@@ -2531,8 +2945,11 @@ def atomic_learning_checkpoint(
     *,
     latest_path: str | Path | None = None,
 ) -> str:
-    if payload.get("checkpoint_version") != PHASE6_LEARNING_CHECKPOINT_VERSION:
-        raise ValueError("only phase6_learning_checkpoint_v1 may be written")
+    if payload.get("checkpoint_version") not in {
+        PHASE6_LEARNING_CHECKPOINT_VERSION,
+        PHASE6_V2_LEARNING_CHECKPOINT_VERSION,
+    }:
+        raise ValueError("unknown Phase 6 learning checkpoint version")
     target = Path(path)
     if target.exists():
         raise FileExistsError(f"learning checkpoint already exists: {target}")
@@ -2568,6 +2985,18 @@ def restore_learning_checkpoint(
     device: torch.device | str = "cpu",
 ) -> dict[str, object]:
     value = torch.load(Path(path), map_location=device, weights_only=False)
+    if config.payload["contract_version"] == PHASE6_V2_CONTRACT_VERSION:
+        return _restore_learning_checkpoint_v2(
+            value,
+            config=config,
+            roster=roster,
+            acceptance=acceptance,
+            policy=policy,
+            optimizer=optimizer,
+            source_manifest=source_manifest,
+            expected_iteration=expected_iteration,
+            expected_next_crossing=expected_next_crossing,
+        )
     required = {
         "actual_global_transitions",
         "actual_per_task_transitions",
@@ -2632,6 +3061,187 @@ def restore_learning_checkpoint(
     restored.load_state_dict(_mapping(value["curriculum"], "checkpoint.curriculum"))
     if restored.transitions != arithmetic["global_transitions"]:
         raise ValueError("learning checkpoint curriculum transition mismatch")
+    return dict(value)
+
+
+def _learning_checkpoint_payload_v2(
+    *,
+    config: Phase6Config,
+    roster: Phase6Roster,
+    acceptance: LearningAcceptanceConfig,
+    policy: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    iteration: int,
+    task_transitions: Mapping[str, int],
+    curriculum: JointCurriculum,
+    next_crossing: Mapping[str, object] | None,
+    evaluation_history: Sequence[Mapping[str, object]],
+    rank_rng: Mapping[str, object],
+    source_manifest: Mapping[str, str],
+    metrics: Mapping[str, object],
+    pre_evaluation: bool,
+    initialization: Mapping[str, object],
+) -> dict[str, object]:
+    initialization = validate_independent_initialization(
+        initialization,
+        expected_policy_sha256=str(
+            acceptance.payload["bindings"]["initial_policy_sha256"]
+        ),
+    )
+    iteration = _positive_int(iteration, "learning checkpoint.iteration")
+    arithmetic = learning_transition_arithmetic(iterations=iteration)
+    expected_tasks = {
+        task.task: arithmetic["per_task_transitions"] for task in roster.tasks
+    }
+    if dict(task_transitions) != expected_tasks:
+        raise ValueError("Phase 6 v2 checkpoint task balance mismatch")
+    validate_rank_rng_states(rank_rng)
+    if not source_manifest or any(
+        not isinstance(value, str) or len(value) != 64
+        for value in source_manifest.values()
+    ):
+        raise ValueError("Phase 6 v2 source manifest is invalid")
+    hashes = {
+        "policy": state_dict_sha256(policy.state_dict()),
+        "optimizer": state_dict_sha256(optimizer.state_dict()),
+        "step": optimizer_step(optimizer),
+    }
+    if hashes["step"] != arithmetic["optimizer_steps"]:
+        raise ValueError("Phase 6 v2 optimizer step arithmetic mismatch")
+    return {
+        "actual_global_transitions": arithmetic["global_transitions"],
+        "actual_per_task_transitions": arithmetic["per_task_transitions"],
+        "checkpoint_version": PHASE6_V2_LEARNING_CHECKPOINT_VERSION,
+        "contracts": {
+            "phase6": {
+                "canonical_sha256": config.canonical_sha256,
+                "raw_sha256": config.raw_sha256,
+                "contract_version": PHASE6_V2_CONTRACT_VERSION,
+            },
+            "roster": {
+                "canonical_sha256": roster.canonical_sha256,
+                "raw_sha256": roster.raw_sha256,
+                "contract_version": PHASE6_V2_ROSTER_VERSION,
+            },
+            "learning_acceptance": {
+                "canonical_sha256": acceptance.canonical_sha256,
+                "raw_sha256": acceptance.raw_sha256,
+                "contract_version": PHASE6_V2_LEARNING_ACCEPTANCE_VERSION,
+            },
+        },
+        "curriculum": curriculum.state_dict(),
+        "evaluation_history": [dict(row) for row in evaluation_history],
+        "initialization": initialization,
+        "iteration": iteration,
+        "metrics": dict(metrics),
+        "next_crossing": None if next_crossing is None else dict(next_crossing),
+        "optimizer": optimizer.state_dict(),
+        "optimizer_sha256": hashes["optimizer"],
+        "optimizer_step": hashes["step"],
+        "policy": policy.state_dict(),
+        "policy_sha256": hashes["policy"],
+        "pre_evaluation": pre_evaluation,
+        "rank_rng": dict(rank_rng),
+        "source_manifest": dict(source_manifest),
+        "task_transitions": dict(task_transitions),
+    }
+
+
+def _restore_learning_checkpoint_v2(
+    value: object,
+    *,
+    config: Phase6Config,
+    roster: Phase6Roster,
+    acceptance: LearningAcceptanceConfig,
+    policy: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    source_manifest: Mapping[str, str],
+    expected_iteration: int | None,
+    expected_next_crossing: Mapping[str, object] | None,
+) -> dict[str, object]:
+    required = {
+        "actual_global_transitions",
+        "actual_per_task_transitions",
+        "checkpoint_version",
+        "contracts",
+        "curriculum",
+        "evaluation_history",
+        "initialization",
+        "iteration",
+        "metrics",
+        "next_crossing",
+        "optimizer",
+        "optimizer_sha256",
+        "optimizer_step",
+        "policy",
+        "policy_sha256",
+        "pre_evaluation",
+        "rank_rng",
+        "source_manifest",
+        "task_transitions",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError("Phase 6 v2 checkpoint schema is not strict")
+    if value["checkpoint_version"] != PHASE6_V2_LEARNING_CHECKPOINT_VERSION:
+        raise ValueError("Phase 6 v2 rejects non-v2 checkpoint versions")
+    expected_contracts = {
+        "phase6": {
+            "canonical_sha256": config.canonical_sha256,
+            "raw_sha256": config.raw_sha256,
+            "contract_version": PHASE6_V2_CONTRACT_VERSION,
+        },
+        "roster": {
+            "canonical_sha256": roster.canonical_sha256,
+            "raw_sha256": roster.raw_sha256,
+            "contract_version": PHASE6_V2_ROSTER_VERSION,
+        },
+        "learning_acceptance": {
+            "canonical_sha256": acceptance.canonical_sha256,
+            "raw_sha256": acceptance.raw_sha256,
+            "contract_version": PHASE6_V2_LEARNING_ACCEPTANCE_VERSION,
+        },
+    }
+    if value["contracts"] != expected_contracts or dict(
+        value["source_manifest"]
+    ) != dict(source_manifest):
+        raise ValueError("Phase 6 v2 checkpoint protected state mismatch")
+    initialization = validate_independent_initialization(
+        value["initialization"],
+        expected_policy_sha256=str(
+            acceptance.payload["bindings"]["initial_policy_sha256"]
+        ),
+    )
+    iteration = _positive_int(value["iteration"], "v2 checkpoint.iteration")
+    if expected_iteration is not None and iteration != expected_iteration:
+        raise ValueError("Phase 6 v2 resume iteration mismatch")
+    arithmetic = learning_transition_arithmetic(iterations=iteration)
+    if (
+        value["actual_global_transitions"] != arithmetic["global_transitions"]
+        or value["actual_per_task_transitions"] != arithmetic["per_task_transitions"]
+    ):
+        raise ValueError("Phase 6 v2 checkpoint arithmetic mismatch")
+    if value["task_transitions"] != {
+        task.task: arithmetic["per_task_transitions"] for task in roster.tasks
+    }:
+        raise ValueError("Phase 6 v2 checkpoint task balance mismatch")
+    if expected_next_crossing is not None and value["next_crossing"] != dict(
+        expected_next_crossing
+    ):
+        raise ValueError("Phase 6 v2 resume crossing mismatch")
+    validate_rank_rng_states(value["rank_rng"])
+    policy.load_state_dict(value["policy"], strict=True)
+    optimizer.load_state_dict(value["optimizer"])
+    if (
+        state_dict_sha256(policy.state_dict()) != value["policy_sha256"]
+        or state_dict_sha256(optimizer.state_dict()) != value["optimizer_sha256"]
+        or optimizer_step(optimizer) != value["optimizer_step"]
+    ):
+        raise ValueError("Phase 6 v2 checkpoint learned state hash mismatch")
+    if (
+        initialization["initial_policy_sha256"]
+        != acceptance.payload["bindings"]["initial_policy_sha256"]
+    ):
+        raise ValueError("Phase 6 v2 initial policy lineage mismatch")
     return dict(value)
 
 

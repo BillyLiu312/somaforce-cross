@@ -30,9 +30,12 @@ repo_path = str(REPO_ROOT)
 if repo_path not in sys.path:
     sys.path.insert(0, repo_path)
 
-PHASE6_CONFIG = REPO_ROOT / "configs/phase6_joint_training_v1.json"
-PHASE6_ROSTER = REPO_ROOT / "configs/phase6_task_roster_v1.json"
-PHASE6_LEARNING_CONFIG = REPO_ROOT / "configs/phase6_learning_acceptance_v1.json"
+PHASE6_CONFIG = REPO_ROOT / "configs/phase6_joint_training_v2.json"
+PHASE6_ROSTER = REPO_ROOT / "configs/phase6_task_roster_v2.json"
+PHASE6_LEARNING_CONFIG = REPO_ROOT / "configs/phase6_learning_acceptance_v2.json"
+PHASE6_V1_CONFIG = REPO_ROOT / "configs/phase6_joint_training_v1.json"
+PHASE6_V1_ROSTER = REPO_ROOT / "configs/phase6_task_roster_v1.json"
+PHASE6_V1_LEARNING_CONFIG = REPO_ROOT / "configs/phase6_learning_acceptance_v1.json"
 RESULT_MARKER = "PHASE6_JOINT_RESULT="
 LEARNING_RESULT_MARKER = "PHASE6_LEARNING_RESULT="
 PROGRESS_MARKERS = ("JSON_WRITTEN", RESULT_MARKER, "ENV_CLOSED")
@@ -178,15 +181,25 @@ MAINRUNNER_SNAPSHOT_SHA256 = {
         "86aa99b303290a3b746af65936baf93b93fcb00ae99ce6632721df997185293f"
     ),
 }
-PRODUCTION_SOURCE_PATHS = (
-    REPO_ROOT / "configs/phase6_learning_acceptance_v1.json",
-    REPO_ROOT / "configs/phase6_joint_training_v1.json",
-    REPO_ROOT / "configs/phase6_task_roster_v1.json",
+PRODUCTION_SOURCE_PATHS_V1 = (
+    PHASE6_V1_LEARNING_CONFIG,
+    PHASE6_V1_CONFIG,
+    PHASE6_V1_ROSTER,
     REPO_ROOT / "somaforce_cross/learning/acceptance.py",
     REPO_ROOT / "somaforce_cross/learning/joint_runner.py",
     REPO_ROOT / "scripts/train_phase6.py",
     REPO_ROOT / "somaforce_cross/envs/residual_env.py",
 )
+PRODUCTION_SOURCE_PATHS_V2 = (
+    PHASE6_LEARNING_CONFIG,
+    PHASE6_CONFIG,
+    PHASE6_ROSTER,
+    REPO_ROOT / "somaforce_cross/learning/acceptance.py",
+    REPO_ROOT / "somaforce_cross/learning/joint_runner.py",
+    REPO_ROOT / "scripts/train_phase6.py",
+    REPO_ROOT / "somaforce_cross/envs/residual_env.py",
+)
+PRODUCTION_SOURCE_PATHS = PRODUCTION_SOURCE_PATHS_V2
 HARNESS_REBIND_FUNCTIONS = (
     "_rank_wrapper_parser",
     "_worker_command",
@@ -243,12 +256,43 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _current_mainrunner_source_manifest() -> dict[str, str]:
-    """Return the one immutable seven-file production source binding."""
+def _select_phase6_lineage(
+    phase6_config: Path,
+    roster: Path,
+    acceptance_config: Path | None = None,
+) -> tuple[str, tuple[Path, ...]]:
+    """Select exactly one explicit V1 audit or V2 production contract lineage."""
+    config = phase6_config.resolve()
+    selected_roster = roster.resolve()
+    acceptance = None if acceptance_config is None else acceptance_config.resolve()
+    v1_pair = (PHASE6_V1_CONFIG.resolve(), PHASE6_V1_ROSTER.resolve())
+    v2_pair = (PHASE6_CONFIG.resolve(), PHASE6_ROSTER.resolve())
+    if (config, selected_roster) == v1_pair:
+        if acceptance not in {None, PHASE6_V1_LEARNING_CONFIG.resolve()}:
+            raise ValueError(
+                "Phase 6 V1 config, roster, and acceptance must be coherent"
+            )
+        return "v1", PRODUCTION_SOURCE_PATHS_V1
+    if (config, selected_roster) == v2_pair:
+        if acceptance not in {None, PHASE6_LEARNING_CONFIG.resolve()}:
+            raise ValueError(
+                "Phase 6 V2 config, roster, and acceptance must be coherent"
+            )
+        return "v2", PRODUCTION_SOURCE_PATHS_V2
+    raise ValueError("Phase 6 config and roster must select one complete known lineage")
+
+
+def _current_mainrunner_source_manifest(
+    phase6_config: Path = PHASE6_CONFIG,
+    roster: Path = PHASE6_ROSTER,
+    acceptance_config: Path | None = PHASE6_LEARNING_CONFIG,
+) -> dict[str, str]:
+    """Return the exact seven-file binding for an explicit coherent lineage."""
     from somaforce_cross.learning.acceptance import source_sha256
 
-    manifest = source_sha256(PRODUCTION_SOURCE_PATHS)
-    if set(manifest) != {str(path) for path in PRODUCTION_SOURCE_PATHS}:
+    _, source_paths = _select_phase6_lineage(phase6_config, roster, acceptance_config)
+    manifest = source_sha256(source_paths)
+    if set(manifest) != {str(path) for path in source_paths}:
         raise AssertionError(
             "production source manifest must contain exactly seven files"
         )
@@ -664,9 +708,9 @@ def _profile(profile: str) -> tuple[int, int]:
 
 def _validate_worker_paths(args: argparse.Namespace) -> None:
     if args.phase6_config.resolve() != PHASE6_CONFIG.resolve():
-        raise ValueError("worker requires configs/phase6_joint_training_v1.json")
+        raise ValueError("worker requires configs/phase6_joint_training_v2.json")
     if args.roster.resolve() != PHASE6_ROSTER.resolve():
-        raise ValueError("worker requires configs/phase6_task_roster_v1.json")
+        raise ValueError("worker requires configs/phase6_task_roster_v2.json")
     if args.timeout_s <= 0 or args.cycle_index < 0 or args.window_index < 0:
         raise ValueError("worker timeout, cycle, and window values must be nonnegative")
     if args.mode in {"train-segment", "evaluate"}:
@@ -1178,10 +1222,7 @@ def summarize_phase6_run(args: argparse.Namespace) -> dict[str, object]:
         sha256_file,
     )
 
-    if args.phase6_config.resolve() != PHASE6_CONFIG.resolve():
-        raise ValueError("summary requires configs/phase6_joint_training_v1.json")
-    if args.roster.resolve() != PHASE6_ROSTER.resolve():
-        raise ValueError("summary requires configs/phase6_task_roster_v1.json")
+    _select_phase6_lineage(args.phase6_config, args.roster)
     config = load_phase6_config(args.phase6_config)
     roster = load_phase6_task_roster(args.roster, phase6_config=config)
     num_envs, iterations = _profile(args.profile)
@@ -11119,14 +11160,20 @@ def _build_environment(args: argparse.Namespace, *, task: Any, seed: int) -> Any
     return environment
 
 
-def _new_algorithm(config: Any, *, device: torch.device, world_size: int) -> Any:
+def _new_algorithm(
+    config: Any,
+    *,
+    device: torch.device,
+    world_size: int,
+    policy: Any | None = None,
+) -> Any:
     from somaforce_cross.learning.actor_critic import ResidualActorCritic
     from somaforce_cross.learning.joint_runner import GradientAverager
     from somaforce_cross.learning.runner import _load_rsl_storage_class
     from somaforce_cross.learning.semantic_ppo import SemanticPPO
 
     ppo = config.payload["ppo"]
-    policy = ResidualActorCritic(init_noise_std=float(ppo["init_noise_std"]))
+    policy = policy or ResidualActorCritic(init_noise_std=float(ppo["init_noise_std"]))
     algorithm = SemanticPPO(
         policy,
         storage_class=_load_rsl_storage_class(),
@@ -11829,7 +11876,6 @@ def _worker_main(argv: list[str]) -> int:
         if torch.cuda.device_count() < 4 or local_rank >= torch.cuda.device_count():
             raise RuntimeError("Phase 6 requires four visible CUDA devices")
         torch.cuda.set_device(local_rank)
-        launcher = AppLauncher(args)
         from somaforce_cross.learning.joint_runner import (
             JointCurriculum,
             JointTaskScheduler,
@@ -11839,6 +11885,8 @@ def _worker_main(argv: list[str]) -> int:
             broadcast_curriculum_state,
             joint_checkpoint_payload,
             learning_checkpoint_payload,
+            initialize_independent_policy,
+            broadcast_independent_policy,
             load_phase5_policy_only,
             load_learning_acceptance_config,
             load_phase6_config,
@@ -11849,6 +11897,7 @@ def _worker_main(argv: list[str]) -> int:
             rank_rng_state,
             restore_rank_rng_state,
             sha256_file,
+            state_dict_sha256,
             synchronize_iteration_hashes,
             transition_accounting,
             restore_learning_checkpoint,
@@ -11932,11 +11981,45 @@ def _worker_main(argv: list[str]) -> int:
             transitions=0,
             window_index=args.window_index,
         )
-        algorithm = _new_algorithm(
-            config, device=torch.device(args.device), world_size=world_size
-        )
+        initialization_record: dict[str, object] | None = None
+        if config.payload["contract_version"] == "phase6_joint_training_v2":
+            policy, initialization_record = initialize_independent_policy(
+                config,
+                expected_policy_sha256=str(
+                    acceptance.payload["bindings"]["initial_policy_sha256"]
+                    if acceptance is not None
+                    else "cc3116f729f05b536084a50323a613c6dbdb73149424d314864196e402bad01d"
+                ),
+            )
+            broadcast_independent_policy(policy, rank=rank, device=args.device)
+            algorithm = _new_algorithm(
+                config,
+                device=torch.device(args.device),
+                world_size=world_size,
+                policy=policy,
+            )
+            if algorithm.optimizer.state:
+                raise RuntimeError("V2 optimizer was constructed with state")
+            initialization_record["rank0_broadcast_verified"] = True
+            initialization_record["optimizer_initial_sha256"] = state_dict_sha256(
+                algorithm.optimizer.state_dict()
+            )
+            initialization_record["optimizer_initial_step"] = 0
+            _write_progress(
+                rank_dir / "progress.json",
+                initialization=initialization_record,
+                rank=rank,
+                state="initialization_verified",
+            )
+            torch.manual_seed(20260806 + rank)
+        else:
+            algorithm = _new_algorithm(
+                config, device=torch.device(args.device), world_size=world_size
+            )
         checkpoint_path = (
             REPO_ROOT / config.payload["bindings"]["phase5_initial_checkpoint"]["path"]
+            if config.payload["contract_version"] != "phase6_joint_training_v2"
+            else None
         )
         curriculum = JointCurriculum(stage=args.stage)
         previous_task_transitions: dict[str, int] = {
@@ -11974,10 +12057,11 @@ def _worker_main(argv: list[str]) -> int:
                 local_device_index=local_rank,
                 cuda_state_count=world_size,
             )
-        else:
+        elif checkpoint_path is not None:
             load_phase5_policy_only(
                 algorithm.policy, checkpoint_path, device=args.device
             )
+        launcher = AppLauncher(args)
         environment = _build_environment(args, task=task, seed=20260805 + rank)
         runner = Phase5Runner(environment, algorithm, config)
         metric_schema = phase6_metrics_schema(config)
@@ -12134,6 +12218,7 @@ def _worker_main(argv: list[str]) -> int:
                     source_manifest=source_manifest,
                     metrics=metrics,
                     pre_evaluation=True,
+                    initialization=initialization_record,
                 )
                 checkpoint = args.output_dir / "pre_evaluation.pt"
             else:
@@ -12206,6 +12291,7 @@ def _worker_main(argv: list[str]) -> int:
             "optimizer_step": expected_step,
             "per_task_transitions": task_transitions,
             "policy_sha256": last_hash["policy"],
+            "initialization": initialization_record,
             "profile": args.profile,
             "rank": rank,
             "schedule": {
