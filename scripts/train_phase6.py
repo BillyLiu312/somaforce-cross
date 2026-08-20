@@ -12197,6 +12197,7 @@ def _worker_main(argv: list[str]) -> int:
                 acceptance=acceptance,
             )
         if args.mode == "evaluate":
+            launcher = AppLauncher(args)
             source_rebind_sha256 = (
                 _sha256(args.source_rebind)
                 if args.source_rebind is not None and args.source_rebind.is_file()

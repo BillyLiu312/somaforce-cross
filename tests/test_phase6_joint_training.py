@@ -690,6 +690,36 @@ def test_v2_paired_checkpoint_validation_is_cpu_static_and_has_no_update_path() 
     assert "policy.eval()" in source
 
 
+def test_worker_evaluation_launches_isaac_before_environment_and_keeps_lifecycles_separate() -> (
+    None
+):
+    source = inspect.getsource(train_phase6._worker_main)
+    assert source.count("AppLauncher(args)") == 2
+    evaluate_start = source.index('if args.mode == "evaluate":')
+    train_start = source.index("scheduler = JointTaskScheduler(", evaluate_start)
+    cleanup_start = source.index("except _EvaluationComplete:")
+    evaluate_branch = source[evaluate_start:train_start]
+    train_branch = source[train_start:cleanup_start]
+    assert evaluate_branch.count("AppLauncher(args)") == 1
+    assert train_branch.count("AppLauncher(args)") == 1
+    assert evaluate_branch.index("AppLauncher(args)") < evaluate_branch.index(
+        "_run_paired_evaluation_rank("
+    )
+    assert train_branch.index("AppLauncher(args)") < train_branch.index(
+        "_build_environment("
+    )
+    assert source.index("torch.cuda.set_device(local_rank)") < source.index(
+        "AppLauncher(args)", evaluate_start
+    )
+    assert source.index("args.num_envs = num_envs") < source.index(
+        "AppLauncher(args)", evaluate_start
+    )
+    assert source.index('args.device = f"cuda:{local_rank}"') < source.index(
+        "AppLauncher(args)", evaluate_start
+    )
+    assert "finally:" in source and "launcher.app.close()" in source
+
+
 def test_phase6_v2_initial_branch_has_no_phase5_loader_or_external_torch_load() -> None:
     source = inspect.getsource(train_phase6._worker_main)
     branch = source[
