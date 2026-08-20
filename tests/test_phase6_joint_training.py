@@ -483,6 +483,213 @@ def test_phase6_v2_checkpoint_round_trips_initialization_provenance(
     assert restored["initialization"] == initialization
 
 
+def _write_v2_paired_checkpoint(
+    tmp_path: Path,
+) -> tuple[Path, object, object, object, dict[str, str]]:
+    from somaforce_cross.learning.joint_runner import (
+        independent_optimizer,
+        initialize_independent_policy,
+    )
+
+    config, roster, acceptance = _v2()
+    policy, initialization = initialize_independent_policy(config)
+    optimizer, initialization = independent_optimizer(
+        policy, learning_rate=3.0e-4, initialization=initialization
+    )
+    optimizer.state[next(policy.parameters())]["step"] = torch.tensor(24.0)
+    source_manifest = _current_mainrunner_source_manifest()
+    payload = learning_checkpoint_payload(
+        config=config,
+        roster=roster,
+        acceptance=acceptance,
+        policy=policy,
+        optimizer=optimizer,
+        iteration=1,
+        task_transitions={task.task: 2048 for task in roster.tasks},
+        curriculum=JointCurriculum(transitions=8192),
+        next_crossing=None,
+        evaluation_history=[],
+        rank_rng={
+            str(rank): {
+                "cpu": torch.arange(2, dtype=torch.uint8),
+                "cuda": [torch.arange(2, dtype=torch.uint8) for _ in range(4)],
+            }
+            for rank in range(4)
+        },
+        source_manifest=source_manifest,
+        metrics={},
+        pre_evaluation=True,
+        initialization=initialization,
+    )
+    path = tmp_path / "v2_pre_evaluation.pt"
+    atomic_torch_save(path, payload)
+    return path, config, roster, acceptance, source_manifest
+
+
+def test_v2_paired_evaluation_strict_restore_enters_schedule_without_updates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint, config, roster, acceptance, source_manifest = (
+        _write_v2_paired_checkpoint(tmp_path)
+    )
+
+    class _Environment:
+        def __init__(self) -> None:
+            self.mode = ""
+            self.schedule: dict[str, object] | None = None
+            self.done = False
+
+        def evaluation_nominal_probe(self, _env_id: int, _episode_index: int) -> bool:
+            return True
+
+        def bind_evaluation_schedule(
+            self, schedule: dict[str, object], *, mode: str
+        ) -> None:
+            self.schedule = schedule
+            self.mode = mode
+
+        def reset(self) -> tuple[dict[str, torch.Tensor], None]:
+            return {"policy": torch.zeros(1, 668)}, None
+
+        def step(
+            self, _actions: torch.Tensor
+        ) -> tuple[dict[str, torch.Tensor], None, None, None, None]:
+            self.done = True
+            assert self.schedule is not None
+            self.records = tuple(
+                {
+                    "mode": self.mode,
+                    "seed": slot["seed"],
+                    "subset": slot["subset"],
+                }
+                for slot in self.schedule["rows"]["0"]
+            )
+            return {"policy": torch.zeros(1, 668)}, None, None, None, None
+
+        def drain_evaluation_completions(self) -> tuple[dict[str, object], ...]:
+            if not self.done:
+                return ()
+            self.done = False
+            return self.records
+
+    monkeypatch.setattr(
+        "somaforce_cross.learning.joint_runner.paired_evaluation_plan",
+        lambda _roster, **_kwargs: {
+            "tasks": {
+                roster.tasks[0].task: {
+                    "horizon": 1,
+                    "nominal_pairs": (),
+                    "stage_pairs": (object(),),
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.train_phase6._build_environment",
+        lambda *_args, **_kwargs: _Environment(),
+    )
+    result, environment = _run_paired_evaluation_rank(
+        Namespace(
+            device="cpu",
+            evaluation_seed=20262806,
+            paired_mode="residual",
+            paired_nominal_quota=1,
+            paired_num_envs=1,
+            paired_stage_quota=1,
+            resume=checkpoint,
+            runtime_mode="residual",
+            stage="C1",
+        ),
+        config=config,
+        roster=roster,
+        rank=0,
+        world_size=4,
+        acceptance=acceptance,
+        source_manifest=source_manifest,
+    )
+    environment.close() if hasattr(environment, "close") else None
+    assert result["status"] == "ok"
+    assert result["episodes"] == 2
+    assert result["optimizer_steps"] == result["normalizer_updates"] == 0
+
+
+@pytest.mark.parametrize(
+    "mutation,match",
+    [
+        (
+            lambda payload: payload["source_manifest"].__setitem__(
+                "scripts/train_phase6.py", "0" * 64
+            ),
+            "protected state",
+        ),
+        (
+            lambda payload: payload["initialization"].__setitem__("source", "external"),
+            "initialization",
+        ),
+        (lambda payload: payload.__setitem__("iteration", 2), "arithmetic"),
+        (
+            lambda payload: payload.__setitem__("pre_evaluation", False),
+            "pre-evaluation",
+        ),
+    ],
+)
+def test_v2_paired_evaluation_rejects_protected_checkpoint_mutations(
+    tmp_path: Path, mutation: object, match: str
+) -> None:
+    checkpoint, config, roster, acceptance, source_manifest = (
+        _write_v2_paired_checkpoint(tmp_path)
+    )
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    mutation(payload)
+    mutated = tmp_path / f"mutated_{match}.pt"
+    atomic_torch_save(mutated, payload)
+    with pytest.raises(ValueError, match=match):
+        _run_paired_evaluation_rank(
+            Namespace(device="cpu", resume=mutated, stage="C1", paired_mode="residual"),
+            config=config,
+            roster=roster,
+            rank=0,
+            world_size=4,
+            acceptance=acceptance,
+            source_manifest=source_manifest,
+        )
+
+
+def test_v2_paired_evaluation_rejects_v1_checkpoint_before_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, config, roster, acceptance, source_manifest = _write_v2_paired_checkpoint(
+        tmp_path
+    )
+    checkpoint = tmp_path / "v1.pt"
+    torch.save({"checkpoint_version": "phase6_learning_checkpoint_v1"}, checkpoint)
+    monkeypatch.setattr(
+        "scripts.train_phase6._build_environment",
+        lambda *_args, **_kwargs: pytest.fail("environment must not be built"),
+    )
+    with pytest.raises(ValueError, match="schema|non-v2 checkpoint"):
+        _run_paired_evaluation_rank(
+            Namespace(
+                device="cpu", resume=checkpoint, stage="C1", paired_mode="residual"
+            ),
+            config=config,
+            roster=roster,
+            rank=0,
+            world_size=4,
+            acceptance=acceptance,
+            source_manifest=source_manifest,
+        )
+
+
+def test_v2_paired_checkpoint_validation_is_cpu_static_and_has_no_update_path() -> None:
+    source = inspect.getsource(_run_paired_evaluation_rank)
+    assert "AppLauncher" not in source
+    assert "torch.load" not in source
+    assert "optimizer.step(" not in source
+    assert ".backward(" not in source
+    assert "policy.eval()" in source
+
+
 def test_phase6_v2_initial_branch_has_no_phase5_loader_or_external_torch_load() -> None:
     source = inspect.getsource(train_phase6._worker_main)
     branch = source[
@@ -3732,10 +3939,10 @@ def test_evaluation_pair_plan_is_balanced_seed_paired_and_actor_clean(
     with pytest.raises(ValueError):
         validate_paired_evaluation_plan(broken, roster=roster)
     source = inspect.getsource(_run_paired_evaluation_rank)
-    assert "ResidualActorCritic().to(device=torch.device(args.device))" in source
+    assert "ResidualActorCritic(init_noise_std=init_noise_std).to(" in source
     assert (
-        source.index("ResidualActorCritic().to(")
-        < source.index("policy.load_state_dict")
+        source.index("ResidualActorCritic(init_noise_std=init_noise_std).to(")
+        < source.index("restored = restore_learning_checkpoint")
         < source.index("policy.act_inference")
     )
     tree = ast.parse(source)
@@ -3829,9 +4036,7 @@ def test_evaluation_pair_plan_is_balanced_seed_paired_and_actor_clean(
         "phase6-learning-pilot-4gpu-64env-31iter-20260806_042940/"
         "segment_0000/recovery/pre_evaluation_devicefix_rebound.pt"
     )
-    monkeypatch.setattr(
-        "somaforce_cross.learning.actor_critic.ResidualActorCritic", _FakePolicy
-    )
+    checkpoint_payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     monkeypatch.setattr(
         "somaforce_cross.learning.joint_runner.paired_evaluation_plan",
         lambda _roster, **_kwargs: {
@@ -3866,6 +4071,10 @@ def test_evaluation_pair_plan_is_balanced_seed_paired_and_actor_clean(
             roster=roster,
             rank=0,
             world_size=4,
+            acceptance=load_learning_acceptance_config(
+                train_phase6.PHASE6_V1_LEARNING_CONFIG
+            ),
+            source_manifest=checkpoint_payload["source_manifest"],
         )
         environment.close()
         results.append(result)
@@ -4677,6 +4886,7 @@ def test_pairedbatch_modes_share_schedule_and_count_real_completed_rows(
         "phase6-learning-pilot-4gpu-64env-31iter-20260806_042940/"
         "segment_0000/recovery/pre_evaluation_stepboundary_rebound.pt"
     )
+    checkpoint_payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
 
     class _FakePolicy:
         def to(self, *, device: torch.device) -> _FakePolicy:
@@ -4745,10 +4955,6 @@ def test_pairedbatch_modes_share_schedule_and_count_real_completed_rows(
         def close(self) -> None:
             return None
 
-    monkeypatch.setattr(
-        "somaforce_cross.learning.actor_critic.ResidualActorCritic", _FakePolicy
-    )
-
     def build_environment(*_args: object, **kwargs: object) -> _FakeEnvironment:
         build_seeds.append(int(kwargs["seed"]))
         return _FakeEnvironment()
@@ -4772,6 +4978,10 @@ def test_pairedbatch_modes_share_schedule_and_count_real_completed_rows(
             roster=roster,
             rank=2,
             world_size=4,
+            acceptance=load_learning_acceptance_config(
+                train_phase6.PHASE6_V1_LEARNING_CONFIG
+            ),
+            source_manifest=checkpoint_payload["source_manifest"],
         )
         environment.close()
         results.append(result)

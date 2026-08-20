@@ -11895,30 +11895,67 @@ def _run_paired_evaluation_rank(
     roster: Any,
     rank: int,
     world_size: int,
+    acceptance: Any | None = None,
+    source_manifest: Mapping[str, str] | None = None,
     progress: _EvaluationProgress | None = None,
 ) -> tuple[dict[str, Any], Any]:
     """Run paired episodes from row-owned slots without mutating PPO state."""
     from somaforce_cross.learning.actor_critic import ResidualActorCritic
     from somaforce_cross.learning.joint_runner import (
+        load_learning_acceptance_config,
         paired_evaluation_plan,
         paired_evaluation_rank_seed,
         paired_evaluation_schedule,
+        restore_learning_checkpoint,
+        restore_rank_rng_state,
         validate_paired_evaluation_schedule,
     )
 
     if args.resume is None:
         raise ValueError("paired evaluation requires a pre-evaluation checkpoint")
-    checkpoint = torch.load(args.resume, map_location=args.device, weights_only=False)
-    if (
-        not isinstance(checkpoint, Mapping)
-        or checkpoint.get("checkpoint_version") != "phase6_learning_checkpoint_v1"
-        or checkpoint.get("pre_evaluation") is not True
-    ):
-        raise ValueError(
-            "paired evaluation requires phase6_learning_checkpoint_v1 pre-evaluation input"
+    is_v2 = config.payload.get("contract_version") == "phase6_joint_training_v2"
+    if acceptance is None:
+        acceptance = load_learning_acceptance_config(
+            PHASE6_LEARNING_CONFIG if is_v2 else PHASE6_V1_LEARNING_CONFIG
         )
-    policy = ResidualActorCritic().to(device=torch.device(args.device))
-    policy.load_state_dict(checkpoint["policy"], strict=True)
+    if source_manifest is None:
+        source_manifest = _current_mainrunner_source_manifest(
+            PHASE6_CONFIG if is_v2 else PHASE6_V1_CONFIG,
+            PHASE6_ROSTER if is_v2 else PHASE6_V1_ROSTER,
+            PHASE6_LEARNING_CONFIG if is_v2 else PHASE6_V1_LEARNING_CONFIG,
+        )
+    initialization = config.payload.get("initialization")
+    init_noise_std = float(
+        initialization.get("init_noise_std", config.payload["ppo"]["init_noise_std"])
+        if isinstance(initialization, Mapping)
+        else config.payload["ppo"]["init_noise_std"]
+    )
+    policy = ResidualActorCritic(init_noise_std=init_noise_std).to(
+        device=torch.device(args.device)
+    )
+    optimizer = torch.optim.Adam(
+        policy.parameters(), lr=float(config.payload["ppo"]["learning_rate"])
+    )
+    restored = restore_learning_checkpoint(
+        args.resume,
+        config=config,
+        roster=roster,
+        acceptance=acceptance,
+        policy=policy,
+        optimizer=optimizer,
+        source_manifest=source_manifest,
+        expected_iteration=getattr(args, "segment_start", None),
+        device=args.device,
+    )
+    if restored.get("pre_evaluation") is not True:
+        raise ValueError("paired evaluation requires a pre-evaluation checkpoint")
+    if torch.device(args.device).type == "cuda":
+        restore_rank_rng_state(
+            restored["rank_rng"],
+            rank=rank,
+            local_device_index=int(os.environ.get("LOCAL_RANK", rank)),
+            cuda_state_count=world_size,
+        )
     policy.eval()
     task = roster.tasks[rank]
     num_envs = int(
@@ -12182,6 +12219,8 @@ def _worker_main(argv: list[str]) -> int:
                 roster=roster,
                 rank=rank,
                 world_size=world_size,
+                acceptance=acceptance,
+                source_manifest=source_manifest,
                 progress=progress,
             )
             status = "ok"
