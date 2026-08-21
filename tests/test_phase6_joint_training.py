@@ -61,6 +61,7 @@ from scripts.train_phase6 import (
     _semantic_equal,
     _summaryschema_ast_proof,
     _stepboundary_ast_proof,
+    _write_mainrunner_root_latest,
     _validate_historical_warningpolicy_rebind_record,
     _validate_summaryschema_failed_finalize_manifest,
     _warningpolicy_ast_proof,
@@ -861,6 +862,38 @@ def test_phase6_v2_main_shell_reuses_admitted_pilot_run_dir() -> None:
     assert '--output-dir "${RUN_DIR}" --profile main --resume "${RUN_DIR}"' in source
     assert "--source-rebind" not in source
     assert "[[ ! -e" not in source
+
+
+def test_phase6_v2_progress_stall_recovery_bootstrap_defers_root_latest(
+    tmp_path: Path,
+) -> None:
+    source = inspect.getsource(train_phase6._run_v2_progress_stall_recovery)
+    assert 'work_root / "latest.json"' not in source
+    assert 'work_root / "progress.json"' in source
+    assert 'work_root / "v2_recovery_record.json"' in source
+    assert "segment_0043/recovery/pre_evaluation_progress_stall_rebound.pt" in source
+
+    shell = (
+        V2_SCRIPT_ROOT / "recover_independent_segment43_progress_stall_4gpu.sh"
+    ).read_text(encoding="utf-8")
+    assert 'test ! -e "${TARGET_ROOT}/latest.json"' in shell
+    assert shell.index('test ! -e "${TARGET_ROOT}/latest.json"') < shell.index(
+        "for MODE in residual scaffold_only"
+    )
+    assert 'test -f "${TARGET_ROOT}/latest.json"' in shell
+    assert 'root_latest.get("checkpoint")' in shell
+    assert "segment_0043/post_evaluation.pt" in shell
+
+    root = tmp_path / "root"
+    root.mkdir()
+    payload = {
+        "checkpoint": str(tmp_path / "segment_0043/post_evaluation.pt"),
+        "segment": 43,
+    }
+    _write_mainrunner_root_latest(root, payload)
+    assert json.loads((root / "latest.json").read_text()) == payload
+    with pytest.raises(FileExistsError, match="refuses to move backwards or overwrite"):
+        _write_mainrunner_root_latest(root, payload)
 
 
 def test_phase6_v2_production_rejects_invalid_bootstrap_and_progress(

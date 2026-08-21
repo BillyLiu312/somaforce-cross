@@ -2762,22 +2762,6 @@ def _run_v2_progress_stall_recovery(args: argparse.Namespace) -> int:
         eta_s=None,
         error_state=None,
     )
-    _atomic_json(
-        work_root / "latest.json",
-        {
-            "actual_global_transitions": 11001856,
-            "checkpoint": str(
-                target_root
-                / "segment_0043/recovery/pre_evaluation_progress_stall_rebound.pt"
-            ),
-            "checkpoint_sha256": new_sha,
-            "curriculum_stage": "C2",
-            "iteration": 1343,
-            "logical_crossing": 11000000,
-            "segment": 43,
-            "source_manifest_sha256": _source_manifest_digest(current_manifest),
-        },
-    )
     record = {
         "checkpoint": {
             "new_path": str(
