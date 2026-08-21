@@ -2691,8 +2691,7 @@ def _run_v2_progress_stall_recovery(args: argparse.Namespace) -> int:
         or wrapper.get("timed_out") is not True
         or progress.get("status") != "rollout_complete"
         or progress.get("completed_episodes") != 384
-        or progress.get("checkpoint_sha256")
-        != "65828558d1ff3cfa178122431257d31c285dce81e8b25b4fd0443ce232b019f"
+        or progress.get("checkpoint_sha256") != V2_PROGRESS_STALL_RECOVERY_INPUT_SHA256
     ):
         raise ValueError(
             "V2 recovery failure evidence is not the admitted segment-43 stall"
