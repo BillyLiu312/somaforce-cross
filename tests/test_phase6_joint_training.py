@@ -884,7 +884,7 @@ def test_phase6_v2_progress_stall_recovery_bootstrap_defers_root_latest(
     assert 'root_latest.get("checkpoint")' in shell
     assert "segment_0043/post_evaluation.pt" in shell
     production_source = inspect.getsource(train_phase6._run_production)
-    assert "and recovery_record is None" in production_source
+    assert "and recovery_resume_record is None" in production_source
 
     root = tmp_path / "root"
     root.mkdir()
@@ -1011,6 +1011,193 @@ def test_phase6_v2_production_preserves_v1_rebind_requirement(tmp_path: Path) ->
     source = inspect.getsource(_run_production)
     assert 'if not v2 and args.profile == "main"' in source
     assert "with_source_rebind" in source
+
+
+def _v2_recovery_resume_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, str, dict[str, str]]:
+    source = (
+        Path("outputs/phase6_independent_learning")
+        / "phase6-v2-independent-segment43-recovery-20260821_190903-vulkanicd"
+    )
+    root = tmp_path / "recovery-root"
+    checkpoint = root / "segment_0043/post_evaluation.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes((source / "segment_0043/post_evaluation.pt").read_bytes())
+    old_payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    old_manifest = dict(old_payload["source_manifest"])
+    latest = {
+        "actual_global_transitions": 11001856,
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        "curriculum_stage": "C2",
+        "iteration": 1343,
+        "logical_crossing": 11000000,
+        "segment": 43,
+        "source_manifest_sha256": train_phase6._source_manifest_digest(old_manifest),
+    }
+    train_phase6._atomic_json(root / "latest.json", latest)
+    train_phase6._atomic_json(
+        root / "progress.json",
+        {
+            "active_mode": None,
+            "active_substage": "segment_complete",
+            "completed_rows": 135168,
+            "control_steps": 0,
+            "current_iteration": 1343,
+            "error_state": None,
+            "eta_s": None,
+            "segment": 43,
+            "stage": "C2",
+            "target_iteration": 2442,
+            "version": "phase6_progress_v1",
+        },
+    )
+    parent_record = root / "v2_recovery_record.json"
+    train_phase6._atomic_json(parent_record, {"fixture": "parent"})
+    parent = {"new_source_manifest": old_manifest}
+    monkeypatch.setattr(train_phase6, "V2_RECOVERY_RESUME_SOURCE_ROOT", root)
+    monkeypatch.setattr(train_phase6, "V2_RECOVERY_RESUME_PARENT_RECORD", parent_record)
+    monkeypatch.setattr(
+        train_phase6, "V2_RECOVERY_RESUME_PARENT_LATEST", root / "latest.json"
+    )
+    monkeypatch.setattr(
+        train_phase6, "V2_RECOVERY_RESUME_SOURCE_CHECKPOINT", checkpoint
+    )
+    monkeypatch.setattr(
+        train_phase6,
+        "_validate_v2_progress_stall_recovery_record",
+        lambda *_args, **_kwargs: parent,
+    )
+    return root, "continuation", old_manifest
+
+
+def test_v2_recovery_history_record_validates_against_its_frozen_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = _current_mainrunner_source_manifest()
+    current[str(Path("scripts/train_phase6.py").resolve())] = "f" * 64
+    monkeypatch.setattr(
+        train_phase6, "_current_mainrunner_source_manifest", lambda: current
+    )
+    record = train_phase6._validate_v2_progress_stall_recovery_record(
+        train_phase6.V2_RECOVERY_RESUME_PARENT_RECORD
+    )
+    assert record["new_source_manifest"] != current
+
+
+def test_v2_recovery_resume_rebind_rejects_non_script_delta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _v2_recovery_resume_fixture(tmp_path, monkeypatch)
+    current = _current_mainrunner_source_manifest()
+    current[str(Path("somaforce_cross/learning/joint_runner.py").resolve())] = "0" * 64
+    monkeypatch.setattr(
+        train_phase6, "_current_mainrunner_source_manifest", lambda: current
+    )
+    args = train_phase6._v2_recovery_resume_rebind_parser().parse_args(
+        ["--mode", "phase6-v2-recovery-resume-rebind", "--run-id", "continuation"]
+    )
+    with pytest.raises(ValueError, match="limited to train_phase6.py"):
+        train_phase6._run_v2_recovery_resume_rebind(args)
+
+
+def test_v2_recovery_resume_rebind_is_atomic_and_semantically_identical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, run_id, _ = _v2_recovery_resume_fixture(tmp_path, monkeypatch)
+    args = train_phase6._v2_recovery_resume_rebind_parser().parse_args(
+        ["--mode", "phase6-v2-recovery-resume-rebind", "--run-id", run_id]
+    )
+    assert train_phase6._run_v2_recovery_resume_rebind(args) == 0
+    target = root / "segment_0043/recovery_resume" / run_id
+    rebound = target / "post_evaluation_source_rebound.pt"
+    assert (
+        target.is_dir()
+        and rebound.is_file()
+        and not target.with_name(f"{run_id}.incomplete").exists()
+    )
+    old_payload = torch.load(
+        root / "segment_0043/post_evaluation.pt", map_location="cpu", weights_only=False
+    )
+    new_payload = torch.load(rebound, map_location="cpu", weights_only=False)
+    assert train_phase6._semantic_equal(
+        {key: value for key, value in old_payload.items() if key != "source_manifest"},
+        {key: value for key, value in new_payload.items() if key != "source_manifest"},
+    )
+    record = train_phase6._validate_v2_recovery_resume_rebind_record(
+        target / "v2_recovery_resume_record.json", output_dir=root
+    )
+    assert record["checkpoint"]["output_path"] == str(rebound)
+
+
+def test_v2_recovery_resume_rebind_rejects_overwrite_and_tamper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, run_id, _ = _v2_recovery_resume_fixture(tmp_path, monkeypatch)
+    args = train_phase6._v2_recovery_resume_rebind_parser().parse_args(
+        ["--mode", "phase6-v2-recovery-resume-rebind", "--run-id", run_id]
+    )
+    train_phase6._run_v2_recovery_resume_rebind(args)
+    with pytest.raises(FileExistsError, match="refuses to overwrite"):
+        train_phase6._run_v2_recovery_resume_rebind(args)
+    record_path = (
+        train_phase6.V2_RECOVERY_RESUME_SOURCE_ROOT
+        / "segment_0043/recovery_resume"
+        / run_id
+        / "v2_recovery_resume_record.json"
+    )
+    payload = json.loads(record_path.read_text(encoding="utf-8"))
+    payload["changed_paths"] = []
+    train_phase6._atomic_json(record_path, payload)
+    with pytest.raises(ValueError, match="source delta"):
+        train_phase6._validate_v2_recovery_resume_rebind_record(record_path)
+
+
+def test_v2_production_uses_continuation_record_without_source_rebind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, run_id, _ = _v2_recovery_resume_fixture(tmp_path, monkeypatch)
+    rebind_args = train_phase6._v2_recovery_resume_rebind_parser().parse_args(
+        ["--mode", "phase6-v2-recovery-resume-rebind", "--run-id", run_id]
+    )
+    train_phase6._run_v2_recovery_resume_rebind(rebind_args)
+    continuation = root / "segment_0043/recovery_resume" / run_id
+    production_args = train_phase6._production_parser().parse_args(
+        [
+            "--mode",
+            "production",
+            "--output-dir",
+            str(root),
+            "--profile",
+            "main",
+            "--resume",
+            str(continuation / "post_evaluation_source_rebound.pt"),
+            "--v2-recovery-resume-record",
+            str(continuation / "v2_recovery_resume_record.json"),
+            "--max-segments",
+            "1",
+        ]
+    )
+
+    def stop_before_runtime(command: list[str], **_kwargs: object) -> None:
+        assert "--source-rebind" not in command
+        raise RuntimeError("stop-before-runtime")
+
+    monkeypatch.setattr(train_phase6, "_run_stage_command", stop_before_runtime)
+    with pytest.raises(RuntimeError, match="stop-before-runtime"):
+        _run_production(production_args)
+
+
+def test_v2_recovery_resume_shell_uses_finalized_rebound() -> None:
+    source = (
+        V2_SCRIPT_ROOT / "resume_independent_recovery_4gpu_64env_2442iter.sh"
+    ).read_text(encoding="utf-8")
+    assert "segment_0043/post_evaluation.pt" in source
+    assert "phase6-v2-recovery-resume-rebind" in source
+    assert "post_evaluation_source_rebound.pt" in source
+    assert "--v2-recovery-resume-record" in source
+    assert "pre_evaluation_progress_stall_rebound.pt" not in source
 
 
 def _gloo_gradient_worker(
