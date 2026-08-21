@@ -883,6 +883,8 @@ def test_phase6_v2_progress_stall_recovery_bootstrap_defers_root_latest(
     assert 'test -f "${TARGET_ROOT}/latest.json"' in shell
     assert 'root_latest.get("checkpoint")' in shell
     assert "segment_0043/post_evaluation.pt" in shell
+    production_source = inspect.getsource(train_phase6._run_production)
+    assert "and recovery_record is None" in production_source
 
     root = tmp_path / "root"
     root.mkdir()

@@ -11507,6 +11507,7 @@ def _run_production(args: argparse.Namespace) -> int:
     if (
         v2
         and args.profile == "main"
+        and recovery_record is None
         and args.resume.resolve() != args.output_dir.resolve()
     ):
         raise ValueError("V2 main must resume RUN_DIR/latest.json in the same RUN_DIR")
