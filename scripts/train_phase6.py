@@ -146,6 +146,22 @@ SUMMARYSCHEMA_JOINT_SNAPSHOT_SHA256 = (
 SUMMARYSCHEMA_ENV_SNAPSHOT_SHA256 = (
     "86aa99b303290a3b746af65936baf93b93fcb00ae99ce6632721df997185293f"
 )
+V2_PROGRESS_STALL_RECOVERY_CONTRACT = "phase6_v2_progress_stall_recovery_v1"
+V2_PROGRESS_STALL_RECOVERY_RUN_DIR = (
+    REPO_ROOT
+    / "outputs/phase6_independent_learning"
+    / "phase6-v2-independent-pilot-20260820_185543"
+)
+V2_PROGRESS_STALL_RECOVERY_SEGMENT = 43
+V2_PROGRESS_STALL_RECOVERY_INPUT_CHECKPOINT = (
+    V2_PROGRESS_STALL_RECOVERY_RUN_DIR / "segment_0043/train/pre_evaluation.pt"
+)
+V2_PROGRESS_STALL_RECOVERY_INPUT_SHA256 = (
+    "65828558d1ff3cfa178122431257d31c285dce81e8b25b4fd0443ce232b019f"
+)
+V2_PROGRESS_STALL_RECOVERY_ITERATION = 1343
+V2_PROGRESS_STALL_RECOVERY_STAGE = "C2"
+V2_PROGRESS_STALL_RECOVERY_NEXT_SEGMENT = 44
 SUMMARYSCHEMA_FAILED_FINALIZE_MANIFEST_SHA256 = (
     "85ed76182518a3ed476091447790a05b9a96da1d8891bef8cdc5d23e4f5437f1"
 )
@@ -609,6 +625,7 @@ def _rank_wrapper_parser() -> argparse.ArgumentParser:
     parser.add_argument("--paired-nominal-quota", type=int, default=128)
     parser.add_argument("--paired-mode", choices=("residual", "scaffold_only"))
     parser.add_argument("--progress-stall-timeout-s", type=int, default=0)
+    parser.add_argument("--cleanup-timeout-s", type=int, default=900)
     parser.add_argument("--source-rebind", type=Path)
     parser.add_argument("--phase6-config", type=Path, default=PHASE6_CONFIG)
     parser.add_argument("--roster", type=Path, default=PHASE6_ROSTER)
@@ -630,6 +647,11 @@ def _production_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.getenv("PHASE6_EVALUATION_TIMEOUT_S", "14400")),
     )
+    parser.add_argument(
+        "--cleanup-timeout-s",
+        type=int,
+        default=int(os.getenv("PHASE6_CLEANUP_TIMEOUT_S", "900")),
+    )
     parser.add_argument("--phase6-config", type=Path, default=PHASE6_CONFIG)
     parser.add_argument("--roster", type=Path, default=PHASE6_ROSTER)
     parser.add_argument(
@@ -637,6 +659,7 @@ def _production_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--source-rebind", type=Path)
+    parser.add_argument("--v2-recovery-record", type=Path)
     parser.add_argument("--max-segments", type=int, default=1)
     return parser
 
@@ -701,6 +724,7 @@ def _worker_parser() -> argparse.ArgumentParser:
     parser.add_argument("--paired-nominal-quota", type=int, default=128)
     parser.add_argument("--paired-mode", choices=("residual", "scaffold_only"))
     parser.add_argument("--progress-stall-timeout-s", type=int, default=0)
+    parser.add_argument("--cleanup-timeout-s", type=int, default=900)
     parser.add_argument("--source-rebind", type=Path)
     parser.add_argument("--phase6-config", type=Path, default=PHASE6_CONFIG)
     parser.add_argument("--roster", type=Path, default=PHASE6_ROSTER)
@@ -720,6 +744,7 @@ def _profile(profile: str) -> tuple[int, int]:
 
 
 def _validate_worker_paths(args: argparse.Namespace) -> None:
+    cleanup_timeout_s = int(getattr(args, "cleanup_timeout_s", 900))
     if args.phase6_config.resolve() != PHASE6_CONFIG.resolve():
         raise ValueError("worker requires configs/phase6_joint_training_v2.json")
     if args.roster.resolve() != PHASE6_ROSTER.resolve():
@@ -753,6 +778,8 @@ def _validate_worker_paths(args: argparse.Namespace) -> None:
             or args.paired_mode not in {"residual", "scaffold_only"}
             or args.progress_stall_timeout_s <= 0
             or args.progress_stall_timeout_s >= args.timeout_s
+            or cleanup_timeout_s <= 0
+            or cleanup_timeout_s >= args.timeout_s
         ):
             raise ValueError(
                 "paired evaluation dimensions, mode, or watchdog are invalid"
@@ -760,6 +787,7 @@ def _validate_worker_paths(args: argparse.Namespace) -> None:
 
 
 def _worker_command(args: argparse.Namespace) -> list[str]:
+    cleanup_timeout_s = int(getattr(args, "cleanup_timeout_s", 900))
     command = [
         sys.executable,
         str(Path(__file__).resolve()),
@@ -809,6 +837,8 @@ def _worker_command(args: argparse.Namespace) -> list[str]:
                     str(args.paired_mode),
                     "--progress-stall-timeout-s",
                     str(args.progress_stall_timeout_s),
+                    "--cleanup-timeout-s",
+                    str(cleanup_timeout_s),
                 )
             )
             if args.paired_num_envs is not None:
@@ -915,6 +945,7 @@ def _run_v2_init_probe(args: argparse.Namespace) -> int:
 
 
 def _run_rank_wrapper(args: argparse.Namespace) -> int:
+    cleanup_timeout_s = int(getattr(args, "cleanup_timeout_s", 900))
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
@@ -931,6 +962,7 @@ def _run_rank_wrapper(args: argparse.Namespace) -> int:
         },
     )
     log_path = rank_dir / "worker.log"
+    result_path = rank_dir / "result.json"
     started = time.monotonic()
     process = subprocess.Popen(
         command,
@@ -964,6 +996,7 @@ def _run_rank_wrapper(args: argparse.Namespace) -> int:
         reader.start()
         timed_out = False
         timeout_kind: str | None = None
+        cleanup_started: float | None = None
         try:
             while process.poll() is None:
                 _aggregate_rank_wrapper_progress(args, rank=rank, world_size=world_size)
@@ -975,16 +1008,42 @@ def _run_rank_wrapper(args: argparse.Namespace) -> int:
                     if progress_mtime_ns != last_progress_mtime_ns:
                         last_progress_mtime_ns = progress_mtime_ns
                         last_progress_change = time.monotonic()
+                now = time.monotonic()
+                business_result_ready = False
+                if args.worker_mode == "evaluate":
+                    try:
+                        result_value = _read_json(result_path)
+                        marker_value = _last_result_marker(log_path)
+                        progress_value = _read_json(progress_path)
+                        business_result_ready = (
+                            isinstance(result_value, Mapping)
+                            and result_value.get("status") == "ok"
+                            and marker_value == result_value
+                            and isinstance(progress_value, Mapping)
+                            and progress_value.get("status") == "rollout_complete"
+                        )
+                    except (OSError, ValueError, json.JSONDecodeError):
+                        business_result_ready = False
+                    if business_result_ready and cleanup_started is None:
+                        cleanup_started = now
                 if (
-                    args.progress_stall_timeout_s > 0
-                    and time.monotonic() - last_progress_change
-                    > args.progress_stall_timeout_s
+                    cleanup_started is None
+                    and args.progress_stall_timeout_s > 0
+                    and now - last_progress_change > args.progress_stall_timeout_s
                 ):
                     timed_out = True
                     timeout_kind = "progress_stall"
                     _terminate_group(process)
                     break
-                if time.monotonic() - started > args.timeout_s:
+                if (
+                    cleanup_started is not None
+                    and now - cleanup_started > cleanup_timeout_s
+                ):
+                    timed_out = True
+                    timeout_kind = "cleanup_stall"
+                    _terminate_group(process)
+                    break
+                if now - started > args.timeout_s:
                     timed_out = True
                     timeout_kind = "wall_clock"
                     _terminate_group(process)
@@ -995,7 +1054,6 @@ def _run_rank_wrapper(args: argparse.Namespace) -> int:
             reader.join(timeout=35.0)
     if rank == 0:
         _aggregate_rank_wrapper_progress(args, rank=rank, world_size=world_size)
-    result_path = rank_dir / "result.json"
     result_error: str | None = None
     try:
         result = _read_json(result_path)
@@ -1880,6 +1938,24 @@ def _finalize_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _v2_progress_stall_recovery_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--mode", choices=("phase6-v2-progress-stall-recovery",), required=True
+    )
+    parser.add_argument(
+        "--run-dir", type=Path, default=V2_PROGRESS_STALL_RECOVERY_RUN_DIR
+    )
+    parser.add_argument("--work-root", type=Path, required=True)
+    parser.add_argument("--target-root", type=Path, required=True)
+    parser.add_argument("--phase6-config", type=Path, default=PHASE6_CONFIG)
+    parser.add_argument("--roster", type=Path, default=PHASE6_ROSTER)
+    parser.add_argument(
+        "--acceptance-config", type=Path, default=PHASE6_LEARNING_CONFIG
+    )
+    return parser
+
+
 def _command_argument(values: list[str], name: str) -> str:
     if name not in values:
         raise ValueError(f"command is missing {name}")
@@ -2344,6 +2420,431 @@ def _run_production_summary(args: argparse.Namespace) -> int:
         },
     )
     print("PHASE6_LEARNING_SUMMARY=" + json.dumps(summary, sort_keys=True), flush=True)
+    return 0
+
+
+def _v2_progress_stall_recovery_invariants(
+    old_payload: Mapping[str, object], new_payload: Mapping[str, object]
+) -> dict[str, bool]:
+    protected_names = (
+        "policy",
+        "optimizer",
+        "policy_sha256",
+        "optimizer_sha256",
+        "optimizer_step",
+        "initialization",
+        "rank_rng",
+        "curriculum",
+        "metrics",
+        "evaluation_history",
+        "task_transitions",
+        "actual_global_transitions",
+        "actual_per_task_transitions",
+        "contracts",
+        "next_crossing",
+        "checkpoint_version",
+        "iteration",
+        "pre_evaluation",
+    )
+    invariants = {
+        name: _semantic_equal(old_payload.get(name), new_payload.get(name))
+        for name in protected_names
+    }
+    invariants["payload_except_source_manifest"] = _semantic_equal(
+        {key: value for key, value in old_payload.items() if key != "source_manifest"},
+        {key: value for key, value in new_payload.items() if key != "source_manifest"},
+    )
+    return invariants
+
+
+def _validate_v2_progress_stall_recovery_record(
+    record_path: Path,
+    *,
+    output_dir: Path | None = None,
+    config: object | None = None,
+    roster: object | None = None,
+    acceptance: object | None = None,
+) -> dict[str, object]:
+    from somaforce_cross.learning.actor_critic import ResidualActorCritic
+    from somaforce_cross.learning.joint_runner import (
+        load_learning_acceptance_config,
+        load_phase6_config,
+        load_phase6_task_roster,
+        restore_learning_checkpoint,
+    )
+
+    record = _read_json(record_path)
+    required = {
+        "checkpoint",
+        "contracts",
+        "endpoint",
+        "failure_evidence",
+        "invariants",
+        "new_source_manifest",
+        "old_source_manifest",
+        "recovery_contract_version",
+        "source_run",
+        "status",
+        "target_root",
+    }
+    if not isinstance(record, Mapping) or set(record) != required:
+        raise ValueError("V2 progress-stall recovery record schema is invalid")
+    if record["recovery_contract_version"] != V2_PROGRESS_STALL_RECOVERY_CONTRACT:
+        raise ValueError("unknown V2 progress-stall recovery contract")
+    source_run = _require_exact_mapping(
+        record["source_run"],
+        name="v2_recovery.source_run",
+        expected={"path", "segment", "checkpoint_path", "checkpoint_sha256"},
+    )
+    checkpoint = _require_exact_mapping(
+        record["checkpoint"],
+        name="v2_recovery.checkpoint",
+        expected={"new_path", "new_sha256", "old_path", "old_sha256"},
+    )
+    endpoint = _require_exact_mapping(
+        record["endpoint"],
+        name="v2_recovery.endpoint",
+        expected={
+            "iteration",
+            "stage",
+            "global_transitions",
+            "optimizer_step",
+            "next_segment",
+        },
+    )
+    if (
+        record["status"] != "ok"
+        or source_run["path"] != str(V2_PROGRESS_STALL_RECOVERY_RUN_DIR)
+        or source_run["segment"] != V2_PROGRESS_STALL_RECOVERY_SEGMENT
+        or source_run["checkpoint_path"]
+        != str(V2_PROGRESS_STALL_RECOVERY_INPUT_CHECKPOINT)
+        or source_run["checkpoint_sha256"] != V2_PROGRESS_STALL_RECOVERY_INPUT_SHA256
+        or checkpoint["old_path"] != str(V2_PROGRESS_STALL_RECOVERY_INPUT_CHECKPOINT)
+        or checkpoint["old_sha256"] != V2_PROGRESS_STALL_RECOVERY_INPUT_SHA256
+        or endpoint
+        != {
+            "iteration": 1343,
+            "stage": "C2",
+            "global_transitions": 11001856,
+            "optimizer_step": 32232,
+            "next_segment": 44,
+        }
+        or not isinstance(record["invariants"], Mapping)
+        or not all(record["invariants"].values())
+    ):
+        raise ValueError("V2 progress-stall recovery endpoint binding is invalid")
+    if (
+        output_dir is not None
+        and Path(str(record["target_root"])).resolve() != output_dir.resolve()
+    ):
+        raise ValueError("V2 recovery record does not bind the requested root")
+    failure = _require_exact_mapping(
+        record["failure_evidence"],
+        name="v2_recovery.failure_evidence",
+        expected={
+            "wrapper_path",
+            "wrapper_sha256",
+            "progress_path",
+            "progress_sha256",
+            "rank",
+            "timeout_kind",
+            "rollout_progress",
+        },
+    )
+    if (
+        failure["wrapper_path"]
+        != str(
+            V2_PROGRESS_STALL_RECOVERY_RUN_DIR
+            / "segment_0043/evaluation/residual/rank_3/wrapper.json"
+        )
+        or failure["progress_path"]
+        != str(
+            V2_PROGRESS_STALL_RECOVERY_RUN_DIR
+            / "segment_0043/evaluation/residual/rank_3/progress.json"
+        )
+        or failure["rank"] != 3
+        or failure["timeout_kind"] != "progress_stall"
+        or failure["rollout_progress"] != "rollout_complete"
+        or not Path(str(failure["wrapper_path"])).is_file()
+        or _sha256(Path(str(failure["wrapper_path"]))) != failure["wrapper_sha256"]
+        or not Path(str(failure["progress_path"])).is_file()
+        or _sha256(Path(str(failure["progress_path"]))) != failure["progress_sha256"]
+    ):
+        raise ValueError("V2 recovery failure evidence binding is invalid")
+    new_manifest = record["new_source_manifest"]
+    old_manifest = record["old_source_manifest"]
+    current_manifest = _current_mainrunner_source_manifest()
+    if (
+        not isinstance(old_manifest, Mapping)
+        or not isinstance(new_manifest, Mapping)
+        or dict(new_manifest) != current_manifest
+        or set(old_manifest) != set(current_manifest)
+        or any(
+            old_manifest[key] != current_manifest[key]
+            for key in old_manifest
+            if key != str(REPO_ROOT / "scripts/train_phase6.py")
+        )
+        or old_manifest.get(str(REPO_ROOT / "scripts/train_phase6.py"))
+        == current_manifest[str(REPO_ROOT / "scripts/train_phase6.py")]
+    ):
+        raise ValueError("V2 recovery source delta is not script-only")
+    new_path = Path(str(checkpoint["new_path"]))
+    if (
+        not new_path.is_file()
+        or _sha256(new_path) != checkpoint["new_sha256"]
+        or not Path(str(source_run["checkpoint_path"])).is_file()
+        or _sha256(Path(str(source_run["checkpoint_path"])))
+        != source_run["checkpoint_sha256"]
+    ):
+        raise ValueError("V2 recovery checkpoint binding is invalid")
+    if config is None:
+        config = load_phase6_config(PHASE6_CONFIG)
+    if roster is None:
+        roster = load_phase6_task_roster(PHASE6_ROSTER, phase6_config=config)
+    if acceptance is None:
+        acceptance = load_learning_acceptance_config(PHASE6_LEARNING_CONFIG)
+    if record["contracts"] != {
+        "phase6": {
+            "raw_sha256": config.raw_sha256,
+            "canonical_sha256": config.canonical_sha256,
+        },
+        "roster": {
+            "raw_sha256": roster.raw_sha256,
+            "canonical_sha256": roster.canonical_sha256,
+        },
+        "learning_acceptance": {
+            "raw_sha256": acceptance.raw_sha256,
+            "canonical_sha256": acceptance.canonical_sha256,
+        },
+    }:
+        raise ValueError("V2 recovery contract binding is invalid")
+    policy = ResidualActorCritic()
+    optimizer = torch.optim.Adam(policy.parameters(), lr=3.0e-4)
+    restored = restore_learning_checkpoint(
+        new_path,
+        config=config,
+        roster=roster,
+        acceptance=acceptance,
+        policy=policy,
+        optimizer=optimizer,
+        source_manifest=current_manifest,
+        expected_iteration=1343,
+        device="cpu",
+    )
+    if restored.get("pre_evaluation") is not True:
+        raise ValueError("V2 recovery checkpoint must remain pre-evaluation")
+    progress = _read_json(Path(str(record["target_root"])) / "progress.json")
+    if (
+        progress is None
+        or progress.get("target_iteration") != 2442
+        or progress.get("current_iteration") != 1343
+        or progress.get("segment") != 43
+        or progress.get("stage") != "C2"
+        or progress.get("active_substage") != "segment_complete"
+        or progress.get("completed_rows") != 135168
+    ):
+        raise ValueError("V2 recovery progress binding is invalid")
+    return dict(record)
+
+
+def _run_v2_progress_stall_recovery(args: argparse.Namespace) -> int:
+    from somaforce_cross.learning.actor_critic import ResidualActorCritic
+    from somaforce_cross.learning.joint_runner import (
+        atomic_learning_checkpoint,
+        load_learning_acceptance_config,
+        load_phase6_config,
+        load_phase6_task_roster,
+        restore_learning_checkpoint,
+    )
+
+    run_dir = args.run_dir.resolve()
+    work_root = args.work_root.resolve()
+    target_root = args.target_root.resolve()
+    if run_dir != V2_PROGRESS_STALL_RECOVERY_RUN_DIR.resolve():
+        raise ValueError("V2 recovery is restricted to the admitted failed RUN_DIR")
+    if (
+        work_root.parent != run_dir.parent
+        or target_root.parent != run_dir.parent
+        or not work_root.name.endswith(".incomplete")
+        or target_root.name.endswith(".incomplete")
+        or work_root == target_root
+    ):
+        raise ValueError("V2 recovery roots must be sibling non-overwriting paths")
+    if work_root.exists() or target_root.exists():
+        raise FileExistsError("V2 recovery refuses to overwrite an existing root")
+    source_checkpoint = V2_PROGRESS_STALL_RECOVERY_INPUT_CHECKPOINT
+    if (
+        not source_checkpoint.is_file()
+        or _sha256(source_checkpoint) != V2_PROGRESS_STALL_RECOVERY_INPUT_SHA256
+    ):
+        raise ValueError("V2 recovery source checkpoint SHA differs")
+    failure_wrapper = run_dir / "segment_0043/evaluation/residual/rank_3/wrapper.json"
+    failure_progress = run_dir / "segment_0043/evaluation/residual/rank_3/progress.json"
+    wrapper = _read_json(failure_wrapper)
+    progress = _read_json(failure_progress)
+    if (
+        wrapper is None
+        or progress is None
+        or wrapper.get("rank") != 3
+        or wrapper.get("result_status") != "ok"
+        or wrapper.get("timeout_kind") != "progress_stall"
+        or wrapper.get("timed_out") is not True
+        or progress.get("status") != "rollout_complete"
+        or progress.get("completed_episodes") != 384
+        or progress.get("checkpoint_sha256")
+        != "65828558d1ff3cfa178122431257d31c285dce81e8b25b4fd0443ce232b019f"
+    ):
+        raise ValueError(
+            "V2 recovery failure evidence is not the admitted segment-43 stall"
+        )
+    config = load_phase6_config(args.phase6_config)
+    roster = load_phase6_task_roster(args.roster, phase6_config=config)
+    acceptance = load_learning_acceptance_config(args.acceptance_config)
+    old_value = torch.load(source_checkpoint, map_location="cpu", weights_only=False)
+    if not isinstance(old_value, Mapping):
+        raise ValueError("V2 recovery source checkpoint payload is invalid")
+    old_payload = dict(old_value)
+    current_manifest = _current_mainrunner_source_manifest()
+    old_manifest = old_payload.get("source_manifest")
+    script_key = str(REPO_ROOT / "scripts/train_phase6.py")
+    if (
+        not isinstance(old_manifest, Mapping)
+        or set(old_manifest) != set(current_manifest)
+        or any(
+            old_manifest[key] != current_manifest[key]
+            for key in old_manifest
+            if key != script_key
+        )
+        or old_manifest.get(script_key) == current_manifest[script_key]
+    ):
+        raise ValueError("V2 recovery source delta must be limited to train_phase6.py")
+    old_policy = ResidualActorCritic()
+    old_optimizer = torch.optim.Adam(old_policy.parameters(), lr=3.0e-4)
+    old_restored = restore_learning_checkpoint(
+        source_checkpoint,
+        config=config,
+        roster=roster,
+        acceptance=acceptance,
+        policy=old_policy,
+        optimizer=old_optimizer,
+        source_manifest=dict(old_manifest),
+        expected_iteration=1343,
+        device="cpu",
+    )
+    if (
+        old_restored.get("iteration") != 1343
+        or old_restored.get("pre_evaluation") is not True
+        or old_restored.get("curriculum", {}).get("stage") != "C2"
+        or old_restored.get("actual_global_transitions") != 11001856
+        or old_restored.get("optimizer_step") != 32232
+    ):
+        raise ValueError("V2 recovery source endpoint invariants are invalid")
+    work_root.mkdir(parents=True)
+    recovery_dir = work_root / "segment_0043/recovery"
+    rebound = recovery_dir / "pre_evaluation_progress_stall_rebound.pt"
+    record_path = work_root / "v2_recovery_record.json"
+    new_payload = dict(old_payload)
+    new_payload["source_manifest"] = current_manifest
+    invariants = _v2_progress_stall_recovery_invariants(old_payload, new_payload)
+    if not all(invariants.values()):
+        raise AssertionError("V2 recovery altered protected checkpoint state")
+    new_sha = atomic_learning_checkpoint(rebound, new_payload)
+    recovery_dir.mkdir(parents=True, exist_ok=True)
+    _write_progress(
+        work_root / "progress.json",
+        target_iteration=2442,
+        current_iteration=1343,
+        segment=43,
+        stage="C2",
+        active_substage="segment_complete",
+        active_mode=None,
+        completed_rows=135168,
+        control_steps=0,
+        eta_s=None,
+        error_state=None,
+    )
+    _atomic_json(
+        work_root / "latest.json",
+        {
+            "actual_global_transitions": 11001856,
+            "checkpoint": str(
+                target_root
+                / "segment_0043/recovery/pre_evaluation_progress_stall_rebound.pt"
+            ),
+            "checkpoint_sha256": new_sha,
+            "curriculum_stage": "C2",
+            "iteration": 1343,
+            "logical_crossing": 11000000,
+            "segment": 43,
+            "source_manifest_sha256": _source_manifest_digest(current_manifest),
+        },
+    )
+    record = {
+        "checkpoint": {
+            "new_path": str(
+                target_root
+                / "segment_0043/recovery/pre_evaluation_progress_stall_rebound.pt"
+            ),
+            "new_sha256": new_sha,
+            "old_path": str(source_checkpoint),
+            "old_sha256": V2_PROGRESS_STALL_RECOVERY_INPUT_SHA256,
+        },
+        "contracts": {
+            "phase6": {
+                "raw_sha256": config.raw_sha256,
+                "canonical_sha256": config.canonical_sha256,
+            },
+            "roster": {
+                "raw_sha256": roster.raw_sha256,
+                "canonical_sha256": roster.canonical_sha256,
+            },
+            "learning_acceptance": {
+                "raw_sha256": acceptance.raw_sha256,
+                "canonical_sha256": acceptance.canonical_sha256,
+            },
+        },
+        "endpoint": {
+            "iteration": 1343,
+            "stage": "C2",
+            "global_transitions": 11001856,
+            "optimizer_step": 32232,
+            "next_segment": 44,
+        },
+        "failure_evidence": {
+            "wrapper_path": str(failure_wrapper),
+            "wrapper_sha256": _sha256(failure_wrapper),
+            "progress_path": str(failure_progress),
+            "progress_sha256": _sha256(failure_progress),
+            "rank": 3,
+            "timeout_kind": "progress_stall",
+            "rollout_progress": "rollout_complete",
+        },
+        "invariants": invariants,
+        "new_source_manifest": current_manifest,
+        "old_source_manifest": dict(old_manifest),
+        "recovery_contract_version": V2_PROGRESS_STALL_RECOVERY_CONTRACT,
+        "source_run": {
+            "path": str(run_dir),
+            "segment": 43,
+            "checkpoint_path": str(source_checkpoint),
+            "checkpoint_sha256": V2_PROGRESS_STALL_RECOVERY_INPUT_SHA256,
+        },
+        "status": "ok",
+        "target_root": str(target_root),
+    }
+    _atomic_json(record_path, record)
+    work_root.rename(target_root)
+    _validate_v2_progress_stall_recovery_record(
+        target_root / "v2_recovery_record.json",
+        output_dir=target_root,
+        config=config,
+        roster=roster,
+        acceptance=acceptance,
+    )
+    print(
+        "PHASE6_V2_PROGRESS_STALL_RECOVERY=" + json.dumps(record, sort_keys=True),
+        flush=True,
+    )
     return 0
 
 
@@ -10985,12 +11486,19 @@ def _run_production(args: argparse.Namespace) -> int:
     config = load_phase6_config(args.phase6_config)
     roster = load_phase6_task_roster(args.roster, phase6_config=config)
     v2 = config.payload["contract_version"] == "phase6_joint_training_v2"
+    recovery_record: Mapping[str, object] | None = None
+    if args.cleanup_timeout_s <= 0:
+        raise ValueError("cleanup timeout must be positive")
     if args.max_segments <= 0:
         raise ValueError("mainrunner max_segments must be a positive integer")
     if (
         v2
         and args.profile == "pilot"
-        and (args.resume is not None or args.source_rebind is not None)
+        and (
+            args.resume is not None
+            or args.source_rebind is not None
+            or args.v2_recovery_record is not None
+        )
     ):
         raise ValueError(
             "V2 pilot must start at iteration zero without resume or rebind"
@@ -10999,6 +11507,18 @@ def _run_production(args: argparse.Namespace) -> int:
         raise ValueError("main production requires a completed V2 pilot RUN_DIR")
     if v2 and args.source_rebind is not None:
         raise ValueError("V2 production forbids source rebind; start a new lineage")
+    if args.v2_recovery_record is not None:
+        if not v2 or args.profile != "main" or args.source_rebind is not None:
+            raise ValueError(
+                "V2 recovery record is valid only for V2 main without source rebind"
+            )
+        recovery_record = _validate_v2_progress_stall_recovery_record(
+            args.v2_recovery_record,
+            output_dir=args.output_dir,
+            config=config,
+            roster=roster,
+            acceptance=acceptance,
+        )
     if not v2 and args.profile == "main" and args.source_rebind is None:
         raise ValueError("historical main production requires source rebind")
     if (
@@ -11038,7 +11558,16 @@ def _run_production(args: argparse.Namespace) -> int:
             raise ValueError(
                 "mainrunner resume is already at or beyond the target iteration"
             )
-        if v2:
+        if recovery_record is not None and (
+            current_iteration != V2_PROGRESS_STALL_RECOVERY_ITERATION
+            or stage != V2_PROGRESS_STALL_RECOVERY_STAGE
+            or resume.resolve()
+            != Path(str(recovery_record["checkpoint"]["new_path"])).resolve()
+        ):
+            raise ValueError(
+                "V2 recovery resume must bind the 1343/C2 rebound endpoint"
+            )
+        if v2 and recovery_record is None:
             _validate_v2_pilot_run(
                 args.output_dir, checkpoint=resume, restored=restored
             )
@@ -11055,7 +11584,12 @@ def _run_production(args: argparse.Namespace) -> int:
             )
     if not v2 and args.profile == "main":
         assert args.source_rebind is not None
-    if v2 and args.profile == "main" and current_iteration != 31:
+    if (
+        v2
+        and args.profile == "main"
+        and recovery_record is None
+        and current_iteration != 31
+    ):
         raise ValueError("V2 main may extend only the completed 31-iteration pilot")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -11096,6 +11630,7 @@ def _run_production(args: argparse.Namespace) -> int:
     completed_segments = 0
     print(f"PHASE6_TRAIN_TIMEOUT_S={args.train_timeout_s}", flush=True)
     print(f"PHASE6_EVALUATION_TIMEOUT_S={args.evaluation_timeout_s}", flush=True)
+    print(f"PHASE6_CLEANUP_TIMEOUT_S={args.cleanup_timeout_s}", flush=True)
     try:
         for segment in segments:
             if segment.end_iteration <= current_iteration:
@@ -11230,6 +11765,8 @@ def _run_production(args: argparse.Namespace) -> int:
                             str(worker_timeout),
                             "--progress-stall-timeout-s",
                             str(stall_timeout),
+                            "--cleanup-timeout-s",
+                            str(args.cleanup_timeout_s),
                             "--paired-mode",
                             paired_mode,
                             "--segment-start",
@@ -12701,6 +13238,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     if values[mode_index] == "finalize":
         return _run_finalize(_finalize_parser().parse_args(values))
+    if values[mode_index] == "phase6-v2-progress-stall-recovery":
+        return _run_v2_progress_stall_recovery(
+            _v2_progress_stall_recovery_parser().parse_args(values)
+        )
     if values[mode_index] in {"worker", "train-segment", "evaluate"}:
         return _worker_main(values)
     raise SystemExit("unknown Phase 6 mode")
