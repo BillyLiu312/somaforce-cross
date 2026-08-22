@@ -12,6 +12,7 @@ from somaforce_cross.learning.actor_critic import (
     ResidualActorCritic,
 )
 from somaforce_cross.learning.losses import semantic_losses
+from somaforce_cross.learning.runner import record_policy_semantics
 from somaforce_cross.learning.semantic_ppo import SemanticPPO
 
 
@@ -193,3 +194,32 @@ def test_semantic_target_changes_loss_but_never_actor_output() -> None:
         second_semantic.p_dir, second_semantic.p_mag, changed_target
     )
     assert not torch.equal(first_loss.dir_loss, second_loss.dir_loss)
+
+
+def test_runner_records_the_same_policy_forward_used_for_rollout() -> None:
+    class _Environment:
+        def __init__(self) -> None:
+            self.record: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+
+        def record_policy_semantics(
+            self,
+            p_dir: torch.Tensor,
+            p_mag: torch.Tensor,
+            semantic_target: torch.Tensor,
+        ) -> None:
+            self.record = (p_dir, p_mag, semantic_target)
+
+    model = ResidualActorCritic()
+    observations = _observations(batch=3)
+    model.act_inference(observations)
+    expected = model.last_semantic_output
+    environment = _Environment()
+
+    record_policy_semantics(environment, model, observations)
+
+    assert environment.record is not None
+    p_dir, p_mag, target = environment.record
+    assert torch.equal(p_dir, expected.p_dir)
+    assert torch.equal(p_mag, expected.p_mag)
+    assert torch.equal(target, observations["semantic_target"])
+    assert not p_dir.requires_grad and not p_mag.requires_grad

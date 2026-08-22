@@ -116,6 +116,26 @@ def test_direct_policy_construction_with_independent_z_cross_is_closed() -> None
         )
 
 
+def test_environment_policy_factory_uses_only_a_zero_semantic_placeholder() -> None:
+    inputs = _policy_fields(batch_size=3)
+    bundle = PolicyObservationBundle.with_zero_semantic_placeholder(**inputs)
+
+    assert bundle.flatten().shape == (3, 668)
+    assert torch.equal(bundle.z_cross, torch.zeros(3, 64))
+    assert torch.equal(
+        bundle.flatten()[:, :604],
+        torch.cat(
+            (
+                inputs["wrist_tokens"].reshape(3, 448),
+                inputs["proprio"],
+                inputs["a_nom_history"].reshape(3, 69),
+                inputs["previous_a_total"],
+            ),
+            dim=-1,
+        ),
+    )
+
+
 def test_policy_exact_nonsemantic_field_order_with_sentinels() -> None:
     batch_size = 2
     torch.manual_seed(2)

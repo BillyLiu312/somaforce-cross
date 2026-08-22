@@ -163,8 +163,37 @@ class PolicyObservationBundle:
     def __init__(self, *args: object, **kwargs: object) -> None:
         raise TypeError(
             "PolicyObservationBundle cannot be constructed directly; "
-            "use ForceSemanticPipeline.assemble_policy_observation()"
+            "use ForceSemanticPipeline.assemble_policy_observation() or "
+            "PolicyObservationBundle.with_zero_semantic_placeholder()"
         )
+
+    @classmethod
+    def with_zero_semantic_placeholder(
+        cls,
+        *,
+        wrist_tokens: torch.Tensor,
+        proprio: torch.Tensor,
+        a_nom_history: torch.Tensor,
+        previous_a_total: torch.Tensor,
+    ) -> PolicyObservationBundle:
+        """Assemble the environment boundary without owning semantic weights."""
+        bundle = object.__new__(cls)
+        object.__setattr__(bundle, "wrist_tokens", wrist_tokens)
+        object.__setattr__(bundle, "proprio", proprio)
+        object.__setattr__(bundle, "a_nom_history", a_nom_history)
+        object.__setattr__(bundle, "previous_a_total", previous_a_total)
+        object.__setattr__(
+            bundle,
+            "z_cross",
+            torch.zeros(
+                wrist_tokens.shape[0],
+                64,
+                device=wrist_tokens.device,
+                dtype=wrist_tokens.dtype,
+            ),
+        )
+        bundle.__post_init__()
+        return bundle
 
     @classmethod
     def _from_semantic_output(

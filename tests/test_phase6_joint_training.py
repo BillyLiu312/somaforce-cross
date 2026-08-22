@@ -4220,6 +4220,7 @@ def test_evaluation_pair_plan_is_balanced_seed_paired_and_actor_clean(
     ]
     assert len(no_grad) == 1 and len(no_grad[0].body) == 1
     assert "policy.act_inference(observations)" in ast.unparse(no_grad[0].body[0])
+    assert "record_policy_semantics(environment, policy, observations)" in source
 
     class _FakePolicy:
         def to(self, *, device: torch.device) -> _FakePolicy:

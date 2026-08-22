@@ -12832,6 +12832,7 @@ def _run_paired_evaluation_rank(
         restore_rank_rng_state,
         validate_paired_evaluation_schedule,
     )
+    from somaforce_cross.learning.runner import record_policy_semantics
 
     if args.resume is None:
         raise ValueError("paired evaluation requires a pre-evaluation checkpoint")
@@ -12924,7 +12925,11 @@ def _run_paired_evaluation_rank(
 
     def policy_action(observations: object) -> torch.Tensor:
         with torch.no_grad():
-            return policy.act_inference(observations)
+            actions = policy.act_inference(observations)
+        if environment is None:
+            raise AssertionError("paired evaluation environment is not initialized")
+        record_policy_semantics(environment, policy, observations)
+        return actions
 
     try:
         args.runtime_mode = mode

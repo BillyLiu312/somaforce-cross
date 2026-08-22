@@ -74,6 +74,50 @@ def test_actor_privilege_boundary_and_detached_environment_z_cross_slice() -> No
     assert torch.equal(first_log_prob, model.get_actions_log_prob(sampled_actions))
 
 
+def test_critic_uses_policy_owned_semantics_and_value_loss_cannot_update_them() -> None:
+    torch.manual_seed(7)
+    model = ResidualActorCritic()
+    observations = _observations(batch=3)
+    observations["critic"][:, 604:668] = 999.0
+
+    model.act_inference(observations)
+    expected = model.last_semantic_output.z_cross.detach().clamp(-10.0, 10.0)
+    critic_observation = model.get_critic_obs(observations)
+    assert torch.equal(critic_observation[:, 604:668], expected)
+    assert not torch.equal(
+        critic_observation[:, 604:668], observations["critic"][:, 604:668]
+    )
+
+    for parameter in model.parameters():
+        parameter.grad = None
+    model.evaluate(observations).sum().backward()
+    assert all(
+        parameter.grad is None for parameter in model.semantic_pipeline.parameters()
+    )
+    critic_gradients = [parameter.grad for parameter in model.critic.parameters()]
+    assert critic_gradients and all(
+        gradient is not None for gradient in critic_gradients
+    )
+    assert any(torch.count_nonzero(gradient) > 0 for gradient in critic_gradients)
+
+
+def test_environment_semantic_placeholder_cannot_change_actor_or_critic() -> None:
+    torch.manual_seed(8)
+    model = ResidualActorCritic()
+    first = _observations(batch=2)
+    first["critic"][:, :POLICY_DIM] = first["policy"]
+    second = {name: value.clone() for name, value in first.items()}
+    second["policy"][:, 604:668] = -777.0
+    second["critic"][:, 604:668] = 555.0
+
+    first_action = model.act_inference(first)
+    first_value = model.evaluate(first)
+    second_action = model.act_inference(second)
+    second_value = model.evaluate(second)
+    assert torch.equal(first_action, second_action)
+    assert torch.equal(first_value, second_value)
+
+
 def test_actor_output_has_gradient_path_through_all_semantic_modules() -> None:
     torch.manual_seed(3)
     model = ResidualActorCritic()

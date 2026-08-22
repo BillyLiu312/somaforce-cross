@@ -19,6 +19,9 @@ ACTION_DIM = 23
 WRIST_TOKEN_END = 448
 ACTOR_SUFFIX_START = 448
 ACTOR_SUFFIX_END = 604
+POLICY_Z_CROSS_START = 604
+POLICY_Z_CROSS_END = 668
+Z_CROSS_CLIP = 10.0
 OBS_GROUPS = {"policy": ["policy"], "critic": ["critic"]}
 
 
@@ -89,11 +92,12 @@ class ActorForward(NamedTuple):
 
 
 class ResidualActorCritic(nn.Module):
-    """RSL-compatible policy interface with a differentiable semantic rebuild.
+    """RSL-compatible policy with one checkpoint-owned semantic pipeline.
 
-    The environment's final policy slice is a diagnostic/critic-contract field.
-    This model intentionally ignores it and reconstructs `z_cross` from the
-    normalized 448-D wrist-token prefix during every actor forward.
+    The environment's final policy slice is a zero placeholder retained only to
+    preserve the frozen observation widths.  Actor and critic both reconstruct
+    `z_cross` from the normalized wrist-token prefix.  The critic receives a
+    detached copy so value loss cannot supervise the semantic pipeline.
     """
 
     is_recurrent = False
@@ -114,6 +118,7 @@ class ResidualActorCritic(nn.Module):
         )
         self.distribution: Normal | None = None
         self._last_actor_forward: ActorForward | None = None
+        self._last_actor_policy_observation: torch.Tensor | None = None
         Normal.set_default_validate_args(False)
 
     @staticmethod
@@ -135,7 +140,7 @@ class ResidualActorCritic(nn.Module):
         semantic = self.semantic_pipeline(wrist_tokens)
         actor_input = torch.cat(
             (
-                semantic.z_cross,
+                semantic.z_cross.clamp(-Z_CROSS_CLIP, Z_CROSS_CLIP),
                 policy_observation[:, ACTOR_SUFFIX_START:ACTOR_SUFFIX_END],
             ),
             dim=-1,
@@ -150,12 +155,36 @@ class ResidualActorCritic(nn.Module):
         )
 
     def get_actor_obs(self, observations: object) -> torch.Tensor:
-        forward = self.actor_forward(self._field(observations, "policy", POLICY_DIM))
+        policy_observation = self._field(observations, "policy", POLICY_DIM)
+        forward = self.actor_forward(policy_observation)
         self._last_actor_forward = forward
+        self._last_actor_policy_observation = policy_observation
         return forward.actor_input
 
     def get_critic_obs(self, observations: object) -> torch.Tensor:
-        return self._field(observations, "critic", CRITIC_DIM)
+        policy_observation = self._field(observations, "policy", POLICY_DIM)
+        critic_observation = self._field(observations, "critic", CRITIC_DIM)
+        if policy_observation.shape[0] != critic_observation.shape[0]:
+            raise ValueError("policy and critic observation batches must match")
+
+        if (
+            self._last_actor_forward is not None
+            and self._last_actor_policy_observation is policy_observation
+        ):
+            z_cross = self._last_actor_forward.semantic.z_cross
+            self._last_actor_policy_observation = None
+        else:
+            wrist_tokens = policy_observation[:, :WRIST_TOKEN_END].reshape(
+                -1, 2, 16, 14
+            )
+            with torch.no_grad():
+                z_cross = self.semantic_pipeline(wrist_tokens).z_cross
+
+        critic_with_policy_semantics = critic_observation.clone()
+        critic_with_policy_semantics[:, POLICY_Z_CROSS_START:POLICY_Z_CROSS_END] = (
+            z_cross.detach().clamp(-Z_CROSS_CLIP, Z_CROSS_CLIP)
+        )
+        return critic_with_policy_semantics
 
     def update_distribution(self, observations: object) -> None:
         self.get_actor_obs(observations)

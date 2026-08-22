@@ -1154,6 +1154,7 @@ def _run_outcome_mode(
     rank_dir: Path,
     keep_environment_open: bool = False,
 ) -> tuple[list[dict[str, object]], dict[str, object], object | None]:
+    from somaforce_cross.learning.runner import record_policy_semantics
     from somaforce_cross.learning.joint_runner import (
         paired_evaluation_rank_seed,
         paired_evaluation_schedule,
@@ -1212,6 +1213,7 @@ def _run_outcome_mode(
         while len(records) < 384:
             with torch.inference_mode():
                 actions = policy.act_inference(observations)
+                record_policy_semantics(environment, policy, observations)
                 observations, _, _, _, _ = environment.step(actions)
             control_steps += 1
             records.extend(
@@ -1319,7 +1321,10 @@ def _worker_main(values: list[str]) -> int:
             restore_learning_checkpoint,
             restore_rank_rng_state,
         )
-        from somaforce_cross.learning.runner import _load_rsl_storage_class
+        from somaforce_cross.learning.runner import (
+            _load_rsl_storage_class,
+            record_policy_semantics,
+        )
         from somaforce_cross.learning.semantic_ppo import SemanticPPO
         from scripts.train_phase6 import (
             _build_environment,
@@ -1491,6 +1496,7 @@ def _worker_main(values: list[str]) -> int:
                     if step < 32
                     else policy.act_inference(observations)
                 )
+                record_policy_semantics(environment, policy, observations)
             signals = environment.adapter.progress_signals()
             collector.observe(
                 observed_wrench=environment._observed_wrench,

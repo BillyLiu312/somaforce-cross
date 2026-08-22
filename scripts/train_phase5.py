@@ -1143,6 +1143,8 @@ def _run_episodes(
 ) -> list[dict[str, Any]]:
     import torch
 
+    from somaforce_cross.learning.runner import record_policy_semantics
+
     if env.episode_metric_log is None:
         raise AssertionError("residual C1 evaluation must expose episode metrics")
     observations, _ = env.reset()
@@ -1151,12 +1153,14 @@ def _run_episodes(
     max_steps = episodes * 508 * 2
     for _ in range(max_steps):
         target = observations["semantic_target"]
-        if zero_residual:
-            raw = torch.zeros(env.num_envs, 23, device=env.device, dtype=torch.float32)
-        else:
-            with torch.inference_mode():
-                raw = policy.act_inference(observations)
-                raw = raw.clone()
+        with torch.inference_mode():
+            policy_raw = policy.act_inference(observations)
+            record_policy_semantics(env, policy, observations)
+        raw = (
+            torch.zeros(env.num_envs, 23, device=env.device, dtype=torch.float32)
+            if zero_residual
+            else policy_raw.clone()
+        )
         observations, rewards, _, _, _ = env.step(raw)
         if not torch.isfinite(rewards).all():
             raise FloatingPointError("non-finite deterministic evaluation reward")
@@ -1208,6 +1212,8 @@ def _run_nominal_batch(
 ) -> list[dict[str, Any]]:
     import torch
 
+    from somaforce_cross.learning.runner import record_policy_semantics
+
     ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
     env.episode_index.copy_(episode_indices)
     env._reset_idx(ids)
@@ -1219,11 +1225,14 @@ def _run_nominal_batch(
     reported = 0
     observations = env._last_observations
     for _ in range(1016):
-        if zero_residual:
-            raw = torch.zeros(env.num_envs, 23, device=env.device, dtype=torch.float32)
-        else:
-            with torch.inference_mode():
-                raw = policy.act_inference(observations).clone()
+        with torch.inference_mode():
+            policy_raw = policy.act_inference(observations)
+            record_policy_semantics(env, policy, observations)
+        raw = (
+            torch.zeros(env.num_envs, 23, device=env.device, dtype=torch.float32)
+            if zero_residual
+            else policy_raw.clone()
+        )
         observations, rewards, _, _, _ = env.step(raw)
         if not torch.isfinite(rewards).all():
             raise FloatingPointError("non-finite paired nominal reward")
