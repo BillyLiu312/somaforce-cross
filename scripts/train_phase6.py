@@ -175,6 +175,21 @@ V2_RECOVERY_RESUME_PARENT_LATEST = V2_RECOVERY_RESUME_SOURCE_ROOT / "latest.json
 V2_RECOVERY_RESUME_SOURCE_CHECKPOINT = (
     V2_RECOVERY_RESUME_SOURCE_ROOT / "segment_0043/post_evaluation.pt"
 )
+V2_RECOVERY_CONTINUATION_CONTRACT = "phase6_v2_recovery_continuation_v1"
+V2_RECOVERY_CONTINUATION_SOURCE_ROOT = V2_RECOVERY_RESUME_SOURCE_ROOT
+V2_RECOVERY_CONTINUATION_PARENT_LATEST = (
+    V2_RECOVERY_CONTINUATION_SOURCE_ROOT / "latest.json"
+)
+V2_RECOVERY_CONTINUATION_PARENT_CHECKPOINT = (
+    V2_RECOVERY_CONTINUATION_SOURCE_ROOT / "segment_0044/post_evaluation.pt"
+)
+V2_RECOVERY_CONTINUATION_PARENT_RECORD = (
+    V2_RECOVERY_CONTINUATION_SOURCE_ROOT / "v2_recovery_record.json"
+)
+V2_RECOVERY_CONTINUATION_SEGMENT = 44
+V2_RECOVERY_CONTINUATION_ITERATION = 1374
+V2_RECOVERY_CONTINUATION_NEXT_SEGMENT = 45
+V2_RECOVERY_CONTINUATION_STAGE = "C3"
 SUMMARYSCHEMA_FAILED_FINALIZE_MANIFEST_SHA256 = (
     "85ed76182518a3ed476091447790a05b9a96da1d8891bef8cdc5d23e4f5437f1"
 )
@@ -674,6 +689,7 @@ def _production_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-rebind", type=Path)
     parser.add_argument("--v2-recovery-record", type=Path)
     parser.add_argument("--v2-recovery-resume-record", type=Path)
+    parser.add_argument("--v2-recovery-continuation-record", type=Path)
     parser.add_argument("--max-segments", type=int, default=1)
     return parser
 
@@ -1984,6 +2000,23 @@ def _v2_recovery_resume_rebind_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _v2_recovery_continuation_rebind_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--mode", choices=("phase6-v2-recovery-continuation-rebind",), required=True
+    )
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument(
+        "--recovery-root", type=Path, default=V2_RECOVERY_CONTINUATION_SOURCE_ROOT
+    )
+    parser.add_argument("--phase6-config", type=Path, default=PHASE6_CONFIG)
+    parser.add_argument("--roster", type=Path, default=PHASE6_ROSTER)
+    parser.add_argument(
+        "--acceptance-config", type=Path, default=PHASE6_LEARNING_CONFIG
+    )
+    return parser
+
+
 def _command_argument(values: list[str], name: str) -> str:
     if name not in values:
         raise ValueError(f"command is missing {name}")
@@ -3221,6 +3254,360 @@ def _run_v2_recovery_resume_rebind(args: argparse.Namespace) -> int:
     )
     print(
         "PHASE6_V2_RECOVERY_RESUME_REBIND=" + json.dumps(record, sort_keys=True),
+        flush=True,
+    )
+    return 0
+
+
+def _v2_recovery_continuation_parent(root: Path) -> dict[str, Path]:
+    if root.resolve() == V2_RECOVERY_CONTINUATION_SOURCE_ROOT.resolve():
+        return {
+            "latest": V2_RECOVERY_CONTINUATION_PARENT_LATEST,
+            "checkpoint": V2_RECOVERY_CONTINUATION_PARENT_CHECKPOINT,
+            "recovery_record": V2_RECOVERY_CONTINUATION_PARENT_RECORD,
+        }
+    return {
+        "latest": root / "latest.json",
+        "checkpoint": root / "segment_0044/post_evaluation.pt",
+        "recovery_record": root / "v2_recovery_record.json",
+    }
+
+
+def _validate_v2_recovery_continuation_record(
+    record_path: Path,
+    *,
+    output_dir: Path | None = None,
+    config: object | None = None,
+    roster: object | None = None,
+    acceptance: object | None = None,
+) -> dict[str, object]:
+    from somaforce_cross.learning.actor_critic import ResidualActorCritic
+    from somaforce_cross.learning.joint_runner import (
+        load_learning_acceptance_config,
+        load_phase6_config,
+        load_phase6_task_roster,
+        restore_learning_checkpoint,
+    )
+
+    if config is None:
+        config = load_phase6_config(PHASE6_CONFIG)
+    if roster is None:
+        roster = load_phase6_task_roster(PHASE6_ROSTER, phase6_config=config)
+    if acceptance is None:
+        acceptance = load_learning_acceptance_config(PHASE6_LEARNING_CONFIG)
+    record = _read_json(record_path)
+    required = {
+        "checkpoint",
+        "changed_paths",
+        "contracts",
+        "endpoint",
+        "invariants",
+        "new_source_manifest",
+        "new_source_manifest_sha256",
+        "old_source_manifest",
+        "old_source_manifest_sha256",
+        "parent",
+        "recovery_contract_version",
+        "status",
+    }
+    if not isinstance(record, Mapping) or set(record) != required:
+        raise ValueError("V2 recovery continuation record schema is invalid")
+    if (
+        record["recovery_contract_version"] != V2_RECOVERY_CONTINUATION_CONTRACT
+        or record["status"] != "ok"
+        or record["contracts"]
+        != _v2_recovery_contracts(config=config, roster=roster, acceptance=acceptance)
+    ):
+        raise ValueError("V2 recovery continuation contract binding is invalid")
+    endpoint = _require_exact_mapping(
+        record["endpoint"],
+        name="v2_recovery_continuation.endpoint",
+        expected={"iteration", "next_segment", "segment", "stage"},
+    )
+    if endpoint != {
+        "iteration": V2_RECOVERY_CONTINUATION_ITERATION,
+        "next_segment": V2_RECOVERY_CONTINUATION_NEXT_SEGMENT,
+        "segment": V2_RECOVERY_CONTINUATION_SEGMENT,
+        "stage": V2_RECOVERY_CONTINUATION_STAGE,
+    }:
+        raise ValueError("V2 recovery continuation endpoint is invalid")
+    parent = _require_exact_mapping(
+        record["parent"],
+        name="v2_recovery_continuation.parent",
+        expected={"checkpoint", "latest", "recovery_record"},
+    )
+    root = V2_RECOVERY_CONTINUATION_SOURCE_ROOT.resolve()
+    expected_parent = _v2_recovery_continuation_parent(root)
+    for name, expected_path in expected_parent.items():
+        item = _require_exact_mapping(
+            parent[name],
+            name=f"v2_recovery_continuation.parent.{name}",
+            expected={"path", "sha256"},
+        )
+        path = Path(str(item["path"]))
+        if (
+            path.resolve() != expected_path.resolve()
+            or not path.is_file()
+            or _sha256(path) != item["sha256"]
+        ):
+            raise ValueError("V2 recovery continuation parent binding is invalid")
+    latest = _read_json(expected_parent["latest"])
+    if latest is None:
+        raise ValueError("V2 recovery continuation latest pointer is missing")
+    latest_required = {
+        "actual_global_transitions",
+        "checkpoint",
+        "checkpoint_sha256",
+        "curriculum_stage",
+        "iteration",
+        "logical_crossing",
+        "segment",
+        "source_manifest_sha256",
+    }
+    if set(latest) != latest_required:
+        raise ValueError("V2 recovery continuation latest pointer schema is invalid")
+    old_checkpoint = expected_parent["checkpoint"]
+    old_value = torch.load(old_checkpoint, map_location="cpu", weights_only=False)
+    if not isinstance(old_value, Mapping):
+        raise ValueError("V2 recovery continuation parent checkpoint is invalid")
+    old_payload = dict(old_value)
+    old_manifest = old_payload.get("source_manifest")
+    if not isinstance(old_manifest, Mapping):
+        raise ValueError("V2 recovery continuation parent manifest is invalid")
+    if (
+        latest["checkpoint"] != str(old_checkpoint)
+        or latest["checkpoint_sha256"] != parent["checkpoint"]["sha256"]
+        or latest["iteration"] != V2_RECOVERY_CONTINUATION_ITERATION
+        or latest["segment"] != V2_RECOVERY_CONTINUATION_SEGMENT
+        or latest["curriculum_stage"] != V2_RECOVERY_CONTINUATION_STAGE
+        or latest["source_manifest_sha256"] != _source_manifest_digest(old_manifest)
+        or (root / "segment_0045").exists()
+    ):
+        raise ValueError("V2 recovery continuation parent latest binding is invalid")
+    progress = _read_json(root / "progress.json")
+    if (
+        progress is None
+        or progress.get("current_iteration") != V2_RECOVERY_CONTINUATION_ITERATION
+        or progress.get("segment") != V2_RECOVERY_CONTINUATION_SEGMENT
+        or progress.get("stage") != V2_RECOVERY_CONTINUATION_STAGE
+        or progress.get("active_substage") != "segment_complete"
+        or progress.get("target_iteration") != 2442
+    ):
+        raise ValueError("V2 recovery continuation root closure is invalid")
+    current_manifest = _current_mainrunner_source_manifest()
+    script_path = str(REPO_ROOT / "scripts/train_phase6.py")
+    new_manifest = record["new_source_manifest"]
+    if (
+        not isinstance(new_manifest, Mapping)
+        or set(old_manifest) != set(current_manifest)
+        or set(new_manifest) != set(current_manifest)
+        or dict(new_manifest) != current_manifest
+        or record["old_source_manifest"] != dict(old_manifest)
+        or record["old_source_manifest_sha256"] != _source_manifest_digest(old_manifest)
+        or record["new_source_manifest_sha256"] != _source_manifest_digest(new_manifest)
+        or record["changed_paths"] != [script_path]
+        or any(
+            old_manifest[key] != new_manifest[key]
+            for key in old_manifest
+            if key != script_path
+        )
+        or old_manifest[script_path] == new_manifest[script_path]
+    ):
+        raise ValueError("V2 recovery continuation source delta is not script-only")
+    checkpoint = _require_exact_mapping(
+        record["checkpoint"],
+        name="v2_recovery_continuation.checkpoint",
+        expected={"input_path", "input_sha256", "output_path", "output_sha256"},
+    )
+    input_path = Path(str(checkpoint["input_path"]))
+    output_path = Path(str(checkpoint["output_path"]))
+    expected_dir = root / "segment_0044/recovery_resume" / record_path.parent.name
+    if (
+        input_path.resolve() != old_checkpoint.resolve()
+        or not input_path.is_file()
+        or _sha256(input_path) != checkpoint["input_sha256"]
+        or output_path.resolve()
+        != (expected_dir / "post_evaluation_continuation.pt").resolve()
+        or record_path.resolve()
+        != (expected_dir / "v2_recovery_continuation_record.json").resolve()
+        or not output_path.is_file()
+        or _sha256(output_path) != checkpoint["output_sha256"]
+        or (output_dir is not None and output_dir.resolve() != root)
+    ):
+        raise ValueError("V2 recovery continuation checkpoint binding is invalid")
+    old_policy = ResidualActorCritic()
+    old_optimizer = torch.optim.Adam(old_policy.parameters(), lr=3.0e-4)
+    old_restored = restore_learning_checkpoint(
+        input_path,
+        config=config,
+        roster=roster,
+        acceptance=acceptance,
+        policy=old_policy,
+        optimizer=old_optimizer,
+        source_manifest=dict(old_manifest),
+        expected_iteration=V2_RECOVERY_CONTINUATION_ITERATION,
+        device="cpu",
+    )
+    new_policy = ResidualActorCritic()
+    new_optimizer = torch.optim.Adam(new_policy.parameters(), lr=3.0e-4)
+    new_restored = restore_learning_checkpoint(
+        output_path,
+        config=config,
+        roster=roster,
+        acceptance=acceptance,
+        policy=new_policy,
+        optimizer=new_optimizer,
+        source_manifest=dict(new_manifest),
+        expected_iteration=V2_RECOVERY_CONTINUATION_ITERATION,
+        device="cpu",
+    )
+    expected_invariants = _v2_recovery_resume_rebind_invariants(
+        old_restored, new_restored
+    )
+    if (
+        old_restored.get("iteration") != V2_RECOVERY_CONTINUATION_ITERATION
+        or new_restored.get("iteration") != V2_RECOVERY_CONTINUATION_ITERATION
+        or old_restored.get("pre_evaluation") is not False
+        or new_restored.get("pre_evaluation") is not False
+        or old_restored.get("curriculum", {}).get("stage")
+        != V2_RECOVERY_CONTINUATION_STAGE
+        or new_restored.get("curriculum", {}).get("stage")
+        != V2_RECOVERY_CONTINUATION_STAGE
+        or old_payload.get("checkpoint_version") != "phase6_learning_checkpoint_v2"
+        or record["invariants"] != expected_invariants
+        or not all(expected_invariants.values())
+    ):
+        raise ValueError("V2 recovery continuation checkpoint invariants are invalid")
+    return dict(record)
+
+
+def _run_v2_recovery_continuation_rebind(args: argparse.Namespace) -> int:
+    from somaforce_cross.learning.actor_critic import ResidualActorCritic
+    from somaforce_cross.learning.joint_runner import (
+        atomic_learning_checkpoint,
+        load_learning_acceptance_config,
+        load_phase6_config,
+        load_phase6_task_roster,
+        restore_learning_checkpoint,
+    )
+
+    if not args.run_id or Path(args.run_id).name != args.run_id:
+        raise ValueError("V2 recovery continuation RUN_ID must be one path component")
+    root = args.recovery_root.resolve()
+    if root != V2_RECOVERY_CONTINUATION_SOURCE_ROOT.resolve():
+        raise ValueError("V2 recovery continuation is restricted to the admitted root")
+    config = load_phase6_config(args.phase6_config)
+    roster = load_phase6_task_roster(args.roster, phase6_config=config)
+    acceptance = load_learning_acceptance_config(args.acceptance_config)
+    target_dir = root / "segment_0044/recovery_resume" / args.run_id
+    work_dir = target_dir.with_name(f"{target_dir.name}.incomplete")
+    if target_dir.exists() or work_dir.exists():
+        raise FileExistsError("V2 recovery continuation refuses to overwrite evidence")
+    parent = _v2_recovery_continuation_parent(root)
+    latest = _read_json(parent["latest"])
+    source_checkpoint = parent["checkpoint"]
+    if latest is None or not source_checkpoint.is_file():
+        raise ValueError("V2 recovery continuation parent evidence is missing")
+    old_value = torch.load(source_checkpoint, map_location="cpu", weights_only=False)
+    if not isinstance(old_value, Mapping):
+        raise ValueError("V2 recovery continuation source checkpoint is invalid")
+    old_payload = dict(old_value)
+    old_manifest = old_payload.get("source_manifest")
+    current_manifest = _current_mainrunner_source_manifest(
+        args.phase6_config, args.roster, args.acceptance_config
+    )
+    script_path = str(REPO_ROOT / "scripts/train_phase6.py")
+    if (
+        not isinstance(old_manifest, Mapping)
+        or set(old_manifest) != set(current_manifest)
+        or any(
+            old_manifest[key] != current_manifest[key]
+            for key in old_manifest
+            if key != script_path
+        )
+        or old_manifest[script_path] == current_manifest[script_path]
+        or latest.get("segment") != V2_RECOVERY_CONTINUATION_SEGMENT
+        or latest.get("iteration") != V2_RECOVERY_CONTINUATION_ITERATION
+        or latest.get("curriculum_stage") != V2_RECOVERY_CONTINUATION_STAGE
+        or latest.get("checkpoint") != str(source_checkpoint)
+        or latest.get("checkpoint_sha256") != _sha256(source_checkpoint)
+        or (root / "segment_0045").exists()
+    ):
+        raise ValueError(
+            "V2 recovery continuation parent endpoint or source delta is invalid"
+        )
+    old_policy = ResidualActorCritic()
+    old_optimizer = torch.optim.Adam(old_policy.parameters(), lr=3.0e-4)
+    old_restored = restore_learning_checkpoint(
+        source_checkpoint,
+        config=config,
+        roster=roster,
+        acceptance=acceptance,
+        policy=old_policy,
+        optimizer=old_optimizer,
+        source_manifest=dict(old_manifest),
+        expected_iteration=V2_RECOVERY_CONTINUATION_ITERATION,
+        device="cpu",
+    )
+    if (
+        old_restored.get("pre_evaluation") is not False
+        or old_restored.get("curriculum", {}).get("stage")
+        != V2_RECOVERY_CONTINUATION_STAGE
+    ):
+        raise ValueError(
+            "V2 recovery continuation requires finalized 1374/C3 checkpoint"
+        )
+    new_payload = dict(old_payload)
+    new_payload["source_manifest"] = current_manifest
+    invariants = _v2_recovery_resume_rebind_invariants(old_payload, new_payload)
+    if not all(invariants.values()):
+        raise AssertionError(
+            "V2 recovery continuation altered protected checkpoint state"
+        )
+    work_dir.mkdir(parents=True)
+    output_checkpoint = work_dir / "post_evaluation_continuation.pt"
+    output_sha256 = atomic_learning_checkpoint(output_checkpoint, new_payload)
+    record_path = work_dir / "v2_recovery_continuation_record.json"
+    record = {
+        "checkpoint": {
+            "input_path": str(source_checkpoint),
+            "input_sha256": _sha256(source_checkpoint),
+            "output_path": str(target_dir / output_checkpoint.name),
+            "output_sha256": output_sha256,
+        },
+        "changed_paths": [script_path],
+        "contracts": _v2_recovery_contracts(
+            config=config, roster=roster, acceptance=acceptance
+        ),
+        "endpoint": {
+            "iteration": V2_RECOVERY_CONTINUATION_ITERATION,
+            "next_segment": V2_RECOVERY_CONTINUATION_NEXT_SEGMENT,
+            "segment": V2_RECOVERY_CONTINUATION_SEGMENT,
+            "stage": V2_RECOVERY_CONTINUATION_STAGE,
+        },
+        "invariants": invariants,
+        "new_source_manifest": current_manifest,
+        "new_source_manifest_sha256": _source_manifest_digest(current_manifest),
+        "old_source_manifest": dict(old_manifest),
+        "old_source_manifest_sha256": _source_manifest_digest(old_manifest),
+        "parent": {
+            name: {"path": str(path), "sha256": _sha256(path)}
+            for name, path in parent.items()
+        },
+        "recovery_contract_version": V2_RECOVERY_CONTINUATION_CONTRACT,
+        "status": "ok",
+    }
+    _atomic_json(record_path, record)
+    work_dir.rename(target_dir)
+    _validate_v2_recovery_continuation_record(
+        target_dir / record_path.name,
+        output_dir=root,
+        config=config,
+        roster=roster,
+        acceptance=acceptance,
+    )
+    print(
+        "PHASE6_V2_RECOVERY_CONTINUATION=" + json.dumps(record, sort_keys=True),
         flush=True,
     )
     return 0
@@ -11865,6 +12252,7 @@ def _run_production(args: argparse.Namespace) -> int:
     roster = load_phase6_task_roster(args.roster, phase6_config=config)
     v2 = config.payload["contract_version"] == "phase6_joint_training_v2"
     recovery_resume_record: Mapping[str, object] | None = None
+    recovery_continuation_record: Mapping[str, object] | None = None
     if args.cleanup_timeout_s <= 0:
         raise ValueError("cleanup timeout must be positive")
     if args.max_segments <= 0:
@@ -11877,6 +12265,7 @@ def _run_production(args: argparse.Namespace) -> int:
             or args.source_rebind is not None
             or args.v2_recovery_record is not None
             or args.v2_recovery_resume_record is not None
+            or args.v2_recovery_continuation_record is not None
         )
     ):
         raise ValueError(
@@ -11903,12 +12292,31 @@ def _run_production(args: argparse.Namespace) -> int:
             roster=roster,
             acceptance=acceptance,
         )
+    if args.v2_recovery_continuation_record is not None:
+        if (
+            not v2
+            or args.profile != "main"
+            or args.source_rebind is not None
+            or args.v2_recovery_record is not None
+            or args.v2_recovery_resume_record is not None
+        ):
+            raise ValueError(
+                "V2 recovery continuation record is valid only for V2 main without legacy recovery records"
+            )
+        recovery_continuation_record = _validate_v2_recovery_continuation_record(
+            args.v2_recovery_continuation_record,
+            output_dir=args.output_dir,
+            config=config,
+            roster=roster,
+            acceptance=acceptance,
+        )
     if not v2 and args.profile == "main" and args.source_rebind is None:
         raise ValueError("historical main production requires source rebind")
     if (
         v2
         and args.profile == "main"
         and recovery_resume_record is None
+        and recovery_continuation_record is None
         and args.resume.resolve() != args.output_dir.resolve()
     ):
         raise ValueError("V2 main must resume RUN_DIR/latest.json in the same RUN_DIR")
@@ -11952,7 +12360,23 @@ def _run_production(args: argparse.Namespace) -> int:
             raise ValueError(
                 "V2 recovery resume must bind the 1343/C2 rebound endpoint"
             )
-        if v2 and recovery_resume_record is None:
+        if recovery_continuation_record is not None and (
+            current_iteration != V2_RECOVERY_CONTINUATION_ITERATION
+            or stage != V2_RECOVERY_CONTINUATION_STAGE
+            or resume.resolve()
+            != Path(
+                str(recovery_continuation_record["checkpoint"]["output_path"])
+            ).resolve()
+            or current_iteration >= target_iteration
+        ):
+            raise ValueError(
+                "V2 recovery continuation must bind the 1374/C3 segment-44 endpoint"
+            )
+        if (
+            v2
+            and recovery_resume_record is None
+            and recovery_continuation_record is None
+        ):
             _validate_v2_pilot_run(
                 args.output_dir, checkpoint=resume, restored=restored
             )
@@ -11973,6 +12397,7 @@ def _run_production(args: argparse.Namespace) -> int:
         v2
         and args.profile == "main"
         and recovery_resume_record is None
+        and recovery_continuation_record is None
         and current_iteration != 31
     ):
         raise ValueError("V2 main may extend only the completed 31-iteration pilot")
@@ -13630,6 +14055,10 @@ def main(argv: list[str] | None = None) -> int:
     if values[mode_index] == "phase6-v2-recovery-resume-rebind":
         return _run_v2_recovery_resume_rebind(
             _v2_recovery_resume_rebind_parser().parse_args(values)
+        )
+    if values[mode_index] == "phase6-v2-recovery-continuation-rebind":
+        return _run_v2_recovery_continuation_rebind(
+            _v2_recovery_continuation_rebind_parser().parse_args(values)
         )
     if values[mode_index] in {"worker", "train-segment", "evaluate"}:
         return _worker_main(values)
