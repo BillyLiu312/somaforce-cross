@@ -46,7 +46,9 @@ def test_environment_loads_contract_and_isolates_c0_from_phase4_outputs() -> Non
     assert "EpisodeMetricLog(self.numeric_contract)" in init
     assert "if self.is_residual:" in init
     assert "self._evaluation_enabled = False" in init
+    assert "ForceSemanticPipeline" not in init
     assert "if not self.is_residual" in observations
+    assert "PolicyObservationBundle.with_zero_semantic_placeholder(" in observations
     assert "self.normalizer.normalize_policy(raw_policy)" in observations
     assert "self.normalizer.normalize_critic(" in observations
     assert "if not self.is_residual and not self._evaluation_enabled:" in rewards
@@ -60,10 +62,10 @@ def test_environment_actor_output_stays_deployable_and_critic_only_fields_are_se
 ):
     observations = _method_source("_assemble_observations")
     policy_prefix = observations[
-        observations.index("policy_assembly =") : observations.index("signals =")
+        observations.index("policy_bundle =") : observations.index("signals =")
     ]
 
-    assert "raw_policy = policy_assembly.bundle.flatten()" in policy_prefix
+    assert "raw_policy = policy_bundle.flatten()" in policy_prefix
     assert "self.normalizer.normalize_policy(raw_policy)" in policy_prefix
     for forbidden in (
         "build_object_state",
@@ -127,6 +129,66 @@ def test_episode_recording_uses_every_contract_declared_group_and_selected_reset
     assert "value[env_ids] = 0.0" in reset
     assert "if not self.is_residual and not self._evaluation_enabled:" in accumulate
     assert "self._episode_reward_steps += 1" in accumulate
+
+
+def test_episode_semantics_are_staged_from_policy_outputs_without_an_env_model() -> (
+    None
+):
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    environment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SomaForceResidualEnv"
+    )
+    method = next(
+        node
+        for node in environment.body
+        if isinstance(node, ast.FunctionDef) and node.name == "record_policy_semantics"
+    )
+    probe_node = ast.ClassDef(
+        name="_Probe", bases=[], keywords=[], body=[method], decorator_list=[]
+    )
+    namespace = {"torch": torch}
+    exec(
+        compile(
+            ast.fix_missing_locations(ast.Module(body=[probe_node], type_ignores=[])),
+            str(SOURCE_PATH),
+            "exec",
+        ),
+        namespace,
+    )
+    probe = namespace["_Probe"]()
+    probe.is_residual = True
+    probe._evaluation_enabled = False
+    probe.num_envs = 2
+    # Isaac Lab's DirectRLEnv.device property returns a string.
+    probe.device = "cpu"
+    probe._pending_semantic_entropy = torch.zeros(2)
+    probe._pending_semantic_kl = torch.zeros(2)
+    probe._policy_semantic_ready = torch.zeros(2, dtype=torch.bool)
+    probe._policy_semantic_reporting_enabled = False
+
+    p_dir = torch.softmax(torch.randn(2, 13), dim=-1)
+    p_mag = torch.softmax(torch.randn(2, 5), dim=-1)
+    target = torch.cat((torch.zeros(2, 12), p_dir, p_mag, torch.ones(2, 1)), dim=-1)
+    probe.record_policy_semantics(p_dir, p_mag, target)
+
+    expected_entropy = -0.5 * (
+        (p_dir * p_dir.clamp_min(1.0e-8).log()).sum(dim=-1)
+        + (p_mag * p_mag.clamp_min(1.0e-8).log()).sum(dim=-1)
+    )
+    assert torch.allclose(probe._pending_semantic_entropy, expected_entropy)
+    assert torch.allclose(probe._pending_semantic_kl, torch.zeros(2), atol=1.0e-6)
+    assert torch.all(probe._policy_semantic_ready)
+    assert probe._policy_semantic_reporting_enabled is True
+
+    try:
+        probe.record_policy_semantics(p_dir, p_mag, target)
+    except RuntimeError as exc:
+        assert "twice" in str(exc)
+    else:
+        raise AssertionError("duplicate policy semantics were not rejected")
 
 
 def test_evaluation_schedule_owner_advances_each_row_after_auto_reset() -> None:
@@ -288,6 +350,8 @@ def test_evaluation_completion_records_preserve_business_fields() -> None:
             "_episode_legs_residual",
             "_episode_semantic_entropy",
             "_episode_semantic_kl",
+            "_pending_semantic_entropy",
+            "_pending_semantic_kl",
             "_episode_stability_margin",
             "_episode_return",
             "_evaluation_residual_norm_mass",
@@ -295,14 +359,13 @@ def test_evaluation_completion_records_preserve_business_fields() -> None:
         ):
             setattr(value, name, torch.zeros(3))
         value._evaluation_transition_count = torch.zeros(3, dtype=torch.long)
+        value._policy_semantic_ready = torch.ones(3, dtype=torch.bool)
+        value._policy_semantic_reporting_enabled = True
         value._episode_raw_sums = {"x": torch.zeros(3)}
         value._episode_weighted_sums = {"x": torch.zeros(3)}
         value.authority = SimpleNamespace(ARMS=[0], WAIST=[1], LEGS=list(range(2, 23)))
-        value.semantic_pipeline = lambda _: SimpleNamespace(
-            p_dir=torch.full((3, 13), 1 / 13), p_mag=torch.full((3, 5), 1 / 5)
-        )
-        value.wrist_history = SimpleNamespace(storage=torch.zeros(3, 2, 16, 14))
-        value._clean_wrench = torch.zeros(3, 2, 6)
+        value._pending_semantic_entropy.copy_(torch.tensor([1.0, 2.0, 3.0]))
+        value._pending_semantic_kl.copy_(torch.tensor([0.1, 0.2, 0.3]))
         value.episode_termination = _Termination()
         value._episode_active = torch.zeros(3, dtype=torch.bool)
         value._last_nonfinite = torch.ones(3, dtype=torch.bool)
@@ -338,6 +401,9 @@ def test_evaluation_completion_records_preserve_business_fields() -> None:
     assert torch.equal(
         probe._episode_reward_steps, torch.ones(3, dtype=torch.long)
     ) and torch.equal(probe._episode_raw_sums["x"], torch.ones(3))
+    assert torch.equal(probe._episode_semantic_entropy, torch.tensor([1.0, 2.0, 3.0]))
+    assert torch.allclose(probe._episode_semantic_kl, torch.tensor([0.1, 0.2, 0.3]))
+    assert not torch.any(probe._policy_semantic_ready)
     before = {
         name: getattr(probe, name).clone()
         for name in (

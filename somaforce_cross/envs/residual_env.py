@@ -24,7 +24,7 @@ from somaforce_cross.envs.numeric_contract import (
 )
 from somaforce_cross.envs.observations import (
     CriticObservationBundle,
-    ForceSemanticPipeline,
+    PolicyObservationBundle,
     build_semantic_target_bundle,
 )
 from somaforce_cross.envs.reset import EpisodeResetCoordinator
@@ -490,7 +490,6 @@ class SomaForceResidualEnv(DirectRLEnv):
             ),
         ).to(self.device)
         self.authority = PerJointAuthority(device=self.device)
-        self.semantic_pipeline = ForceSemanticPipeline().to(self.device).eval()
         self.normalizer: FixedFieldNormalizer | None = None
         self.reward_manager: Phase4B5RewardManager | None = None
         self.episode_termination: EpisodeTermination | None = None
@@ -566,6 +565,12 @@ class SomaForceResidualEnv(DirectRLEnv):
         self._episode_legs_residual = torch.zeros(self.num_envs, device=self.device)
         self._episode_semantic_entropy = torch.zeros(self.num_envs, device=self.device)
         self._episode_semantic_kl = torch.zeros(self.num_envs, device=self.device)
+        self._pending_semantic_entropy = torch.zeros(self.num_envs, device=self.device)
+        self._pending_semantic_kl = torch.zeros(self.num_envs, device=self.device)
+        self._policy_semantic_ready = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.bool
+        )
+        self._policy_semantic_reporting_enabled = False
         self._episode_stability_margin = torch.zeros(self.num_envs, device=self.device)
         # These diagnostics exist only for paired evaluation evidence.  They are
         # deliberately outside EpisodeMetricLog and the ordinary transition schema.
@@ -757,6 +762,75 @@ class SomaForceResidualEnv(DirectRLEnv):
         self.curriculum.stage = stage
         self.scaffold_stage = stage
 
+    def record_policy_semantics(
+        self,
+        p_dir: torch.Tensor,
+        p_mag: torch.Tensor,
+        semantic_target: torch.Tensor,
+    ) -> None:
+        """Stage checkpoint-owned policy semantics for the next reward step."""
+        if not self.is_residual and not self._evaluation_enabled:
+            return
+        environment_device = torch.device(self.device)
+        for value, width, name in ((p_dir, 13, "p_dir"), (p_mag, 5, "p_mag")):
+            if (
+                not isinstance(value, torch.Tensor)
+                or value.dtype != torch.float32
+                or value.device != environment_device
+                or value.shape != (self.num_envs, width)
+                or not torch.isfinite(value).all()
+                or torch.any(value < 0.0)
+            ):
+                raise ValueError(f"{name} is not a valid policy semantic distribution")
+            if not torch.allclose(
+                value.sum(dim=-1),
+                torch.ones(self.num_envs, device=self.device),
+                atol=1.0e-5,
+                rtol=1.0e-5,
+            ):
+                raise ValueError(f"{name} rows must sum to one")
+        if (
+            not isinstance(semantic_target, torch.Tensor)
+            or semantic_target.dtype != torch.float32
+            or semantic_target.device != environment_device
+            or semantic_target.shape != (self.num_envs, 31)
+            or not torch.isfinite(semantic_target).all()
+        ):
+            raise ValueError("semantic_target must be finite float32 [num_envs,31]")
+        if torch.any(self._policy_semantic_ready):
+            raise RuntimeError("policy semantics were recorded twice before one step")
+
+        target_dir = semantic_target[:, 12:25]
+        target_mag = semantic_target[:, 25:30]
+        for target, name in ((target_dir, "target_dir"), (target_mag, "target_mag")):
+            if torch.any(target < 0.0) or not torch.allclose(
+                target.sum(dim=-1),
+                torch.ones(self.num_envs, device=self.device),
+                atol=1.0e-5,
+                rtol=1.0e-5,
+            ):
+                raise ValueError(f"{name} is not a valid semantic target")
+
+        eps = 1.0e-8
+        entropy = -0.5 * (
+            (p_dir * p_dir.clamp_min(eps).log()).sum(dim=-1)
+            + (p_mag * p_mag.clamp_min(eps).log()).sum(dim=-1)
+        )
+        kl = 0.5 * (
+            (
+                target_dir.clamp_min(eps)
+                * (target_dir.clamp_min(eps).log() - p_dir.clamp_min(eps).log())
+            ).sum(dim=-1)
+            + (
+                target_mag.clamp_min(eps)
+                * (target_mag.clamp_min(eps).log() - p_mag.clamp_min(eps).log())
+            ).sum(dim=-1)
+        )
+        self._pending_semantic_entropy.copy_(entropy)
+        self._pending_semantic_kl.copy_(kl)
+        self._policy_semantic_ready.fill_(True)
+        self._policy_semantic_reporting_enabled = True
+
     def _reset_episode_metrics(self, env_ids: torch.Tensor) -> None:
         if (
             not self.is_residual and not self._evaluation_enabled
@@ -789,12 +863,15 @@ class SomaForceResidualEnv(DirectRLEnv):
             self._episode_legs_residual,
             self._episode_semantic_entropy,
             self._episode_semantic_kl,
+            self._pending_semantic_entropy,
+            self._pending_semantic_kl,
             self._episode_stability_margin,
             self._evaluation_residual_norm_mass,
             self._evaluation_contact_residual_norm_mass,
             self._evaluation_transition_count,
         ):
             value[env_ids] = 0.0
+        self._policy_semantic_ready[env_ids] = False
         self._last_nonfinite[env_ids] = False
         self._last_terminated[env_ids] = False
         self._last_time_outs[env_ids] = False
@@ -1408,45 +1485,15 @@ class SomaForceResidualEnv(DirectRLEnv):
                 residual_norm * contact_indicator
             )
             self._evaluation_transition_count += 1
-        with torch.inference_mode():
-            semantic = self.semantic_pipeline(self.wrist_history.storage)
-            target = build_semantic_target_bundle(
-                self._clean_wrench,
-                signals.contact_truth,
-                torch.tensor(
-                    self.numeric_contract.payload["sensor"]["fixed_scales"]["force_N"],
-                    device=self.device,
-                ),
-                torch.tensor(
-                    self.numeric_contract.payload["sensor"]["fixed_scales"][
-                        "moment_Nm"
-                    ],
-                    device=self.device,
-                ),
-            )
-        eps = torch.finfo(torch.float32).eps
-        entropy = -0.5 * (
-            (semantic.p_dir * semantic.p_dir.clamp_min(eps).log()).sum(dim=-1)
-            + (semantic.p_mag * semantic.p_mag.clamp_min(eps).log()).sum(dim=-1)
-        )
-        kl = 0.5 * (
-            (
-                target.p_dir_target
-                * (
-                    target.p_dir_target.clamp_min(eps).log()
-                    - semantic.p_dir.clamp_min(eps).log()
-                )
-            ).sum(dim=-1)
-            + (
-                target.p_mag_target
-                * (
-                    target.p_mag_target.clamp_min(eps).log()
-                    - semantic.p_mag.clamp_min(eps).log()
-                )
-            ).sum(dim=-1)
-        )
-        self._episode_semantic_entropy += entropy
-        self._episode_semantic_kl += kl
+        if self._policy_semantic_reporting_enabled and not torch.all(
+            self._policy_semantic_ready
+        ):
+            raise RuntimeError("policy semantics must be recorded before every step")
+        self._episode_semantic_entropy += self._pending_semantic_entropy
+        self._episode_semantic_kl += self._pending_semantic_kl
+        self._pending_semantic_entropy.zero_()
+        self._pending_semantic_kl.zero_()
+        self._policy_semantic_ready.zero_()
         self._episode_stability_margin += signals.stability_margin.squeeze(1)
         for name, value in reward.raw_terms.items():
             self._episode_raw_sums[name] += value
@@ -1487,13 +1534,13 @@ class SomaForceResidualEnv(DirectRLEnv):
     def _assemble_observations(self) -> dict[str, torch.Tensor]:
         self._ensure_current_nominal()
         with torch.inference_mode():
-            policy_assembly = self.semantic_pipeline.assemble_policy_observation(
-                self.wrist_history.storage,
-                self.adapter.proprio(),
-                self.nominal_action_history.storage,
-                self.executed_action_history.storage[:, :, 0],
+            policy_bundle = PolicyObservationBundle.with_zero_semantic_placeholder(
+                wrist_tokens=self.wrist_history.storage,
+                proprio=self.adapter.proprio(),
+                a_nom_history=self.nominal_action_history.storage,
+                previous_a_total=self.executed_action_history.storage[:, :, 0],
             )
-            raw_policy = policy_assembly.bundle.flatten()
+            raw_policy = policy_bundle.flatten()
             policy = (
                 raw_policy
                 if not self.is_residual

@@ -25,6 +25,28 @@ from somaforce_cross.learning.semantic_ppo import SemanticPPO
 RSL_RL_VERSION = "3.0.1"
 
 
+def record_policy_semantics(
+    env: Any,
+    policy: ResidualActorCritic,
+    observations: Mapping[str, torch.Tensor],
+) -> None:
+    """Send the policy-owned rollout semantics to environment-only logging."""
+    recorder = getattr(env, "record_policy_semantics", None)
+    if recorder is None:
+        return
+    if not callable(recorder):
+        raise TypeError("environment record_policy_semantics must be callable")
+    semantic_target = observations.get("semantic_target")
+    if not isinstance(semantic_target, torch.Tensor):
+        raise TypeError("semantic_target is required for semantic episode logging")
+    semantic = policy.last_semantic_output
+    recorder(
+        semantic.p_dir.detach(),
+        semantic.p_mag.detach(),
+        semantic_target.detach(),
+    )
+
+
 def _load_rsl_storage_class() -> type[Any]:
     """Load only the pinned RSL storage API after the Isaac app is active."""
     try:
@@ -125,6 +147,9 @@ class Phase5Runner:
                     actions = self.algorithm.act(observations)
                     values = self.algorithm.transition.values
                     log_prob = self.algorithm.transition.actions_log_prob
+                    record_policy_semantics(
+                        self.env, self.algorithm.policy, observations
+                    )
                 if values is None or log_prob is None:
                     raise AssertionError("PPO act did not record value/log probability")
                 self._finite("action", actions)
